@@ -1,4 +1,4 @@
-//! Default frontend: a native egui window. As of M4a it is transport-agnostic —
+//! Default frontend: a native egui window. As of M4a it is transport-agnostic,
 //! it sends `Command`s and renders `ServerEvent`s, with no direct dependency on
 //! the backend. Native bundles the backend in-process; the web client (M4b)
 //! speaks the same protocol over a WebSocket.
@@ -818,7 +818,7 @@ impl ClaudoApp {
 /// egui only bundles Latin glyphs, so Japanese renders as blank boxes. The font
 /// is embedded in the binary rather than read from the system, so it works
 /// identically on any machine and in the browser (no fontconfig, no download).
-/// BIZ UDPGothic, SIL OFL — see assets/fonts/OFL.txt.
+/// BIZ UDPGothic, SIL OFL: see assets/fonts/OFL.txt.
 const JP_FONT: &[u8] = include_bytes!("../../../../assets/fonts/BIZUDPGothic-Regular.ttf");
 
 fn install_jp_font(ctx: &egui::Context) {
@@ -838,7 +838,7 @@ fn install_jp_font(ctx: &egui::Context) {
 const FADE_CHARS: f32 = 55.0;
 
 /// Render streaming text with a soft leading edge: each word fades in as the
-/// reveal cursor passes it, instead of snapping into place. Plain text only —
+/// reveal cursor passes it, instead of snapping into place. Plain text only,
 /// the finished message is re-rendered as markdown once the turn completes.
 fn faded_text(ui: &mut egui::Ui, text: &str, reveal: f32) {
     let base = ui.visuals().text_color();

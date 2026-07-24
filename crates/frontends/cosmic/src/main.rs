@@ -570,7 +570,7 @@ mod app {
                             (Some(_), true) => "error",
                         };
                         lines.push(
-                            widget::text(format!("[tool] {} — {}", tc.name, status))
+                            widget::text(format!("[tool] {}: {}", tc.name, status))
                                 .size(body)
                                 .into(),
                         );
