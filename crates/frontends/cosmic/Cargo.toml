@@ -1,0 +1,21 @@
+[package]
+name = "claudo-cosmic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "claudo-cosmic"
+path = "src/main.rs"
+
+# The libcosmic frontend is opt-in: `cargo build -p claudo-cosmic --features cosmic`.
+# libcosmic (and its heavy iced-fork tree) is only pulled when the feature is on,
+# so a plain `cargo build --workspace` never compiles it.
+[features]
+default = []
+cosmic = ["dep:libcosmic"]
+
+[dependencies]
+claudo-protocol.workspace = true
+claudo-transport.workspace = true
+libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }

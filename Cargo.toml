@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/core",
+    "crates/transport",
+    "crates/daemon",
+    "crates/frontends/egui",
+    "crates/frontends/cosmic",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+# Optimize dependencies even in dev builds. iced/cosmic-text text shaping is
+# unusably slow unoptimized, which made debug runs of the cosmic frontend feel
+# laggy. Own crates stay at opt-level 0 for fast incremental builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[workspace.dependencies]
+claudo-protocol = { path = "crates/protocol" }
+claudo-core = { path = "crates/core" }
+claudo-transport = { path = "crates/transport" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
