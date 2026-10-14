@@ -244,14 +244,18 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                     for b in arr {
                         match b.get("type").and_then(Value::as_str) {
                             Some("text") => {
-                                if let Some(t) = b.get("text").and_then(Value::as_str) {
-                                    if !t.is_empty() {
-                                        items.push(Item::Assistant(t.to_string()));
-                                    }
+                                if let Some(t) = b.get("text").and_then(Value::as_str)
+                                    && !t.is_empty()
+                                {
+                                    items.push(Item::Assistant(t.to_string()));
                                 }
                             }
                             Some("tool_use") => items.push(Item::Tool(ToolCall {
-                                call_id: b.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                                call_id: b
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
                                 name: b
                                     .get("name")
                                     .and_then(Value::as_str)

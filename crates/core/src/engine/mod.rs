@@ -4,4 +4,4 @@
 
 pub mod cli;
 
-pub use cli::{run_turn, EngineEvent};
+pub use cli::{EngineEvent, Session, SessionConfig};

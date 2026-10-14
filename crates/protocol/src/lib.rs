@@ -58,31 +58,33 @@ impl Profile {
     pub fn tooltip(self) -> &'static str {
         match self {
             Profile::Safe => "Tools that need approval are denied. Read-only tools still work.",
-            Profile::AcceptEdits => "File edits are auto-approved. Shell and other tools are still denied.",
-            Profile::FullAuto => "Every tool is auto-approved. Claude can run anything in the working directory.",
+            Profile::AcceptEdits => {
+                "File edits are auto-approved. Shell and other tools are still denied."
+            }
+            Profile::FullAuto => {
+                "Every tool is auto-approved. Claude can run anything in the working directory."
+            }
         }
     }
 }
 
 /// A `--model` value: an alias (`opus`) or a specific version
-/// (`claude-opus-4-7`). Empty string means "use the CLI's configured model".
+/// (`claude-sonnet-5-5`). Empty string means "use the CLI's configured model".
 /// The frontend offers presets plus a free-text field so any version works.
 pub const MODEL_PRESETS: &[(&str, &str)] = &[
-    ("Opus 5 (default)", DEFAULT_MODEL),
+    ("Opus 5.5 (default)", DEFAULT_MODEL),
+    ("Sonnet 5.5", "claude-sonnet-5-5"),
+    ("Haiku 5.5", "claude-haiku-5-5"),
+    ("Fable 5.1", "claude-fable-5-1"),
     ("Opus (latest alias)", "opus"),
     ("Sonnet (latest alias)", "sonnet"),
     ("Haiku (latest alias)", "haiku"),
     ("Fable (latest alias)", "fable"),
-    ("Opus 4.8", "claude-opus-4-8"),
-    ("Opus 4.7", "claude-opus-4-7"),
-    ("Sonnet 5", "claude-sonnet-5"),
-    ("Haiku 4.5", "claude-haiku-4-5"),
-    ("Fable 5", "claude-fable-5"),
     ("CLI default (unset)", ""),
 ];
 
 /// Model used when the user hasn't chosen one.
-pub const DEFAULT_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 /// Context usage for the last turn of a conversation, reported by the CLI.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -229,12 +231,21 @@ impl Default for Settings {
 pub enum Command {
     GetStatus,
     GetSettings,
-    UpdateSettings { settings: Settings },
+    UpdateSettings {
+        settings: Settings,
+    },
     ListConversations,
-    OpenConversation { id: ConversationId },
-    SetOverrides { id: ConversationId, overrides: Overrides },
+    OpenConversation {
+        id: ConversationId,
+    },
+    SetOverrides {
+        id: ConversationId,
+        overrides: Overrides,
+    },
     NewScratch,
-    NewAttached { path: String },
+    NewAttached {
+        path: String,
+    },
     SendMessage {
         conversation_id: ConversationId,
         text: String,

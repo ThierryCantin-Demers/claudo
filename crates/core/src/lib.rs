@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod engine;
+pub mod live;
 pub mod sessions;
 pub mod settings;
 pub mod status;

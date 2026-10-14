@@ -11,11 +11,13 @@ use std::sync::{Arc, Mutex};
 use claudo_protocol::{Command, ConversationInfo, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{run_turn, EngineEvent};
-use crate::sessions::{load_transcript, Store};
+use crate::engine::{EngineEvent, SessionConfig};
+use crate::live::{IDLE_TIMEOUT, LiveSessions};
+use crate::sessions::{Store, load_transcript};
 
 pub struct Backend {
     store: Arc<Mutex<Store>>,
+    live: LiveSessions,
     events: UnboundedSender<ServerEvent>,
 }
 
@@ -23,6 +25,7 @@ impl Backend {
     pub fn new(events: UnboundedSender<ServerEvent>) -> Self {
         Self {
             store: Arc::new(Mutex::new(Store::load())),
+            live: LiveSessions::new(IDLE_TIMEOUT),
             events,
         }
     }
@@ -31,8 +34,8 @@ impl Backend {
         let _ = self.events.send(event);
     }
 
-    /// Handle one command. Returns quickly; `SendMessage` runs the turn on a
-    /// worker thread and streams events as they arrive.
+    /// Handle one command. Returns quickly; `SendMessage` hands the turn to the
+    /// conversation's `claude` process and streams its events from a worker thread.
     pub fn handle(&self, cmd: Command) {
         match cmd {
             Command::GetStatus => self.emit(ServerEvent::Status(crate::detect_system())),
@@ -98,10 +101,10 @@ impl Backend {
                 let (items, ai_title) = load_transcript(sid);
                 if let Some(title) = ai_title {
                     let mut store = self.store.lock().unwrap();
-                    if let Some(meta) = store.get_mut(&id) {
-                        if !meta.attached {
-                            meta.title = title;
-                        }
+                    if let Some(meta) = store.get_mut(&id)
+                        && !meta.attached
+                    {
+                        meta.title = title;
                     }
                     store.save();
                 }
@@ -139,27 +142,37 @@ impl Backend {
             }
         };
 
+        let config = SessionConfig {
+            cwd,
+            profile,
+            model: (!model.trim().is_empty()).then_some(model),
+            effort: effort.cli().map(str::to_owned),
+        };
+        let turn = match self
+            .live
+            .send_turn(&conversation_id, config, session_id.as_deref(), &text)
+        {
+            Ok(turn) => turn,
+            Err(detail) => {
+                self.emit(ServerEvent::Error { detail });
+                return;
+            }
+        };
+
         let events = self.events.clone();
         let store = self.store.clone();
 
         std::thread::spawn(move || {
-            let mut latest = session_id.clone();
-            let model_arg = (!model.trim().is_empty()).then_some(model.as_str());
-            for ev in run_turn(
-                &cwd,
-                session_id.as_deref(),
-                &text,
-                profile,
-                model_arg,
-                effort.cli(),
-            ) {
+            let mut latest = session_id;
+            for ev in turn {
                 match ev {
                     EngineEvent::Started { session_id } => {
                         latest = Some(session_id.clone());
-                        store
-                            .lock()
-                            .unwrap()
-                            .record_turn(&conversation_id, Some(&session_id), &text);
+                        store.lock().unwrap().record_turn(
+                            &conversation_id,
+                            Some(&session_id),
+                            &text,
+                        );
                         let _ = events.send(ServerEvent::Started {
                             conversation_id: conversation_id.clone(),
                             session_id,

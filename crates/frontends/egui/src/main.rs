@@ -6,10 +6,10 @@
 use std::time::Duration;
 
 use claudo_protocol::{
-    Command, ConversationInfo, Effort, Item, Overrides, Profile, ServerEvent, Settings,
-    SystemStatus, ToolCall, MODEL_PRESETS,
+    Command, ConversationInfo, Effort, Item, MODEL_PRESETS, Overrides, Profile, ServerEvent,
+    Settings, SystemStatus, ToolCall,
 };
-use claudo_transport::{connect, Transport};
+use claudo_transport::{Transport, connect};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -307,16 +307,15 @@ impl ClaudoApp {
                     content,
                     is_error,
                 } => {
-                    if self.is_current(&conversation_id) {
-                        if let Some(Item::Tool(tc)) = self
+                    if self.is_current(&conversation_id)
+                        && let Some(Item::Tool(tc)) = self
                             .items
                             .iter_mut()
                             .rev()
                             .find(|it| matches!(it, Item::Tool(t) if t.call_id == call_id))
-                        {
-                            tc.result = Some(content);
-                            tc.is_error = is_error;
-                        }
+                    {
+                        tc.result = Some(content);
+                        tc.is_error = is_error;
                     }
                 }
 
@@ -386,7 +385,8 @@ impl eframe::App for ClaudoApp {
         match action {
             Action::Open(id) => self.open(id),
             Action::NewScratch => self.transport.send(Command::NewScratch),
-            Action::PickFolder => {
+            Action::PickFolder =>
+            {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     self.transport.send(Command::NewAttached {
@@ -511,7 +511,7 @@ impl ClaudoApp {
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut self.settings.model)
-                            .hint_text("or a version, e.g. claude-opus-4-7")
+                            .hint_text("or a version, e.g. claude-sonnet-5-5")
                             .desired_width(260.0),
                     )
                     .changed()
@@ -555,9 +555,11 @@ impl ClaudoApp {
                     ui.separator();
                     ui.strong("This conversation");
                     ui.label(
-                        egui::RichText::new("Overrides the global defaults above, for this conversation only.")
-                            .weak()
-                            .small(),
+                        egui::RichText::new(
+                            "Overrides the global defaults above, for this conversation only.",
+                        )
+                        .weak()
+                        .small(),
                     );
                     ui.add_space(6.0);
                     overrides_changed = self.override_controls(ui);
@@ -568,13 +570,11 @@ impl ClaudoApp {
         if changed {
             self.save_settings();
         }
-        if overrides_changed {
-            if let Some(id) = self.current.clone() {
-                self.transport.send(Command::SetOverrides {
-                    id,
-                    overrides: self.overrides.clone(),
-                });
-            }
+        if overrides_changed && let Some(id) = self.current.clone() {
+            self.transport.send(Command::SetOverrides {
+                id,
+                overrides: self.overrides.clone(),
+            });
         }
     }
 
@@ -695,7 +695,12 @@ impl ClaudoApp {
                     } else {
                         model
                     };
-                    ui.weak(format!("{} · {} · {}", model, effort.label(), profile.label()));
+                    ui.weak(format!(
+                        "{} · {} · {}",
+                        model,
+                        effort.label(),
+                        profile.label()
+                    ));
                     if !self.overrides.is_empty() {
                         ui.label(egui::RichText::new("(override)").small().color(AMBER))
                             .on_hover_text("This conversation overrides some global settings.");
@@ -728,7 +733,10 @@ impl ClaudoApp {
 
                 ui.horizontal(|ui| {
                     let can_send = !streaming && !self.input.trim().is_empty();
-                    if ui.add_enabled(can_send, egui::Button::new("Send")).clicked() {
+                    if ui
+                        .add_enabled(can_send, egui::Button::new("Send"))
+                        .clicked()
+                    {
                         self.send();
                     }
                     if streaming {
@@ -829,7 +837,11 @@ fn install_jp_font(ctx: &egui::Context) {
     );
     // Fallback (appended, not prepended) so Latin keeps egui's default face.
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push("jp".to_owned());
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("jp".to_owned());
     }
     ctx.set_fonts(fonts);
 }
@@ -920,9 +932,9 @@ const GREEN: egui::Color32 = egui::Color32::from_rgb(0x3f, 0xb9, 0x50);
 
 fn tool_card(ui: &mut egui::Ui, tc: &ToolCall) {
     let color = match (&tc.result, tc.is_error) {
-        (None, _) => AMBER,           // running
-        (Some(_), false) => GREEN,    // ok
-        (Some(_), true) => RED,       // error / denied
+        (None, _) => AMBER,        // running
+        (Some(_), false) => GREEN, // ok
+        (Some(_), true) => RED,    // error / denied
     };
     ui.horizontal(|ui| {
         // Painted dot instead of a font glyph, so it renders on any system.

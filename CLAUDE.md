@@ -76,13 +76,19 @@ toggle that pretends otherwise.
 
 ## CLI facts worth knowing
 
-One turn:
+One process per conversation, turns written to stdin as JSONL
+(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`):
 
 ```bash
-claude -p "<prompt>" --output-format stream-json --include-partial-messages --verbose \
+claude -p --input-format stream-json --output-format stream-json \
+  --include-partial-messages --verbose \
   --permission-mode <default|acceptEdits|bypassPermissions> \
   [--resume <session-id>] [--model <m>] [--effort <low|medium|high|xhigh|max>]
 ```
+
+Every turn emits its own `system`/`init` and ends with its own `result`; the process then
+waits for the next line. Closing stdin makes it finish the running turn and exit.
+`--resume` keeps the session id, so a respawned process continues the same transcript.
 
 Events consumed from the JSONL stream:
 
@@ -142,43 +148,35 @@ check the reveal animation before suspecting the backend.
 **Dev builds optimize dependencies** (`[profile.dev.package."*"] opt-level = 3`) because
 unoptimized text shaping made the cosmic frontend feel like it had a one second delay.
 
-## Possible change: persistent CLI process
+## Persistent CLI processes
 
-Today every turn spawns a fresh `claude -p` (spawn per turn, continuity via `--resume`).
-Keeping **one long lived `claude` process per conversation** is possible using the
-bidirectional streaming mode, with turns written as JSONL on a kept open stdin:
+Each conversation has at most one live `claude` process (`core/src/live.rs`), driven by
+`engine::Session`. Things to keep in mind when touching it:
 
-```bash
-claude --input-format stream-json --output-format stream-json --verbose
-```
+- **One turn at a time per process.** Events are attributed to the running turn by
+  position: a turn starts when its line is written and ends at its `result`. A second
+  `SendMessage` while one runs is refused, not queued.
+- **Flags are per process.** Profile, model and effort are command line flags, so a turn
+  with different ones replaces the process with a `--resume` one. Only an idle process is
+  replaced.
+- **Closing means closing stdin, never killing.** An idle process exits at once; one in
+  the middle of a turn finishes it first, so a dropped daemon connection does not cut
+  off an agent mid-edit. Processes idle for 30 minutes are closed this way.
+- **stderr is drained continuously**, keeping the last lines for the error message. A
+  long-lived process blocks once an unread pipe fills.
+- There is no cap on live processes beyond the idle timeout.
 
-This mode is confirmed to work. A user turn is one JSON line
-(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`)
-and events stream back in the format `engine/cli.rs` already parses.
-
-**It would cut latency, not tokens.** The Messages API is stateless, so every turn resends
+**This cuts latency, not tokens.** The Messages API is stateless, so every turn resends
 the conversation plus system prompt and tool definitions regardless of process lifetime.
 Prompt caching already absorbs the repeated overhead and works *across separate
-invocations*, because the cache is server side and keyed on the prompt prefix. Observed:
-about 12.2k `cache_creation_input_tokens` the first time, then about 5.9k
-`cache_read_input_tokens` on a later invocation, billed at roughly a tenth of the price.
+invocations*, because the cache is server side and keyed on the prompt prefix. The win is
+no Node startup per turn (most of the 2-3s before first token) and no re-init of config,
+MCP servers and CLAUDE.md discovery. It does **not** avoid the cache TTL expiring during
+slow conversations. To reduce tokens, shrink the context: fewer enabled tools, shorter
+conversations, a cheaper model for throwaway turns.
 
-So the real wins are: no Node startup per turn (most of the 2-3s before first token), no
-re-init of config, MCP servers and CLAUDE.md discovery. It does **not** avoid the ephemeral
-cache TTL expiring during slow conversations.
-
-To actually reduce tokens, shrink the context instead: fewer enabled tools, shorter
-conversations rather than long resumed threads, a cheaper model for throwaway turns.
-
-Design considerations if implemented:
-
-- Process lifecycle: one child per open conversation, idle timeout, cleanup on close, and a
-  cap so many conversations do not mean many live processes.
-- Backpressure and interleaving: a persistent process must correctly attribute events to
-  turns, and support cancellation mid turn.
-- Fallback: keep spawn per turn as a fallback if the persistent process dies.
-- Permission handling: the same bidirectional mode is the prerequisite for the deferred M3b
-  per call permission prompts, so the two efforts overlap.
+The open stdin is also the prerequisite for the deferred M3b per call permission prompts
+(answered over the same channel) and for cancelling a turn.
 
 ## Workflow
 

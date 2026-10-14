@@ -19,14 +19,14 @@ fn main() -> cosmic::iced::Result {
 #[cfg(feature = "cosmic")]
 mod app {
     use claudo_protocol::{
-        Command, ConversationInfo, Effort, Item, Overrides, Profile, ServerEvent, Settings,
-        SystemStatus, ToolCall, MODEL_PRESETS,
+        Command, ConversationInfo, Effort, Item, MODEL_PRESETS, Overrides, Profile, ServerEvent,
+        Settings, SystemStatus, ToolCall,
     };
-    use claudo_transport::{spawn_backend, Commands};
+    use claudo_transport::{Commands, spawn_backend};
 
     use cosmic::app::{Core, Task};
     use cosmic::iced::futures::SinkExt;
-    use cosmic::iced::{stream, Length, Subscription};
+    use cosmic::iced::{Length, Subscription, stream};
     use cosmic::widget;
     use cosmic::{Application, Element};
 
@@ -267,16 +267,15 @@ mod app {
                     content,
                     is_error,
                 } => {
-                    if self.is_current(&conversation_id) {
-                        if let Some(Item::Tool(tc)) = self
+                    if self.is_current(&conversation_id)
+                        && let Some(Item::Tool(tc)) = self
                             .items
                             .iter_mut()
                             .rev()
                             .find(|it| matches!(it, Item::Tool(t) if t.call_id == call_id))
-                        {
-                            tc.result = Some(content);
-                            tc.is_error = is_error;
-                        }
+                    {
+                        tc.result = Some(content);
+                        tc.is_error = is_error;
                     }
                 }
                 ServerEvent::Completed {
@@ -479,11 +478,13 @@ mod app {
                     self.save_overrides();
                 }
                 Message::OvEffort(i) => {
-                    self.overrides.effort = i.checked_sub(1).and_then(|j| Effort::ALL.get(j)).copied();
+                    self.overrides.effort =
+                        i.checked_sub(1).and_then(|j| Effort::ALL.get(j)).copied();
                     self.save_overrides();
                 }
                 Message::OvProfile(i) => {
-                    self.overrides.profile = i.checked_sub(1).and_then(|j| PROFILES.get(j)).copied();
+                    self.overrides.profile =
+                        i.checked_sub(1).and_then(|j| PROFILES.get(j)).copied();
                     self.save_overrides();
                 }
             }
@@ -656,9 +657,9 @@ mod app {
     /// Ctrl+scroll and Ctrl+`+`/`-`/`0`. Scroll events carry no modifier state,
     /// so Ctrl is tracked from `ModifiersChanged`.
     fn zoom_events() -> Subscription<Message> {
+        use cosmic::iced::Event;
         use cosmic::iced::keyboard::{Event as Key, Key as K};
         use cosmic::iced::mouse::{Event as Mouse, ScrollDelta};
-        use cosmic::iced::Event;
 
         cosmic::iced::event::listen_with(|event, _status, _id| match event {
             Event::Keyboard(Key::ModifiersChanged(m)) => Some(Message::Ctrl(m.control())),
@@ -683,25 +684,28 @@ mod app {
     /// Worker: owns the backend, streams events as messages. The first message
     /// hands the UI a command sender.
     fn backend_worker() -> impl cosmic::iced::futures::Stream<Item = Message> {
-        stream::channel(64, |mut output: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            let (commands, mut events) = spawn_backend();
-            commands.send(Command::GetStatus);
-            commands.send(Command::GetSettings);
-            commands.send(Command::ListConversations);
-            let _ = output.send(Message::Connected(commands)).await;
-            while let Some(ev) = events.recv().await {
-                // Coalesce any already-queued events into one render.
-                let mut batch = vec![ev];
-                while let Some(more) = events.try_recv() {
-                    batch.push(more);
-                    if batch.len() >= 256 {
+        stream::channel(
+            64,
+            |mut output: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+                let (commands, mut events) = spawn_backend();
+                commands.send(Command::GetStatus);
+                commands.send(Command::GetSettings);
+                commands.send(Command::ListConversations);
+                let _ = output.send(Message::Connected(commands)).await;
+                while let Some(ev) = events.recv().await {
+                    // Coalesce any already-queued events into one render.
+                    let mut batch = vec![ev];
+                    while let Some(more) = events.try_recv() {
+                        batch.push(more);
+                        if batch.len() >= 256 {
+                            break;
+                        }
+                    }
+                    if output.send(Message::Events(batch)).await.is_err() {
                         break;
                     }
                 }
-                if output.send(Message::Events(batch)).await.is_err() {
-                    break;
-                }
-            }
-        })
+            },
+        )
     }
 }

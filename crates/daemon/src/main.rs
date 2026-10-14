@@ -11,12 +11,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use claudo_core::backend::Backend;
 use claudo_protocol::{Command, ServerEvent};
 use futures_util::{SinkExt, StreamExt};

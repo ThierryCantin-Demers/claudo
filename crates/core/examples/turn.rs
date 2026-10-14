@@ -1,7 +1,7 @@
 //! Manual smoke test for the M1 engine: run one real turn and print events.
 //! Usage: cargo run -p claudo-core --example turn -- "your prompt"
 
-use claudo_core::engine::{run_turn, EngineEvent};
+use claudo_core::engine::{EngineEvent, Session, SessionConfig};
 use claudo_protocol::Profile;
 use std::path::Path;
 
@@ -12,18 +12,12 @@ fn main() {
     println!("== Safe: tool should be DENIED ==");
     let _ = std::fs::remove_file(cwd.join("claudo_probe.txt"));
     turn(&cwd, None, write, Profile::Safe);
-    println!(
-        "file written? {}\n",
-        cwd.join("claudo_probe.txt").exists()
-    );
+    println!("file written? {}\n", cwd.join("claudo_probe.txt").exists());
 
     println!("== Full auto: tool should RUN ==");
     let _ = std::fs::remove_file(cwd.join("claudo_probe.txt"));
     turn(&cwd, None, write, Profile::FullAuto);
-    println!(
-        "file written? {}",
-        cwd.join("claudo_probe.txt").exists()
-    );
+    println!("file written? {}", cwd.join("claudo_probe.txt").exists());
     let _ = std::fs::remove_file(cwd.join("claudo_probe.txt"));
 }
 
@@ -37,14 +31,25 @@ fn turn(
     println!("> {prompt}");
     let mut text = String::new();
     let mut session_id = resume.map(str::to_owned);
-    for ev in run_turn(cwd, resume, prompt, profile, None, None) {
+    let config = SessionConfig {
+        cwd: cwd.to_path_buf(),
+        profile,
+        model: None,
+        effort: None,
+    };
+    let mut session = Session::spawn(config, resume).expect("spawn claude");
+    for ev in session.send(prompt).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
             EngineEvent::Delta { text: t } => text.push_str(&t),
             EngineEvent::ToolStarted { name, .. } => println!("  [tool: {name}]"),
             EngineEvent::ToolResult {
                 is_error, content, ..
-            } => println!("  [tool result{}: {}]", if is_error { " ERROR" } else { "" }, content),
+            } => println!(
+                "  [tool result{}: {}]",
+                if is_error { " ERROR" } else { "" },
+                content
+            ),
             EngineEvent::Completed {
                 session_id: s,
                 is_error,

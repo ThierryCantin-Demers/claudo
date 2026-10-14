@@ -1,6 +1,6 @@
 # claudo: Native Claude Client (Claude Code CLI frontend): Implementation Plan
 
-Status: draft for review. Nothing implemented yet.
+Status: M0 to M5 implemented; M3b (live approve/deny) and M6 (polish) are open. COSMIC is the primary frontend, so its gaps come first.
 
 ## Decisions locked (from review)
 
@@ -10,7 +10,7 @@ Status: draft for review. Nothing implemented yet.
 - **No API-key fallback.** Subscription-via-CLI is the only engine. Keeps the project single-purpose.
 - **Distribution:** a **private shared GitHub repo**; coworkers build from source and each logs in with **their own** Claude subscription. Not published publicly.
 - **Conversation cwd:** **dedicated per-conversation data dir by default**, with an optional "attach to a project folder" mode.
-- **Subprocess model:** **spawn-per-turn** to start; add a warm session pool only if latency proves bad.
+- **Subprocess model:** **one long-lived process per conversation** (bidirectional stream-json), closed after 30 minutes idle and respawned with `--resume`. Started as spawn-per-turn.
 - **Name:** **`claudo`** (for now). Used as the workspace/binary name; directory stays `claude-native-client/` for now.
 
 All review questions resolved.
@@ -124,9 +124,9 @@ This maps almost 1:1 onto Claude Code's existing session store, so it scales cle
 
 - **Sidebar / conversation list = read files, no processes.** Enumerate `~/.claude/projects/<encoded-path>/*.jsonl`; each file is one conversation (title/summary, timestamps, message count, git branch). Scales to hundreds of conversations: pure file I/O.
 - **Open a conversation = parse its `.jsonl`** to render history instantly. Still no process.
-- **A subprocess is spawned only for an *actively-streaming* turn**, via `claude --resume <session-id> --output-format stream-json ...`. Idle conversations are just files on disk.
-- **Concurrency** = one live subprocess per conversation currently generating. Many displayed, few alive. Running several at once is fine (bounded by RAM).
-- Lifecycle: spawn on send → stream events → on `MessageComplete` capture the `session_id` and let the process exit (or keep a short-lived pool). Use **`--resume <explicit-session-id>`**, not `--continue`, for reliable threading (`--continue -p` can spawn a new session).
+- **A subprocess is spawned on the first message sent**, via `claude -p --input-format stream-json --output-format stream-json [--resume <session-id>] ...`, and kept for later turns, which are written to its stdin. After 30 minutes idle it is closed and the conversation is just files on disk again.
+- **Concurrency** = one live subprocess per conversation used in the last 30 minutes. Many displayed, few alive. Running several at once is fine (bounded by RAM).
+- Lifecycle: spawn on send → stream events → on `result` the process waits for the next turn. A different profile, model or effort, or a message after the idle close, respawns it with `--resume`. Use **`--resume <explicit-session-id>`**, not `--continue`, for reliable threading (`--continue -p` can spawn a new session).
 
 ## 8. Design wrinkles specific to wrapping the CLI
 
@@ -134,7 +134,7 @@ This maps almost 1:1 onto Claude Code's existing session store, so it scales cle
 - **It's agent-shaped, not raw chat.** Claude Code's system prompt + tool loop are present. Steer with `--append-system-prompt` and tool allowlists; accept you're rendering an agent, not bare completions. Fine (arguably good) for this use case.
 - **Permission prompts** normally block an interactive TTY. In headless mode use `--permission-mode` / `--allowedTools` to pre-authorize, OR surface `PermissionRequested` in the UI and feed the decision back. Decide the default posture in §11.
 - **Coupling to CLI flags/output.** You're bound to Claude Code's CLI surface and `stream-json` schema, which can shift between versions. Isolate all of it in `engine/cli.rs` and pin a tested CLI version range.
-- **Startup latency / process overhead** per turn. Consider a warm session pool if it feels sluggish.
+- **Startup latency / process overhead**: paid once per process, not per turn, since processes are kept per conversation.
 
 ## 9. Auth / engine
 
@@ -207,7 +207,7 @@ Nothing open. Plan is ready to build against.
 - **CLI behavior/ToS change (no escape hatch)**: Anthropic could lock headless to `--bare` (drops subscription auth) or change `stream-json`. Since the API-key engine was dropped, there is **no fallback**: if this breaks, the app stops working until the CLI path is fixed or an API-key engine is added back. Accepted tradeoff for a subscription-only tool. Mitigation: isolate everything in `engine/cli.rs`, pin a tested CLI version range, parse defensively. This is the biggest strategic risk.
 - **`stream-json` schema drift**: pin and test against a known CLI version; parse defensively.
 - **Agent-shaped output**: not raw chat; may need prompt/tool steering to feel like a plain assistant.
-- **Process overhead / latency**: spawn-per-turn may feel slow; warm pool as a fallback.
+- **Process overhead / latency**: addressed by the persistent process per conversation; its cost is one idle `claude` per recently used conversation.
 - **Rendering quirks**: egui/iced render via wgpu (no webview flakiness); watch wgpu/Wayland edge cases on COSMIC.
 - **wasm feature gaps**: no fs/subprocess in the browser: the web client must go through the daemon, which the architecture already forces.
 - **Two frontends drifting**: mitigated by keeping all logic in `core`; frontends only render + emit.

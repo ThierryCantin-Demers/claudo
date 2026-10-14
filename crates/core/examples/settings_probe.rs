@@ -3,12 +3,13 @@
 
 use claudo_core::backend::Backend;
 use claudo_protocol::{Command, Effort, Profile, ServerEvent, Settings};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 fn main() {
     let tmp = std::env::temp_dir().join("claudo_settings_probe");
     let _ = std::fs::remove_dir_all(&tmp);
-    std::env::set_var("XDG_DATA_HOME", &tmp);
+    // SAFETY: no other thread exists yet.
+    unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
 
     let (tx, mut rx) = unbounded_channel::<ServerEvent>();
     let backend = Backend::new(tx);
@@ -17,7 +18,7 @@ fn main() {
 
     backend.handle(Command::UpdateSettings {
         settings: Settings {
-            model: "claude-opus-4-7".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             effort: Effort::High,
             profile: Profile::FullAuto,
         },

@@ -11,7 +11,7 @@ members = [
 
 [workspace.package]
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 
 # Optimize dependencies even in dev builds. iced/cosmic-text text shaping is

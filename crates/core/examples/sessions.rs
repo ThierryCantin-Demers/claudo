@@ -3,14 +3,15 @@
 //! touch the real conversation list.
 //! Usage: cargo run -p claudo-core --example sessions
 
-use claudo_core::engine::{run_turn, EngineEvent};
-use claudo_core::sessions::{load_transcript, Store};
+use claudo_core::engine::{EngineEvent, Session, SessionConfig};
+use claudo_core::sessions::{Store, load_transcript};
 use claudo_protocol::{Item, Profile};
 
 fn main() {
     let tmp = std::env::temp_dir().join("claudo_m2_probe");
     let _ = std::fs::remove_dir_all(&tmp);
-    std::env::set_var("XDG_DATA_HOME", &tmp);
+    // SAFETY: no other thread exists yet.
+    unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
 
     let prompt = "Reply with a short one-line greeting, then stop.";
     let mut store = Store::load();
@@ -19,7 +20,14 @@ fn main() {
     println!("conversation {id}\ncwd {}\n", cwd.display());
 
     let mut session_id = None;
-    for ev in run_turn(&cwd, None, prompt, Profile::Safe, None, None) {
+    let config = SessionConfig {
+        cwd: cwd.clone(),
+        profile: Profile::Safe,
+        model: None,
+        effort: None,
+    };
+    let mut session = Session::spawn(config, None).expect("spawn claude");
+    for ev in session.send(prompt).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
             EngineEvent::Completed {

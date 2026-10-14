@@ -17,10 +17,10 @@ pub trait Transport {
 #[cfg(not(target_arch = "wasm32"))]
 mod inproc {
     use super::*;
-    use std::sync::mpsc::{channel, Sender};
+    use std::sync::mpsc::{Sender, channel};
 
     use claudo_core::backend::Backend;
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     /// Bundled-desktop transport: the backend runs on a worker thread and talks
     /// to the UI over in-memory channels (no socket, no port).
@@ -102,7 +102,7 @@ mod inproc {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use inproc::{spawn_backend, Commands, Events, InProc};
+pub use inproc::{Commands, Events, InProc, spawn_backend};
 
 /// Connect a frontend to its backend. Native bundles the backend in-process.
 #[cfg(not(target_arch = "wasm32"))]

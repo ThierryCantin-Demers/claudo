@@ -1,19 +1,20 @@
-//! Runs one chat turn by spawning `claude -p --output-format stream-json
-//! --include-partial-messages`, reading its JSONL event stream on a background
-//! thread, and forwarding parsed events over a channel the UI drains.
+//! Drives the Claude Code CLI in bidirectional stream-json mode: one long-lived
+//! `claude -p --input-format stream-json` process per session, each turn written
+//! to its stdin as a JSONL user message, events parsed from its stdout.
 //!
-//! Spawn-per-turn (PLAN.md decision): turn 1 creates a session, later turns pass
-//! `--resume <session-id>`. This is the seam that isolates CLI/stream-json
-//! specifics from the rest of the app.
+//! This is the seam that isolates CLI/stream-json specifics from the rest of the app.
 
-use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{ChildStderr, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use claudo_protocol::{ContextUsage, Profile};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::claude_bin;
 
@@ -57,94 +58,180 @@ pub enum EngineEvent {
     Error { detail: String },
 }
 
-/// Start a turn. Returns immediately with a receiver of events; the CLI runs on
-/// a background thread. Dropping the receiver kills the child on the next event.
-pub fn run_turn(
-    cwd: &Path,
-    resume_session: Option<&str>,
-    prompt: &str,
-    profile: Profile,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> Receiver<EngineEvent> {
-    let (tx, rx) = mpsc::channel();
-    let cwd = cwd.to_path_buf();
-    let resume = resume_session.map(str::to_owned);
-    let prompt = prompt.to_owned();
-    let model = model.map(str::to_owned);
-    let effort = effort.map(str::to_owned);
+/// The flags a `claude` process starts with. They hold for its whole life, so a
+/// turn asking for different ones needs a new process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionConfig {
+    pub cwd: PathBuf,
+    pub profile: Profile,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
 
-    thread::spawn(move || {
+/// One long-lived `claude -p --input-format stream-json` process. Turns are
+/// written to its stdin; dropping the session closes stdin, which lets the
+/// process finish a running turn and then exit.
+pub struct Session {
+    config: SessionConfig,
+    pid: u32,
+    stdin: ChildStdin,
+    shared: Arc<Shared>,
+}
+
+/// State shared with the thread reading the process's stdout.
+struct Shared {
+    turn: Mutex<TurnSlot>,
+    last_activity: Mutex<Instant>,
+}
+
+#[derive(Default)]
+struct TurnSlot {
+    /// Where the running turn's events go; `None` between turns.
+    sink: Option<Sender<EngineEvent>>,
+    exited: bool,
+}
+
+const STDERR_TAIL_LINES: usize = 20;
+
+impl Session {
+    pub fn spawn(config: SessionConfig, resume: Option<&str>) -> io::Result<Self> {
         let mut cmd = Command::new(claude_bin());
-        cmd.current_dir(&cwd)
+        cmd.current_dir(&config.cwd)
             .arg("-p")
-            .arg(&prompt)
-            .arg("--output-format")
-            .arg("stream-json")
+            .args(["--input-format", "stream-json"])
+            .args(["--output-format", "stream-json"])
             .arg("--include-partial-messages")
             .arg("--permission-mode")
-            .arg(cli_mode(profile))
+            .arg(cli_mode(config.profile))
             .arg("--verbose")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(sid) = &resume {
+        if let Some(sid) = resume {
             cmd.arg("--resume").arg(sid);
         }
-        if let Some(model) = &model {
+        if let Some(model) = &config.model {
             cmd.arg("--model").arg(model);
         }
-        if let Some(effort) = &effort {
+        if let Some(effort) = &config.effort {
             cmd.arg("--effort").arg(effort);
         }
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(EngineEvent::Error {
-                    detail: format!("failed to launch `{}`: {e}", claude_bin()),
-                });
-                return;
-            }
-        };
-
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
-        let mut saw_completed = false;
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
-            for ev in parse_line(&line) {
-                if matches!(ev, EngineEvent::Completed { .. }) {
-                    saw_completed = true;
-                }
-                if tx.send(ev).is_err() {
-                    let _ = child.kill();
-                    return;
-                }
-            }
-        }
+        let stderr = child.stderr.take().expect("stderr piped");
+        let shared = Arc::new(Shared {
+            turn: Mutex::default(),
+            last_activity: Mutex::new(Instant::now()),
+        });
 
-        let status = child.wait();
-        if !saw_completed {
-            let mut err = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut err);
-            }
-            let detail = if err.trim().is_empty() {
-                match status {
-                    Ok(s) => format!("claude exited without completing the turn ({s})"),
-                    Err(e) => format!("waiting on claude failed: {e}"),
+        // Drained continuously: a long-lived process would block once the pipe filled.
+        let stderr = thread::spawn(move || stderr_tail(stderr));
+        let reader = shared.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                reader.touch();
+                for ev in parse_line(&line) {
+                    let completed = matches!(ev, EngineEvent::Completed { .. });
+                    let mut turn = reader.turn.lock().unwrap();
+                    if let Some(sink) = &turn.sink {
+                        let _ = sink.send(ev);
+                    }
+                    if completed {
+                        turn.sink = None;
+                    }
                 }
-            } else {
-                err.trim().to_string()
-            };
-            let _ = tx.send(EngineEvent::Error { detail });
-        }
-    });
+            }
 
-    rx
+            let status = child.wait();
+            let err = stderr.join().unwrap_or_default();
+            let mut turn = reader.turn.lock().unwrap();
+            turn.exited = true;
+            if let Some(sink) = turn.sink.take() {
+                let detail = if err.trim().is_empty() {
+                    match status {
+                        Ok(s) => format!("claude exited without completing the turn ({s})"),
+                        Err(e) => format!("waiting on claude failed: {e}"),
+                    }
+                } else {
+                    err.trim().to_string()
+                };
+                let _ = sink.send(EngineEvent::Error { detail });
+            }
+        });
+
+        Ok(Self {
+            config,
+            pid,
+            stdin,
+            shared,
+        })
+    }
+
+    /// Start a turn. Its events arrive on the returned receiver, which closes
+    /// after `Completed` or `Error`. Fails if the process has exited.
+    pub fn send(&mut self, prompt: &str) -> io::Result<Receiver<EngineEvent>> {
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut turn = self.shared.turn.lock().unwrap();
+            if turn.exited {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            turn.sink = Some(tx);
+        }
+        self.shared.touch();
+
+        let message = json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] },
+        });
+        let written = writeln!(self.stdin, "{message}").and_then(|()| self.stdin.flush());
+        if let Err(e) = written {
+            self.shared.turn.lock().unwrap().sink = None;
+            return Err(e);
+        }
+        Ok(rx)
+    }
+
+    pub fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn is_alive(&self) -> bool {
+        !self.shared.turn.lock().unwrap().exited
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.shared.turn.lock().unwrap().sink.is_some()
+    }
+
+    /// Time since a turn was sent or the process last wrote anything.
+    pub fn idle_for(&self) -> Duration {
+        self.shared.last_activity.lock().unwrap().elapsed()
+    }
+}
+
+impl Shared {
+    fn touch(&self) {
+        *self.last_activity.lock().unwrap() = Instant::now();
+    }
+}
+
+fn stderr_tail(stderr: ChildStderr) -> String {
+    let mut tail = VecDeque::with_capacity(STDERR_TAIL_LINES);
+    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    Vec::from(tail).join("\n")
 }
 
 /// Decode one JSONL line into zero or more `EngineEvent`s. Parses loosely so
@@ -179,7 +266,11 @@ fn parse_line(line: &str) -> Vec<EngineEvent> {
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
             .map(|b| EngineEvent::ToolStarted {
-                call_id: b.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                call_id: b
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 name: b
                     .get("name")
                     .and_then(Value::as_str)
