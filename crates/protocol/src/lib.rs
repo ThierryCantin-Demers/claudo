@@ -260,6 +260,12 @@ pub enum Command {
         model: String,
         effort: Effort,
     },
+    /// Answer an `ApprovalRequested`.
+    AnswerApproval {
+        conversation_id: ConversationId,
+        request_id: String,
+        allow: bool,
+    },
 }
 
 /// Backend -> frontend.
@@ -299,6 +305,13 @@ pub enum ServerEvent {
         call_id: CallId,
         content: String,
         is_error: bool,
+    },
+    /// Claude wants to make a call that always needs the user's approval, such as
+    /// opening an issue or a pull request. The turn waits for `AnswerApproval`.
+    ApprovalRequested {
+        conversation_id: ConversationId,
+        request_id: String,
+        call: ToolCall,
     },
     Completed {
         conversation_id: ConversationId,

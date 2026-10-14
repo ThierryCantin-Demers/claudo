@@ -1,6 +1,6 @@
 # claudo: Native Claude Client (Claude Code CLI frontend): Implementation Plan
 
-Status: M0 to M5 implemented; M3b (live approve/deny) and M6 (polish) are open. COSMIC is the primary frontend, so its gaps come first.
+Status: M0 to M5 and M3b implemented; M6 (polish) is open. COSMIC is the primary frontend, so its gaps come first.
 
 ## Decisions locked (from review)
 
@@ -181,7 +181,7 @@ Even though tools live in Claude Code, exposing them through a socket is still a
 
 **M3: Tool calls + permissions** (split during implementation)
 - **M3a (done):** surface `ToolStarted`/`ToolResult` as collapsible tool cards; per-conversation **permission profile** selector: Safe (`--permission-mode default`), Accept edits (`acceptEdits`), Full auto (`bypassPermissions`). Validated: Safe denies writes, Full auto executes.
-- **M3b (deferred spike):** true per-call approve/deny prompts. Finding: the CLI does **not** emit a `control_request` in `-p` or bidirectional mode by default: it just auto-denies. Live prompting needs the SDK's undocumented control-protocol handshake (`initialize` + `can_use_tool`) replicated over the CLI's stdin/stdout in a persistent bidirectional session. There is **no** `--permission-prompt-tool` in CLI 2.1.218. This is the fragile part; do it as a focused spike by reading the open-source Agent SDK's control messages.
+- **M3b (done, scoped):** approve/deny for opening issues and pull requests, in every profile, through the CLI's `can_use_tool` control requests (`--permission-prompt-tool stdio` plus ask rules). Other calls keep following the profile.
 
 **M4: Protocol boundary, then WebSocket + web client** (split during implementation)
 - **M4a (done):** real protocol (`Command`/`ServerEvent` + shared `Item`/`ToolCall`/`ConversationInfo`/`Profile` in the protocol crate); a transport-agnostic `Backend` in core (owns the store, drives the engine, emits events over a tokio unbounded channel); an `InProc` transport (backend on a worker thread, in-memory channels); egui frontend refactored to send commands + render events with **no direct `core` dependency** (it depends on `transport` + `protocol`). Verified via `backend_probe` example.

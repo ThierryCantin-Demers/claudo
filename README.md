@@ -68,7 +68,7 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 ## Good to know
 
 - Everyone logs in with their own subscription. Turns use the same limits as Claude Code.
-- There is no approve/deny prompt per tool call yet. Pick a permission profile instead.
+- Opening an issue or a pull request (`gh` or GitHub's MCP server) always waits for your approval, in every permission profile. Everything else follows the profile.
 - claudo keeps its data in `~/.local/share/claudo/`. Message history stays in `~/.claude/projects/`.
 
 ## Development

@@ -72,6 +72,22 @@ impl LiveSessions {
         Ok(turn)
     }
 
+    /// Answer the approval a conversation's running turn is waiting on.
+    pub fn answer(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+        allow: bool,
+    ) -> Result<(), String> {
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get(conversation_id)
+            .ok_or_else(|| "that conversation has no running claude process".to_string())?;
+        session
+            .answer(request_id, allow)
+            .map_err(|e| format!("could not answer the approval: {e}"))
+    }
+
     /// The process currently serving a conversation, if any.
     pub fn pid(&self, conversation_id: &str) -> Option<u32> {
         let sessions = self.sessions.lock().unwrap();

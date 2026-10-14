@@ -86,6 +86,8 @@ struct ClaudoApp {
     /// instead of sudden jumps.
     reveal: f32,
     error: Option<String>,
+    /// Calls waiting for the user's answer, with their request ids.
+    approvals: Vec<(String, ToolCall)>,
     md_cache: CommonMarkCache,
 }
 
@@ -109,6 +111,7 @@ impl ClaudoApp {
             assistant_idx: None,
             reveal: 0.0,
             error: None,
+            approvals: Vec::new(),
             md_cache: CommonMarkCache::default(),
         }
     }
@@ -325,12 +328,23 @@ impl ClaudoApp {
                     }
                 }
 
+                ServerEvent::ApprovalRequested {
+                    conversation_id,
+                    request_id,
+                    call,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.approvals.push((request_id, call));
+                    }
+                }
+
                 ServerEvent::Completed {
                     conversation_id,
                     is_error,
                     ..
                 } => {
                     if self.is_current(&conversation_id) {
+                        self.approvals.clear();
                         self.streaming = false;
                         self.assistant_idx = None;
                         if is_error {
@@ -342,6 +356,7 @@ impl ClaudoApp {
 
                 ServerEvent::Error { detail } => {
                     self.error = Some(detail);
+                    self.approvals.clear();
                     self.streaming = false;
                 }
             }
@@ -688,6 +703,30 @@ impl ClaudoApp {
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 let streaming = self.streaming;
+
+                let mut answer = None;
+                for (request_id, call) in &self.approvals {
+                    ui.horizontal(|ui| {
+                        ui.strong("Claude wants to run:");
+                        ui.monospace(&call.summary);
+                        if ui.button("Allow").clicked() {
+                            answer = Some((request_id.clone(), true));
+                        }
+                        if ui.button("Deny").clicked() {
+                            answer = Some((request_id.clone(), false));
+                        }
+                    });
+                }
+                if let (Some((request_id, allow)), Some(conversation_id)) =
+                    (answer, self.current.clone())
+                {
+                    self.approvals.retain(|(id, _)| *id != request_id);
+                    self.transport.send(Command::AnswerApproval {
+                        conversation_id,
+                        request_id,
+                        allow,
+                    });
+                }
 
                 // Compact readout of the effective settings for this turn.
                 ui.horizontal(|ui| {

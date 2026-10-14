@@ -4,7 +4,7 @@
 //!
 //! This is the seam that isolates CLI/stream-json specifics from the rest of the app.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdin, Command, Stdio};
@@ -40,6 +40,8 @@ pub enum EngineEvent {
     ThinkingDelta { text: String },
     /// Claude invoked a tool; the call has no result yet.
     ToolStarted(ToolCall),
+    /// A call matched `ASK_RULES`; the process waits for `Session::answer`.
+    ApprovalNeeded { request_id: String, call: ToolCall },
     /// A tool returned. In `Safe`/`AcceptEdits` a denial arrives here as an error.
     ToolResult {
         call_id: String,
@@ -72,14 +74,17 @@ pub struct SessionConfig {
 pub struct Session {
     config: SessionConfig,
     pid: u32,
-    stdin: ChildStdin,
     shared: Arc<Shared>,
 }
 
 /// State shared with the thread reading the process's stdout.
 struct Shared {
+    /// `None` once the session is dropped.
+    stdin: Mutex<Option<ChildStdin>>,
     turn: Mutex<TurnSlot>,
     last_activity: Mutex<Instant>,
+    /// Inputs of approvals awaiting an answer, keyed by request id; an allow echoes them back.
+    approvals: Mutex<HashMap<String, Value>>,
 }
 
 #[derive(Default)]
@@ -90,6 +95,14 @@ struct TurnSlot {
 }
 
 const STDERR_TAIL_LINES: usize = 20;
+
+/// Calls that wait for the user's answer under every permission profile, Full auto included.
+const ASK_RULES: [&str; 4] = [
+    "Bash(gh pr create:*)",
+    "Bash(gh issue create:*)",
+    "mcp__github__create_pull_request",
+    "mcp__github__create_issue",
+];
 
 impl Session {
     pub fn spawn(config: SessionConfig, resume: Option<&str>) -> io::Result<Self> {
@@ -103,6 +116,10 @@ impl Session {
             .args(["--thinking-display", "summarized"])
             .arg("--permission-mode")
             .arg(cli_mode(config.profile))
+            .arg("--settings")
+            .arg(json!({ "permissions": { "ask": ASK_RULES } }).to_string())
+            // Without it the CLI denies whatever would prompt instead of asking over stdin.
+            .args(["--permission-prompt-tool", "stdio"])
             .arg("--verbose")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -123,8 +140,10 @@ impl Session {
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
         let shared = Arc::new(Shared {
+            stdin: Mutex::new(Some(stdin)),
             turn: Mutex::default(),
             last_activity: Mutex::new(Instant::now()),
+            approvals: Mutex::default(),
         });
 
         // Drained continuously: a long-lived process would block once the pipe filled.
@@ -133,7 +152,32 @@ impl Session {
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 reader.touch();
-                for ev in parse_line(&line) {
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let events = match permission_prompt(&v) {
+                    Some(Prompt::Ask {
+                        request_id,
+                        call,
+                        input,
+                    }) => {
+                        reader
+                            .approvals
+                            .lock()
+                            .unwrap()
+                            .insert(request_id.clone(), input);
+                        vec![EngineEvent::ApprovalNeeded { request_id, call }]
+                    }
+                    Some(Prompt::Refuse { request_id, tool }) => {
+                        let message = format!(
+                            "Claude requested permissions to use {tool}, but you haven't granted it yet."
+                        );
+                        let _ = reader.write(&deny(&request_id, &message));
+                        Vec::new()
+                    }
+                    None => decode(&v),
+                };
+                for ev in events {
                     let completed = matches!(ev, EngineEvent::Completed { .. });
                     let mut turn = reader.turn.lock().unwrap();
                     if let Some(sink) = &turn.sink {
@@ -165,7 +209,6 @@ impl Session {
         Ok(Self {
             config,
             pid,
-            stdin,
             shared,
         })
     }
@@ -187,12 +230,31 @@ impl Session {
             "type": "user",
             "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] },
         });
-        let written = writeln!(self.stdin, "{message}").and_then(|()| self.stdin.flush());
-        if let Err(e) = written {
+        if let Err(e) = self.shared.write(&message) {
             self.shared.turn.lock().unwrap().sink = None;
             return Err(e);
         }
         Ok(rx)
+    }
+
+    /// Answer an `ApprovalNeeded`; the waiting call then runs or fails.
+    pub fn answer(&self, request_id: &str, allow: bool) -> io::Result<()> {
+        let input = self
+            .shared
+            .approvals
+            .lock()
+            .unwrap()
+            .remove(request_id)
+            .ok_or(io::ErrorKind::NotFound)?;
+        let response = if allow {
+            control_response(
+                request_id,
+                json!({ "behavior": "allow", "updatedInput": input }),
+            )
+        } else {
+            deny(request_id, "The user denied this.")
+        };
+        self.shared.write(&response)
     }
 
     pub fn config(&self) -> &SessionConfig {
@@ -217,10 +279,82 @@ impl Session {
     }
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The reader thread keeps `shared` alive, so stdin has to be closed here.
+        self.shared.stdin.lock().unwrap().take();
+    }
+}
+
 impl Shared {
     fn touch(&self) {
         *self.last_activity.lock().unwrap() = Instant::now();
     }
+
+    fn write(&self, message: &Value) -> io::Result<()> {
+        let mut stdin = self.stdin.lock().unwrap();
+        let stdin = stdin.as_mut().ok_or(io::ErrorKind::BrokenPipe)?;
+        writeln!(stdin, "{message}")?;
+        stdin.flush()
+    }
+}
+
+/// A `can_use_tool` request. The CLI sends one for every call that would prompt, but only
+/// calls matching a rule are the user's to answer; the rest are refused as before.
+enum Prompt {
+    Ask {
+        request_id: String,
+        call: ToolCall,
+        input: Value,
+    },
+    Refuse {
+        request_id: String,
+        tool: String,
+    },
+}
+
+fn permission_prompt(v: &Value) -> Option<Prompt> {
+    if v.get("type")?.as_str()? != "control_request" {
+        return None;
+    }
+    let request_id = v.get("request_id")?.as_str()?.to_string();
+    let request = v.get("request")?;
+    if request.get("subtype")?.as_str()? != "can_use_tool" {
+        return None;
+    }
+    let field = |key| request.get(key).and_then(Value::as_str);
+    let tool = field("tool_name").unwrap_or("tool").to_string();
+    if field("decision_reason_type") != Some("rule") {
+        return Some(Prompt::Refuse { request_id, tool });
+    }
+    let input = request.get("input").cloned().unwrap_or(Value::Null);
+    let call = ToolCall {
+        call_id: field("tool_use_id").unwrap_or("").to_string(),
+        name: tool,
+        summary: summarize(&input),
+        input: serde_json::to_string_pretty(&input).unwrap_or_default(),
+        result: None,
+        is_error: false,
+    };
+    Some(Prompt::Ask {
+        request_id,
+        call,
+        input,
+    })
+}
+
+fn control_response(request_id: &str, response: Value) -> Value {
+    json!({
+        "type": "control_response",
+        "response": { "subtype": "success", "request_id": request_id, "response": response },
+    })
+}
+
+fn deny(request_id: &str, message: &str) -> Value {
+    control_response(
+        request_id,
+        json!({ "behavior": "deny", "message": message }),
+    )
 }
 
 fn stderr_tail(stderr: ChildStderr) -> String {
@@ -237,10 +371,7 @@ fn stderr_tail(stderr: ChildStderr) -> String {
 /// Decode one JSONL line into zero or more `EngineEvent`s. Parses loosely so
 /// unrelated schema changes don't break chat. A single `assistant`/`user`
 /// message can carry several tool blocks, hence the vec.
-fn parse_line(line: &str) -> Vec<EngineEvent> {
-    let Ok(v) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
+fn decode(v: &Value) -> Vec<EngineEvent> {
     let Some(kind) = v.get("type").and_then(Value::as_str) else {
         return Vec::new();
     };
@@ -258,18 +389,18 @@ fn parse_line(line: &str) -> Vec<EngineEvent> {
         // Token-level text and thinking deltas. Tool input arrives here too (as
         // input_json_delta) but we render tools from the complete `assistant`
         // message below.
-        "stream_event" => stream_delta(&v).into_iter().collect(),
+        "stream_event" => stream_delta(v).into_iter().collect(),
 
         // Completed assistant message: pull out tool_use blocks (text is already
         // streamed via deltas, so skip it to avoid duplication).
-        "assistant" => content_blocks(&v)
+        "assistant" => content_blocks(v)
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
             .map(|b| EngineEvent::ToolStarted(tool_call(b)))
             .collect(),
 
         // Tool results are delivered as `user` messages by Claude Code.
-        "user" => content_blocks(&v)
+        "user" => content_blocks(v)
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
             .map(|b| EngineEvent::ToolResult {
@@ -289,7 +420,7 @@ fn parse_line(line: &str) -> Vec<EngineEvent> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-            context: context_usage(&v),
+            context: context_usage(v),
         }],
 
         _ => Vec::new(),

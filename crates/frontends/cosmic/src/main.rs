@@ -110,6 +110,8 @@ mod app {
         draft: text_editor::Content,
         /// Set when the composer should take focus after this update.
         focus_composer: bool,
+        /// Calls waiting for the user's answer, with their request ids.
+        approvals: Vec<(String, ToolCall)>,
         streaming: bool,
         assistant_idx: Option<usize>,
         /// Chars of the streaming message revealed so far. The CLI delivers text
@@ -158,6 +160,10 @@ mod app {
         #[cfg(feature = "hot")]
         Hotpatched,
         Open(String),
+        Answer {
+            request_id: String,
+            allow: bool,
+        },
         SetPage(Page),
         /// The main window is closing.
         Quit,
@@ -224,6 +230,7 @@ mod app {
             self.current = Some(id.clone());
             self.sync_overrides();
             self.items.clear();
+            self.approvals.clear();
             self.assistant_idx = None;
             self.error = None;
             self.focus_composer = true;
@@ -239,6 +246,9 @@ mod app {
         fn activity(&self) -> Option<String> {
             if !self.pulsing() {
                 return None;
+            }
+            if !self.approvals.is_empty() {
+                return Some("Waiting for your approval".to_string());
             }
             match self.items.last() {
                 Some(Entry::Thinking { .. }) => None,
@@ -424,15 +434,26 @@ mod app {
                 } => {
                     if self.is_current(&conversation_id) {
                         self.streaming = false;
+                        self.approvals.clear();
                         self.finish_reply();
                         if is_error {
                             self.error = Some("Claude reported an error.".to_string());
                         }
                     }
                 }
+                ServerEvent::ApprovalRequested {
+                    conversation_id,
+                    request_id,
+                    call,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.approvals.push((request_id, call));
+                    }
+                }
                 ServerEvent::Error { detail } => {
                     self.error = Some(detail);
                     self.streaming = false;
+                    self.approvals.clear();
                     self.finish_reply();
                 }
             }
@@ -567,8 +588,64 @@ mod app {
                 .spacing(24)
                 .into();
             }
-            widget::Column::with_children(vec![self.transcript(), self.composer()])
-                .spacing(8)
+            let mut column = vec![self.transcript()];
+            column.extend(
+                self.approvals
+                    .iter()
+                    .map(|(id, call)| self.approval_card(id, call)),
+            );
+            column.push(self.composer());
+            widget::Column::with_children(column).spacing(8).into()
+        }
+
+        /// What Claude wants to run, and the two answers. The turn waits on it.
+        fn approval_card<'a>(&self, request_id: &str, call: &'a ToolCall) -> Element<'a, Message> {
+            let size = 14.0 * self.zoom;
+            let answer = |allow| Message::Answer {
+                request_id: request_id.to_string(),
+                allow,
+            };
+            let buttons = widget::Row::with_children(vec![
+                widget::space::horizontal().into(),
+                widget::button::destructive("Deny")
+                    .on_press(answer(false))
+                    .into(),
+                widget::button::suggested("Allow")
+                    .on_press(answer(true))
+                    .into(),
+            ])
+            .spacing(8);
+            let card = widget::container(
+                widget::Column::with_children(vec![
+                    widget::text(format!("Claude wants to run {}", call.name))
+                        .size(size)
+                        .font(cosmic::font::semibold())
+                        .into(),
+                    widget::text(call.summary.as_str())
+                        .size(size * 0.9)
+                        .font(cosmic::font::mono())
+                        .into(),
+                    buttons.into(),
+                ])
+                .spacing(10),
+            )
+            .padding([12, 14])
+            .width(Length::Fill)
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                container::Style {
+                    background: Some(Color::from(cosmic.bg_component_color()).into()),
+                    border: Border {
+                        radius: cosmic.corner_radii.radius_l.into(),
+                        width: 1.0,
+                        color: cosmic.accent_color().into(),
+                    },
+                    ..container::Style::default()
+                }
+            }));
+            widget::container(widget::container(card).max_width(COLUMN_WIDTH * self.zoom))
+                .center_x(Length::Fill)
+                .padding([0, 16])
                 .into()
         }
 
@@ -957,6 +1034,7 @@ mod app {
                 items: Vec::new(),
                 draft: text_editor::Content::new(),
                 focus_composer: false,
+                approvals: Vec::new(),
                 streaming: false,
                 assistant_idx: None,
                 reveal: 0.0,
@@ -1031,6 +1109,16 @@ mod app {
                     self.cmd(Command::NewScratch);
                 }
                 Message::SetPage(page) => self.page = page,
+                Message::Answer { request_id, allow } => {
+                    self.approvals.retain(|(id, _)| *id != request_id);
+                    if let Some(conversation_id) = self.current.clone() {
+                        self.cmd(Command::AnswerApproval {
+                            conversation_id,
+                            request_id,
+                            allow,
+                        });
+                    }
+                }
                 // libcosmic's Wayland teardown races between two threads and segfaults.
                 // Nothing here needs tearing down: state is saved as it changes.
                 Message::Quit => std::process::exit(0),

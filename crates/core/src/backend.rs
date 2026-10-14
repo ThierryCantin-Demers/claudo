@@ -84,6 +84,16 @@ impl Backend {
                 model,
                 effort,
             } => self.send(conversation_id, text, profile, model, effort),
+
+            Command::AnswerApproval {
+                conversation_id,
+                request_id,
+                allow,
+            } => {
+                if let Err(detail) = self.live.answer(&conversation_id, &request_id, allow) {
+                    self.emit(ServerEvent::Error { detail });
+                }
+            }
         }
     }
 
@@ -189,6 +199,13 @@ impl Backend {
                         let _ = events.send(ServerEvent::ThinkingDelta {
                             conversation_id: conversation_id.clone(),
                             text,
+                        });
+                    }
+                    EngineEvent::ApprovalNeeded { request_id, call } => {
+                        let _ = events.send(ServerEvent::ApprovalRequested {
+                            conversation_id: conversation_id.clone(),
+                            request_id,
+                            call,
                         });
                     }
                     EngineEvent::ToolStarted(call) => {

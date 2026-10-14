@@ -83,6 +83,7 @@ One process per conversation, turns written to stdin as JSONL
 claude -p --input-format stream-json --output-format stream-json \
   --include-partial-messages --verbose --thinking-display summarized \
   --permission-mode <default|acceptEdits|bypassPermissions> \
+  --settings '{"permissions":{"ask":[...]}}' --permission-prompt-tool stdio \
   [--resume <session-id>] [--model <m>] [--effort <low|medium|high|xhigh|max>]
 ```
 
@@ -103,6 +104,7 @@ Events consumed from the JSONL stream:
 | `stream_event` -> `content_block_delta` -> `thinking_delta` | thinking summary |
 | `assistant` message, `tool_use` block | tool invoked |
 | `user` message, `tool_result` block | tool returned (denials arrive here as errors) |
+| `control_request` / `can_use_tool` | a call waits for approval; answered with a `control_response` |
 | `result` | turn complete; `usage` and `modelUsage[*].contextWindow` for context display |
 
 Parse defensively by field extraction, not strict structs, so unrelated schema changes do
@@ -116,11 +118,15 @@ types: `user` (content is a plain string for prompts, or an array containing `to
 Use `--resume <session-id>` for continuation. `--continue` with `-p` can silently start a
 new session.
 
-**Per call permission prompts are not available.** In headless mode the CLI auto denies
-tools that need approval, and emits no permission request. Live approve/deny would mean
-replicating the Agent SDK's undocumented `initialize` + `can_use_tool` control protocol over
-a persistent bidirectional session. This is deferred (M3b in PLAN.md). Permission profiles
-are the supported mechanism.
+**Approvals go through the control protocol on stdin.** Each process starts with
+`--settings '{"permissions":{"ask":[...]}}'` (the `ASK_RULES` in `cli.rs`: `gh pr create`,
+`gh issue create` and GitHub MCP's create tools) and `--permission-prompt-tool stdio`. The CLI
+then sends `{"type":"control_request","request":{"subtype":"can_use_tool",...}}` for every
+call that would prompt and waits for a `control_response`. Ask rules hold in every mode,
+`bypassPermissions` included. Only requests with `decision_reason_type: "rule"` reach the user
+as `ApprovalRequested`; the rest are denied with the message the CLI used before, so Safe mode
+behaves as it always did. Without `--permission-prompt-tool stdio` the CLI denies on its own
+and sends nothing; no `initialize` handshake is needed.
 
 **Usage comes from the user's subscription pool**, the same quota as interactive Claude Code.
 Each turn carries agent overhead (roughly 6-12k cache creation tokens on a fresh session).
@@ -191,8 +197,7 @@ MCP servers and CLAUDE.md discovery. It does **not** avoid the cache TTL expirin
 slow conversations. To reduce tokens, shrink the context: fewer enabled tools, shorter
 conversations, a cheaper model for throwaway turns.
 
-The open stdin is also the prerequisite for the deferred M3b per call permission prompts
-(answered over the same channel) and for cancelling a turn.
+The open stdin also carries approval answers and is what cancelling a turn will use.
 
 ## Workflow
 
