@@ -573,3 +573,157 @@ fn tool_result_text(v: Option<&Value>) -> String {
         None => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(json: &str) -> Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn text_and_thinking_deltas() {
+        let text = line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}}"#,
+        );
+        assert!(matches!(&decode(&text)[..], [EngineEvent::Delta { text }] if text == "Hi"));
+
+        let thinking = line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Checking 391"}}}"#,
+        );
+        assert!(matches!(
+            &decode(&thinking)[..],
+            [EngineEvent::ThinkingDelta { text }] if text == "Checking 391"
+        ));
+
+        let signature = line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"x"}}}"#,
+        );
+        assert!(decode(&signature).is_empty());
+    }
+
+    #[test]
+    fn tool_use_and_results() {
+        let started = line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"streamed already"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo build\nmore","description":"Build"}}]}}"#,
+        );
+        match &decode(&started)[..] {
+            [EngineEvent::ToolStarted(call)] => {
+                assert_eq!(call.call_id, "t1");
+                assert_eq!(call.name, "Bash");
+                assert_eq!(call.summary, "cargo build");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let result = line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}]}}"#,
+        );
+        assert!(matches!(
+            &decode(&result)[..],
+            [EngineEvent::ToolResult { call_id, content, is_error: true }] if call_id == "t1" && content == "a\nb"
+        ));
+    }
+
+    #[test]
+    fn result_reports_context_and_stops_are_not_errors() {
+        let done = line(
+            r#"{"type":"result","is_error":false,"session_id":"s","usage":{"input_tokens":2,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"output_tokens":3},"modelUsage":{"main":{"contextWindow":1000000},"side":{"contextWindow":200000}}}"#,
+        );
+        match &decode(&done)[..] {
+            [
+                EngineEvent::Completed {
+                    session_id,
+                    is_error,
+                    context,
+                },
+            ] => {
+                assert_eq!(session_id.as_deref(), Some("s"));
+                assert!(!is_error);
+                assert_eq!(context.used, 35);
+                assert_eq!(context.window, Some(1_000_000));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        for (reason, expect_error) in [
+            ("aborted_streaming", false),
+            ("aborted_tools", false),
+            ("max_turns", true),
+        ] {
+            let ended = line(&format!(
+                r#"{{"type":"result","is_error":true,"terminal_reason":"{reason}"}}"#
+            ));
+            assert!(
+                matches!(&decode(&ended)[..], [EngineEvent::Completed { is_error, .. }] if *is_error == expect_error),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn rate_limit_event_becomes_quota() {
+        let event = line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.09,"resetsAt":1792013400},"seven_day":{"utilization":0.19,"resetsAt":1792303200}}}}"#,
+        );
+        match &decode(&event)[..] {
+            [EngineEvent::Quota(quota)] => {
+                let five = quota.five_hour.unwrap();
+                assert!((five.used - 0.09).abs() < 1e-6);
+                assert_eq!(five.resets_at, 1792013400);
+                assert_eq!(quota.seven_day.unwrap().resets_at, 1792303200);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_rule_prompts_reach_the_user() {
+        let rule = line(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"gh pr create --title x"},"decision_reason_type":"rule","tool_use_id":"t9"}}"#,
+        );
+        match permission_prompt(&rule) {
+            Some(Prompt::Ask {
+                request_id,
+                call,
+                input,
+            }) => {
+                assert_eq!(request_id, "r1");
+                assert_eq!(call.call_id, "t9");
+                assert_eq!(call.summary, "gh pr create --title x");
+                assert_eq!(input["command"], "gh pr create --title x");
+            }
+            _ => panic!("rule prompt not offered to the user"),
+        }
+
+        let mode = line(
+            r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a"}}}"#,
+        );
+        assert!(
+            matches!(permission_prompt(&mode), Some(Prompt::Refuse { request_id, tool }) if request_id == "r2" && tool == "Write")
+        );
+
+        let other = line(
+            r#"{"type":"control_request","request_id":"r3","request":{"subtype":"interrupt"}}"#,
+        );
+        assert!(permission_prompt(&other).is_none());
+        assert!(permission_prompt(&line(r#"{"type":"result"}"#)).is_none());
+    }
+
+    #[test]
+    fn summary_prefers_the_most_telling_field() {
+        assert_eq!(
+            summarize(&line(
+                r#"{"description":"Build it","command":"cargo build"}"#
+            )),
+            "cargo build"
+        );
+        assert_eq!(summarize(&line(r#"{"file_path":"/a/b.rs"}"#)), "/a/b.rs");
+        assert_eq!(
+            summarize(&line(r#"{"command":"\n  ls -la\nwc"}"#)),
+            "ls -la"
+        );
+        assert_eq!(summarize(&line(r#"{"todos":[]}"#)), "");
+    }
+}

@@ -1,6 +1,6 @@
 # claudo: Native Claude Client (Claude Code CLI frontend): Implementation Plan
 
-Status: M0 to M5 and M3b implemented; M6 (polish) is open. COSMIC is the primary frontend, so its gaps come first.
+Status: M0 to M5 and M3b implemented; M6 (polish) in progress. COSMIC is the primary frontend, so its gaps come first.
 
 ## Decisions locked (from review)
 
@@ -192,9 +192,10 @@ Even though tools live in Claude Code, exposing them through a socket is still a
 - **Opt-in**: libcosmic (git, pinned rev `7e77707`) is an optional dependency behind the `cosmic` feature: `cargo build --workspace` pulls **0** libcosmic crates; `cargo run -p claudo-cosmic --features cosmic` builds the real app. Without the feature, the binary is a helpful stub.
 - Verified: compiles + clippy-clean with the feature; gating confirmed via `cargo tree`. Live COSMIC render is for the user's machine (needs a COSMIC/Wayland session).
 
-**M6: Polish**
-- Model picker, system-prompt customization, attachments/images, conversation search, theming, packaging (RPM/deb/AppImage, .msi, .dmg), autostart for daemon mode.
-- Build/README docs for coworkers cloning the private repo (install `claude`, log in, `cargo build`).
+**M6: Polish (in progress)**
+- Done: one persistent `claude` process per conversation; Opus 5.5 default and current model presets; live thinking summaries; a stop button; subscription usage windows parsed (not displayed yet); parser unit tests.
+- COSMIC, following Claude Desktop's layout: markdown with highlighted code, message bubbles, expandable thinking and tool rows, a multi-line composer holding the conversation's model, thinking and permissions, a sidebar with New chat, Recents and Settings, a settings page, and hot reload (`cargo cosmic-hot`).
+- Open: showing the usage windows, attaching a project folder in COSMIC, attachments/images, conversation search, packaging (RPM/deb/AppImage, .msi, .dmg), autostart for daemon mode.
 
 ## 13. Open questions for review
 

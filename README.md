@@ -76,6 +76,7 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 ```bash
 cargo build --workspace     # everything except COSMIC
 cargo lint                  # clippy on everything, COSMIC included
+cargo test -p claudo-core    # stream-json parser tests, no CLI needed
 cargo probe live_probe      # probes hit the real CLI and cost tokens
 ```
 
