@@ -123,6 +123,13 @@ mod app {
         /// Ctrl held, tracked separately because scroll events carry no modifiers.
         ctrl: bool,
         error: Option<String>,
+        page: Page,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Page {
+        Chat,
+        Settings,
     }
 
     #[derive(Debug, Clone)]
@@ -151,6 +158,9 @@ mod app {
         #[cfg(feature = "hot")]
         Hotpatched,
         Open(String),
+        SetPage(Page),
+        /// The main window is closing.
+        Quit,
         New,
         SetModel(usize),
         ModelText(String),
@@ -428,43 +438,117 @@ mod app {
             }
         }
 
-        fn settings_view(&self) -> Element<'_, Message> {
-            let model_labels: Vec<&str> = MODEL_PRESETS.iter().map(|(l, _)| *l).collect();
-            let model_sel = MODEL_PRESETS
-                .iter()
-                .position(|(_, v)| *v == self.settings.model);
-            let effort_labels: Vec<&str> = Effort::ALL.iter().map(|e| e.label()).collect();
-            let effort_sel = Effort::ALL.iter().position(|e| *e == self.settings.effort);
-            let profile_labels: Vec<&str> = PROFILES.iter().map(|p| p.label()).collect();
-            let profile_sel = PROFILES.iter().position(|p| *p == self.settings.profile);
+        fn settings_page(&self) -> Element<'_, Message> {
+            let models: Vec<&str> = MODEL_PRESETS.iter().map(|(label, _)| *label).collect();
+            let efforts: Vec<&str> = Effort::ALL.iter().map(|e| e.label()).collect();
+            let profiles: Vec<&str> = PROFILES.iter().map(|p| p.label()).collect();
+            let defaults = widget::settings::section()
+                .title("Defaults for new conversations")
+                .add(widget::settings::item(
+                    "Model",
+                    widget::dropdown(
+                        models,
+                        MODEL_PRESETS
+                            .iter()
+                            .position(|(_, m)| *m == self.settings.model),
+                        Message::SetModel,
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Model version",
+                    widget::text_input("claude-sonnet-5-5", &self.settings.model)
+                        .on_input(Message::ModelText)
+                        .width(Length::Fixed(220.0)),
+                ))
+                .add(widget::settings::item(
+                    "Thinking",
+                    widget::dropdown(
+                        efforts,
+                        Effort::ALL.iter().position(|e| *e == self.settings.effort),
+                        Message::SetEffort,
+                    ),
+                ))
+                .add(widget::settings::item(
+                    "Permissions",
+                    widget::dropdown(
+                        profiles,
+                        PROFILES.iter().position(|p| *p == self.settings.profile),
+                        Message::SetProfile,
+                    ),
+                ));
 
-            let global = widget::Row::with_children(vec![
-                widget::text("Model").into(),
-                widget::dropdown(model_labels, model_sel, Message::SetModel).into(),
-                widget::text_input("version…", &self.settings.model)
-                    .on_input(Message::ModelText)
-                    .width(Length::Fixed(190.0))
+            let page = widget::Column::with_children(vec![
+                widget::button::text("Back to chat")
+                    .leading_icon(widget::icon::from_name("go-previous-symbolic"))
+                    .on_press(Message::SetPage(Page::Chat))
                     .into(),
-                widget::text("Thinking").into(),
-                widget::dropdown(effort_labels, effort_sel, Message::SetEffort).into(),
-                widget::text("Permissions").into(),
-                widget::dropdown(profile_labels, profile_sel, Message::SetProfile).into(),
+                widget::text::title3("Settings").into(),
+                defaults.into(),
+                widget::text(self.settings.profile.tooltip())
+                    .class(dim())
+                    .into(),
+                widget::text("Each conversation can change these from its message box.")
+                    .class(dim())
+                    .into(),
             ])
-            .spacing(6);
+            .spacing(16)
+            .padding([24, 16])
+            .max_width(COLUMN_WIDTH * self.zoom);
+            widget::scrollable(widget::container(page).center_x(Length::Fill))
+                .height(Length::Fill)
+                .into()
+        }
 
-            let mut rows: Vec<Element<Message>> = Vec::new();
-            if let Some(ctx) = self
-                .current
-                .as_deref()
-                .and_then(|id| self.conversations.iter().find(|c| c.id == id))
-                .and_then(|c| context_label(&c.context))
-            {
-                rows.push(widget::text(ctx).size(12.0).into());
-            }
-            rows.push(widget::text::heading("Global defaults").into());
-            rows.push(global.into());
+        fn sidebar(&self) -> Element<'_, Message> {
+            let size = 14.0 * self.zoom;
+            let radius = cosmic::theme::active().cosmic().corner_radii.radius_s;
+            let recents: Vec<Element<Message>> = self
+                .conversations
+                .iter()
+                .map(|c| {
+                    let title = widget::text(truncate(&c.title, 30))
+                        .size(size)
+                        .wrapping(text::Wrapping::None)
+                        .width(Length::Fill);
+                    widget::button::custom(title)
+                        .class(cosmic::theme::Button::ListItem(radius))
+                        .selected(self.page == Page::Chat && self.is_current(&c.id))
+                        .on_press(Message::Open(c.id.clone()))
+                        .padding([6, 10])
+                        .width(Length::Fill)
+                        .into()
+                })
+                .collect();
 
-            widget::Column::with_children(rows).spacing(6).into()
+            widget::container(
+                widget::Column::with_children(vec![
+                    widget::button::text("New chat")
+                        .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                        .on_press(Message::New)
+                        .into(),
+                    widget::text("Recents")
+                        .size(12.0 * self.zoom)
+                        .class(dim())
+                        .into(),
+                    widget::scrollable(widget::Column::with_children(recents).spacing(2))
+                        .height(Length::Fill)
+                        .into(),
+                    widget::button::text("Settings")
+                        .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
+                        .on_press(Message::SetPage(Page::Settings))
+                        .into(),
+                ])
+                .spacing(8),
+            )
+            .width(Length::Fixed(260.0))
+            .height(Length::Fill)
+            .padding(8)
+            .into()
+        }
+
+        fn current_info(&self) -> Option<&ConversationInfo> {
+            let id = self.current.as_deref()?;
+            self.conversations.iter().find(|c| c.id == id)
         }
     }
 
@@ -880,6 +964,7 @@ mod app {
                 zoom: 1.0,
                 ctrl: false,
                 error: None,
+                page: Page::Chat,
             };
             (app, Task::none())
         }
@@ -937,8 +1022,18 @@ mod app {
                         *open = !*open;
                     }
                 }
-                Message::Open(id) => self.open(id),
-                Message::New => self.cmd(Command::NewScratch),
+                Message::Open(id) => {
+                    self.page = Page::Chat;
+                    self.open(id);
+                }
+                Message::New => {
+                    self.page = Page::Chat;
+                    self.cmd(Command::NewScratch);
+                }
+                Message::SetPage(page) => self.page = page,
+                // libcosmic's Wayland teardown races between two threads and segfaults.
+                // Nothing here needs tearing down: state is saved as it changes.
+                Message::Quit => std::process::exit(0),
                 Message::SetModel(i) => {
                     if let Some((_, v)) = MODEL_PRESETS.get(i) {
                         self.settings.model = (*v).to_string();
@@ -1000,54 +1095,47 @@ mod app {
                 Some(_) => {}
             }
 
-            // Sidebar.
-            let mut convs: Vec<Element<Message>> = Vec::new();
-            for c in &self.conversations {
-                let title = truncate(&c.title, 26);
-                let label = if self.is_current(&c.id) {
-                    format!("▸ {title}")
-                } else {
-                    format!("  {title}")
-                };
-                // `wrapping(None)` keeps each entry on one line; wrapped labels
-                // overflowed their button and overlapped the next row.
-                let text = widget::text(label)
-                    .size(14.0 * self.zoom)
-                    .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                    .width(Length::Fill);
-                convs.push(
-                    widget::button::custom(text)
-                        .on_press(Message::Open(c.id.clone()))
-                        .width(Length::Fill)
-                        .into(),
-                );
-            }
-            let list = widget::scrollable(widget::Column::with_children(convs).spacing(2))
-                .height(Length::Fill);
-            let sidebar = widget::container(
-                widget::Column::with_children(vec![
-                    widget::button::standard("+ New chat")
-                        .on_press(Message::New)
-                        .width(Length::Fill)
-                        .into(),
-                    list.into(),
-                ])
-                .spacing(10),
-            )
-            .width(Length::Fixed(240.0))
+            let main = match self.page {
+                Page::Chat => self.conversation(),
+                Page::Settings => self.settings_page(),
+            };
+            widget::Row::with_children(vec![
+                self.sidebar(),
+                widget::divider::vertical::default().into(),
+                main,
+            ])
             .height(Length::Fill)
-            .padding(8);
+            .into()
+        }
 
-            let main =
-                widget::Column::with_children(vec![self.settings_view(), self.conversation()])
-                    .spacing(8)
-                    .width(Length::Fill)
-                    .height(Length::Fill);
+        fn header_center(&self) -> Vec<Element<'_, Message>> {
+            let title = match self.page {
+                Page::Settings => Some("Settings".to_string()),
+                Page::Chat => self.current_info().map(|c| truncate(&c.title, 60)),
+            };
+            title
+                .map(|t| widget::text::heading(t).into())
+                .into_iter()
+                .collect()
+        }
 
-            widget::Row::with_children(vec![sidebar.into(), main.into()])
-                .spacing(12)
-                .padding(12)
-                .into()
+        fn header_end(&self) -> Vec<Element<'_, Message>> {
+            if self.page != Page::Chat {
+                return Vec::new();
+            }
+            self.current_info()
+                .and_then(|c| context_label(&c.context))
+                .map(|label| widget::text(label).size(12.0).class(dim()).into())
+                .into_iter()
+                .collect()
+        }
+
+        fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Message> {
+            (self.core.main_window_id() == Some(id)).then_some(Message::Quit)
+        }
+
+        fn on_app_exit(&mut self) -> Option<Message> {
+            Some(Message::Quit)
         }
     }
 
