@@ -451,6 +451,7 @@ mod app {
                         self.approvals.push((request_id, call));
                     }
                 }
+                ServerEvent::Quota(_) => {}
                 ServerEvent::Error { detail } => {
                     self.error = Some(detail);
                     self.streaming = false;

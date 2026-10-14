@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use claudo_protocol::{ContextUsage, Profile, ToolCall};
+use claudo_protocol::{ContextUsage, Profile, Quota, QuotaWindow, ToolCall};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -41,6 +41,8 @@ pub enum EngineEvent {
     ThinkingDelta { text: String },
     /// Claude invoked a tool; the call has no result yet.
     ToolStarted(ToolCall),
+    /// The subscription's usage windows, reported once per turn.
+    Quota(Quota),
     /// A call matched `ASK_RULES`; the process waits for `Session::answer`.
     ApprovalNeeded { request_id: String, call: ToolCall },
     /// A tool returned. In `Safe`/`AcceptEdits` a denial arrives here as an error.
@@ -431,6 +433,8 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             })
             .collect(),
 
+        "rate_limit_event" => quota(v).map(EngineEvent::Quota).into_iter().collect(),
+
         "result" => vec![EngineEvent::Completed {
             session_id: v
                 .get("session_id")
@@ -486,6 +490,21 @@ fn summarize(input: &Value) -> String {
         .and_then(|s| s.lines().map(str::trim).find(|line| !line.is_empty()))
         .unwrap_or("")
         .to_string()
+}
+
+fn quota(v: &Value) -> Option<Quota> {
+    let windows = v.pointer("/rate_limit_info/unifiedWindows")?;
+    let window = |key: &str| {
+        let w = windows.get(key)?;
+        Some(QuotaWindow {
+            used: w.get("utilization")?.as_f64()? as f32,
+            resets_at: w.get("resetsAt")?.as_u64()?,
+        })
+    };
+    Some(Quota {
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
+    })
 }
 
 /// Context size for the turn, from the `result` event: everything that made up

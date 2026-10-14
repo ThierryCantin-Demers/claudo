@@ -354,6 +354,8 @@ impl ClaudoApp {
                     }
                 }
 
+                ServerEvent::Quota(_) => {}
+
                 ServerEvent::Error { detail } => {
                     self.error = Some(detail);
                     self.approvals.clear();

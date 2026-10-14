@@ -44,6 +44,7 @@ fn turn(
             EngineEvent::Delta { text: t } => text.push_str(&t),
             EngineEvent::ThinkingDelta { text: t } => println!("  [thinking: {}]", t.trim()),
             EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
+            EngineEvent::Quota(_) => {}
             EngineEvent::ApprovalNeeded { call, .. } => {
                 println!("  [needs approval: {}]", call.summary)
             }

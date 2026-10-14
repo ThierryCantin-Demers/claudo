@@ -105,6 +105,7 @@ Events consumed from the JSONL stream:
 | `assistant` message, `tool_use` block | tool invoked |
 | `user` message, `tool_result` block | tool returned (denials arrive here as errors) |
 | `control_request` / `can_use_tool` | a call waits for approval; answered with a `control_response` |
+| `rate_limit_event` | `rate_limit_info.unifiedWindows` five-hour and seven-day `utilization` and `resetsAt` |
 | `result` | turn complete; `usage` and `modelUsage[*].contextWindow` for context display |
 
 Parse defensively by field extraction, not strict structs, so unrelated schema changes do

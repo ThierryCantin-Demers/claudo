@@ -207,6 +207,9 @@ impl Backend {
                             text,
                         });
                     }
+                    EngineEvent::Quota(quota) => {
+                        let _ = events.send(ServerEvent::Quota(quota));
+                    }
                     EngineEvent::ApprovalNeeded { request_id, call } => {
                         let _ = events.send(ServerEvent::ApprovalRequested {
                             conversation_id: conversation_id.clone(),

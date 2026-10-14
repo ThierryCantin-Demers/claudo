@@ -86,6 +86,21 @@ pub const MODEL_PRESETS: &[(&str, &str)] = &[
 /// Model used when the user hasn't chosen one.
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
+/// Subscription usage the CLI reports during each turn; account-wide, not per conversation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Quota {
+    pub five_hour: Option<QuotaWindow>,
+    pub seven_day: Option<QuotaWindow>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct QuotaWindow {
+    /// Fraction of the window used, from 0.0 to 1.0.
+    pub used: f32,
+    /// When the window resets, in Unix seconds.
+    pub resets_at: u64,
+}
+
 /// Context usage for the last turn of a conversation, reported by the CLI.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ContextUsage {
@@ -323,6 +338,7 @@ pub enum ServerEvent {
         #[serde(default)]
         context: ContextUsage,
     },
+    Quota(Quota),
     Error {
         detail: String,
     },

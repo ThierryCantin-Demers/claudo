@@ -39,6 +39,7 @@ fn main() {
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 ServerEvent::Delta { text, .. } => assistant.push_str(&text),
+                ServerEvent::Quota(quota) => println!("quota: {quota:?}"),
                 ServerEvent::Completed {
                     is_error, context, ..
                 } => {
