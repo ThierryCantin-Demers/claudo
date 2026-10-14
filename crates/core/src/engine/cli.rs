@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use claudo_protocol::{ContextUsage, Profile, ToolCall};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::claude_bin;
 
@@ -155,6 +156,12 @@ impl Session {
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
+                if v.get("type").and_then(Value::as_str) == Some("control_cancel_request") {
+                    if let Some(id) = v.get("request_id").and_then(Value::as_str) {
+                        reader.approvals.lock().unwrap().remove(id);
+                    }
+                    continue;
+                }
                 let events = match permission_prompt(&v) {
                     Some(Prompt::Ask {
                         request_id,
@@ -235,6 +242,16 @@ impl Session {
             return Err(e);
         }
         Ok(rx)
+    }
+
+    /// Stop the running turn; it still ends with `Completed`, and the process
+    /// stays up for the next one.
+    pub fn interrupt(&self) -> io::Result<()> {
+        self.shared.write(&json!({
+            "type": "control_request",
+            "request_id": Uuid::new_v4().to_string(),
+            "request": { "subtype": "interrupt" },
+        }))
     }
 
     /// Answer an `ApprovalNeeded`; the waiting call then runs or fails.
@@ -419,7 +436,13 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
                 .get("session_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            // A turn the user stopped ends as an error (`aborted_streaming`, or
+            // `aborted_tools` during a call or an approval); it is not one.
+            is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false)
+                && !v
+                    .get("terminal_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason.starts_with("aborted_")),
             context: context_usage(v),
         }],
 

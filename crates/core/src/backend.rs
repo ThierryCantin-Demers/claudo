@@ -85,6 +85,12 @@ impl Backend {
                 effort,
             } => self.send(conversation_id, text, profile, model, effort),
 
+            Command::Stop { conversation_id } => {
+                if let Err(detail) = self.live.interrupt(&conversation_id) {
+                    self.emit(ServerEvent::Error { detail });
+                }
+            }
+
             Command::AnswerApproval {
                 conversation_id,
                 request_id,

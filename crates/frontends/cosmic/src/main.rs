@@ -152,6 +152,7 @@ mod app {
         Scroll(f32),
         Edit(text_editor::Action),
         Send,
+        Stop,
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(usize),
@@ -673,9 +674,15 @@ mod app {
             let profiles: Vec<&str> = PROFILES.iter().map(|p| p.label()).collect();
             let efforts: Vec<&str> = Effort::ALL.iter().map(|e| e.label()).collect();
             let models: Vec<&str> = MODEL_PRESETS.iter().map(|(label, _)| *label).collect();
-            let send = widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                .class(cosmic::theme::Button::Suggested)
-                .on_press_maybe(self.can_send().then_some(Message::Send));
+            let send = if self.streaming {
+                widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
+                    .class(cosmic::theme::Button::Standard)
+                    .on_press(Message::Stop)
+            } else {
+                widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press_maybe(self.can_send().then_some(Message::Send))
+            };
             let controls = widget::Row::with_children(vec![
                 widget::dropdown(
                     profiles,
@@ -1086,6 +1093,11 @@ mod app {
                 }
                 Message::Edit(action) => self.draft.perform(action),
                 Message::Send => self.send(),
+                Message::Stop => {
+                    if let Some(conversation_id) = self.current.clone() {
+                        self.cmd(Command::Stop { conversation_id });
+                    }
+                }
                 Message::Link(url) => {
                     std::thread::spawn(move || {
                         let _ = std::process::Command::new("xdg-open").arg(url).status();

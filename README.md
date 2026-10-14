@@ -49,7 +49,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 ## Features
 
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.
-- Streaming replies, with Claude's thinking and tool calls shown as collapsible rows.
+- Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Model and thinking level, globally or per conversation.
 - Context usage for the last turn.

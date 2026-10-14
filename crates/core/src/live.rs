@@ -72,6 +72,17 @@ impl LiveSessions {
         Ok(turn)
     }
 
+    /// Stop a conversation's running turn.
+    pub fn interrupt(&self, conversation_id: &str) -> Result<(), String> {
+        let sessions = self.sessions.lock().unwrap();
+        let session = sessions
+            .get(conversation_id)
+            .ok_or_else(|| "that conversation has no running claude process".to_string())?;
+        session
+            .interrupt()
+            .map_err(|e| format!("could not stop the turn: {e}"))
+    }
+
     /// Answer the approval a conversation's running turn is waiting on.
     pub fn answer(
         &self,

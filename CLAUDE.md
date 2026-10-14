@@ -197,7 +197,13 @@ MCP servers and CLAUDE.md discovery. It does **not** avoid the cache TTL expirin
 slow conversations. To reduce tokens, shrink the context: fewer enabled tools, shorter
 conversations, a cheaper model for throwaway turns.
 
-The open stdin also carries approval answers and is what cancelling a turn will use.
+The open stdin also carries approval answers and interrupts.
+
+**Stopping a turn** writes `{"type":"control_request","request":{"subtype":"interrupt"}}`. The
+turn still ends with a `result`, flagged `is_error` with `terminal_reason` `aborted_streaming`
+(mid-reply) or `aborted_tools` (during a call or an approval); `core` reports any `aborted_*`
+turn as a normal completion. A pending approval is withdrawn first with a
+`control_cancel_request`. The process stays up for the next turn.
 
 ## Workflow
 

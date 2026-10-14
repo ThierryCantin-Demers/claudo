@@ -260,6 +260,10 @@ pub enum Command {
         model: String,
         effort: Effort,
     },
+    /// Stop the conversation's running turn. It still ends with `Completed`.
+    Stop {
+        conversation_id: ConversationId,
+    },
     /// Answer an `ApprovalRequested`.
     AnswerApproval {
         conversation_id: ConversationId,

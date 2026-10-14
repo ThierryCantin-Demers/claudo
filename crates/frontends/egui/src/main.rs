@@ -787,6 +787,11 @@ impl ClaudoApp {
                     if streaming {
                         ui.spinner();
                         ui.label("streaming...");
+                        if ui.button("Stop").clicked()
+                            && let Some(conversation_id) = self.current.clone()
+                        {
+                            self.transport.send(Command::Stop { conversation_id });
+                        }
                     }
                 });
                 ui.add_space(6.0);
