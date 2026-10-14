@@ -155,6 +155,8 @@ impl Effort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Item {
     User(String),
+    /// The summary of Claude's reasoning before a reply or tool call.
+    Thinking(String),
     Assistant(String),
     Tool(ToolCall),
 }
@@ -163,6 +165,10 @@ pub enum Item {
 pub struct ToolCall {
     pub call_id: CallId,
     pub name: String,
+    /// One line naming what the call acts on (a command, a path, a pattern), or empty.
+    #[serde(default)]
+    pub summary: String,
+    /// The tool's input as pretty-printed JSON.
     pub input: String,
     pub result: Option<String>,
     pub is_error: bool,
@@ -280,11 +286,13 @@ pub enum ServerEvent {
         conversation_id: ConversationId,
         text: String,
     },
+    ThinkingDelta {
+        conversation_id: ConversationId,
+        text: String,
+    },
     ToolStarted {
         conversation_id: ConversationId,
-        call_id: CallId,
-        name: String,
-        input: String,
+        call: ToolCall,
     },
     ToolResult {
         conversation_id: ConversationId,

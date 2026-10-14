@@ -14,8 +14,14 @@ path = "src/main.rs"
 [features]
 default = []
 cosmic = ["dep:libcosmic"]
+# Hot-patches `view` and `update` while running under `cargo hot` (`cargo cosmic-hot`).
+hot = ["cosmic", "dep:iced", "dep:iced_core", "iced_core/hot", "dep:iced_debug"]
 
 [dependencies]
 claudo-protocol.workspace = true
 claudo-transport.workspace = true
-libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }
+libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true, features = ["markdown", "highlighter"] }
+# libcosmic's own iced, named only to turn on its `hot` feature; same source, so one crate.
+iced = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true, features = ["hot"] }
+iced_core = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }
+iced_debug = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }

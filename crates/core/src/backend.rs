@@ -185,16 +185,16 @@ impl Backend {
                             text,
                         });
                     }
-                    EngineEvent::ToolStarted {
-                        call_id,
-                        name,
-                        input,
-                    } => {
+                    EngineEvent::ThinkingDelta { text } => {
+                        let _ = events.send(ServerEvent::ThinkingDelta {
+                            conversation_id: conversation_id.clone(),
+                            text,
+                        });
+                    }
+                    EngineEvent::ToolStarted(call) => {
                         let _ = events.send(ServerEvent::ToolStarted {
                             conversation_id: conversation_id.clone(),
-                            call_id,
-                            name,
-                            input,
+                            call,
                         });
                     }
                     EngineEvent::ToolResult {

@@ -9,10 +9,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use claudo_protocol::{ContextUsage, Item, Overrides, ToolCall};
+use claudo_protocol::{ContextUsage, Item, Overrides};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+
+use crate::engine::cli::tool_call;
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
 pub fn data_root() -> PathBuf {
@@ -250,25 +252,15 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                                     items.push(Item::Assistant(t.to_string()));
                                 }
                             }
-                            Some("tool_use") => items.push(Item::Tool(ToolCall {
-                                call_id: b
-                                    .get("id")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                name: b
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("tool")
-                                    .to_string(),
-                                input: b
-                                    .get("input")
-                                    .map(|i| serde_json::to_string_pretty(i).unwrap_or_default())
-                                    .unwrap_or_default(),
-                                result: None,
-                                is_error: false,
-                            })),
-                            _ => {} // skip thinking
+                            Some("thinking") => {
+                                if let Some(t) = b.get("thinking").and_then(Value::as_str)
+                                    && !t.trim().is_empty()
+                                {
+                                    items.push(Item::Thinking(t.trim_end().to_string()));
+                                }
+                            }
+                            Some("tool_use") => items.push(Item::Tool(tool_call(b))),
+                            _ => {}
                         }
                     }
                 }

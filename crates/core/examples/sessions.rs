@@ -48,6 +48,7 @@ fn main() {
     for it in &items {
         match it {
             Item::User(t) => println!("  USER: {}", clip(t)),
+            Item::Thinking(t) => println!("  THINKING: {}", clip(t)),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
             Item::Tool(tc) => println!(
                 "  TOOL {} err={} result={}",

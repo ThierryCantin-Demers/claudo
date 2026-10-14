@@ -15,15 +15,16 @@ claude auth login
 ### COSMIC
 
 ```bash
-cargo run -p claudo-cosmic --features cosmic --release
+cargo cosmic
 ```
 
-`--features cosmic` is required. Without it the binary only prints a message and exits.
+That is `cargo run -p claudo-cosmic --features cosmic --release`. Without
+`--features cosmic` the binary only prints a message and exits.
 
 ### egui (Linux, macOS, Windows)
 
 ```bash
-cargo run -p claudo-egui --release
+cargo egui
 ```
 
 ### Browser
@@ -39,7 +40,7 @@ Then build the bundle and serve it:
 
 ```bash
 ./scripts/build-web.sh
-cargo run -p claudo-daemon
+cargo daemon
 ```
 
 Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
@@ -48,14 +49,14 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 ## Features
 
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.
-- Streaming replies, with tool calls shown as collapsible cards.
+- Streaming replies, with Claude's thinking and tool calls shown as collapsible rows.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Model and thinking level, globally or per conversation.
 - Context usage for the last turn.
 - A scratch working directory per conversation, or an attached project folder.
 - Zoom with Ctrl+scroll or Ctrl+`+`/`-`/`0`.
 
-The COSMIC frontend is behind egui: plain text instead of markdown, and tool output is not collapsible.
+The COSMIC frontend cannot attach a project folder yet.
 
 ## How it works
 
@@ -73,12 +74,23 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 ## Development
 
 ```bash
-cargo build --workspace                        # everything except COSMIC
-cargo clippy --workspace --examples
-cargo run -p claudo-core --example live_probe  # probes hit the real CLI and cost tokens
+cargo build --workspace     # everything except COSMIC
+cargo lint                  # clippy on everything, COSMIC included
+cargo probe live_probe      # probes hit the real CLI and cost tokens
 ```
 
-The other probes are in `crates/core/examples/` and `crates/daemon/examples/`.
+`cargo probe` alone lists the probes. The aliases live in `.cargo/config.toml`.
+
+### Live reload (COSMIC)
+
+```bash
+cargo install cargo-hot --version 0.1.1 --locked   # once
+cargo cosmic-hot
+```
+
+Saving a file in `crates/frontends/cosmic/src/` patches the running window in about two
+seconds, keeping its state. Changing a type (a new `Message` variant or field) or another
+crate still needs a restart. On Linux it needs a system `lld` (Fedora: `sudo dnf install lld`).
 
 ## License
 

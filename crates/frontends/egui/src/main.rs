@@ -283,20 +283,26 @@ impl ClaudoApp {
                     }
                 }
 
-                ServerEvent::ToolStarted {
+                ServerEvent::ThinkingDelta {
                     conversation_id,
-                    call_id,
-                    name,
-                    input,
+                    text,
                 } => {
                     if self.is_current(&conversation_id) {
-                        self.items.push(Item::Tool(ToolCall {
-                            call_id,
-                            name,
-                            input,
-                            result: None,
-                            is_error: false,
-                        }));
+                        if let Some(Item::Thinking(t)) = self.items.last_mut() {
+                            t.push_str(&text);
+                        } else {
+                            self.items.push(Item::Thinking(text));
+                            self.assistant_idx = None;
+                        }
+                    }
+                }
+
+                ServerEvent::ToolStarted {
+                    conversation_id,
+                    call,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.items.push(Item::Tool(call));
                         self.assistant_idx = None;
                     }
                 }
@@ -787,6 +793,13 @@ impl ClaudoApp {
                                     CommonMarkViewer::new().show(ui, &mut self.md_cache, &text);
                                 }
                                 ui.separator();
+                            }
+                            Item::Thinking(text) => {
+                                egui::CollapsingHeader::new(egui::RichText::new("Thinking").weak())
+                                    .id_salt(("thinking", idx))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new(text).weak());
+                                    });
                             }
                             Item::Tool(tc) => tool_card(ui, &tc),
                         }

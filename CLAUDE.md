@@ -81,7 +81,7 @@ One process per conversation, turns written to stdin as JSONL
 
 ```bash
 claude -p --input-format stream-json --output-format stream-json \
-  --include-partial-messages --verbose \
+  --include-partial-messages --verbose --thinking-display summarized \
   --permission-mode <default|acceptEdits|bypassPermissions> \
   [--resume <session-id>] [--model <m>] [--effort <low|medium|high|xhigh|max>]
 ```
@@ -90,12 +90,17 @@ Every turn emits its own `system`/`init` and ends with its own `result`; the pro
 waits for the next line. Closing stdin makes it finish the running turn and exit.
 `--resume` keeps the session id, so a respawned process continues the same transcript.
 
+`--thinking-display summarized` is not in `--help`. Without it print mode sends every
+thinking block empty; with it the summary streams as `thinking_delta` and is saved in the
+transcript. The model decides per turn whether to think at all, so many turns have none.
+
 Events consumed from the JSONL stream:
 
 | Line | Meaning |
 |---|---|
 | `system` / `subtype: init` | carries `session_id` |
 | `stream_event` -> `content_block_delta` -> `text_delta` | assistant text |
+| `stream_event` -> `content_block_delta` -> `thinking_delta` | thinking summary |
 | `assistant` message, `tool_use` block | tool invoked |
 | `user` message, `tool_result` block | tool returned (denials arrive here as errors) |
 | `result` | turn complete; `usage` and `modelUsage[*].contextWindow` for context display |
@@ -135,7 +140,8 @@ newline.
 breaks the web build and portability.
 
 **libcosmic** is a git dependency pinned to a rev, optional behind the `cosmic` feature.
-Keep it optional. API notes: `cosmic::app::{Application, Core, Task, Settings, run}`,
+Keep it optional. Markdown and code highlighting come from its `markdown` and
+`highlighter` features (iced's markdown widget). API notes: `cosmic::app::{Application, Core, Task, Settings, run}`,
 widgets under `cosmic::widget`, and `row()`/`column()` require children so use
 `Row::with_children` / `Column::with_children`. Sidebar labels need
 `Wrapping::None` or they overflow their button and overlap the next row. There is no runtime
@@ -144,6 +150,16 @@ window scale factor, so zoom scales text sizes only.
 **Streaming feel**: the CLI delivers text in large chunks, so both frontends reveal it
 gradually with a per word fade rather than dumping each chunk. If streaming looks wrong,
 check the reveal animation before suspecting the backend.
+
+**Hot reload depends on `vendor/iced_core`.** libcosmic's iced keeps named widget states
+in a thread-local, and a hot patch gets its own copy of every thread-local, so patched widgets
+would not see the states the unpatched event loop stored. The vendored `iced_core` moves them
+to a plain static behind its `hot` feature, which only `claudo-cosmic/hot` enables. When the
+libcosmic rev changes, refresh the copy from that rev's `iced/core` and reapply the change in
+`src/widget/tree.rs`. `cargo hot` only reacts to in-place writes, so `sed -i`, which replaces
+the file, does not trigger a patch. New COSMIC subscriptions go through `named(...)`, not
+`Subscription::run`: iced identifies a `run` subscription by its function's address, which
+every patch changes, so it would restart (for the backend, mid-reply).
 
 **Dev builds optimize dependencies** (`[profile.dev.package."*"] opt-level = 3`) because
 unoptimized text shaping made the cosmic frontend feel like it had a one second delay.

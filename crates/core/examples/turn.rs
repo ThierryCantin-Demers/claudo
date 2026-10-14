@@ -42,7 +42,8 @@ fn turn(
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
             EngineEvent::Delta { text: t } => text.push_str(&t),
-            EngineEvent::ToolStarted { name, .. } => println!("  [tool: {name}]"),
+            EngineEvent::ThinkingDelta { text: t } => println!("  [thinking: {}]", t.trim()),
+            EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
             EngineEvent::ToolResult {
                 is_error, content, ..
             } => println!(

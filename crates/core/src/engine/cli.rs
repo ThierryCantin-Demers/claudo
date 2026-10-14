@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use claudo_protocol::{ContextUsage, Profile};
+use claudo_protocol::{ContextUsage, Profile, ToolCall};
 use serde_json::{Value, json};
 
 use crate::claude_bin;
@@ -36,12 +36,10 @@ pub enum EngineEvent {
     Started { session_id: String },
     /// A chunk of assistant text.
     Delta { text: String },
-    /// Claude invoked a tool. `input` is pretty-printed JSON for display.
-    ToolStarted {
-        call_id: String,
-        name: String,
-        input: String,
-    },
+    /// A chunk of the summary of Claude's reasoning.
+    ThinkingDelta { text: String },
+    /// Claude invoked a tool; the call has no result yet.
+    ToolStarted(ToolCall),
     /// A tool returned. In `Safe`/`AcceptEdits` a denial arrives here as an error.
     ToolResult {
         call_id: String,
@@ -101,6 +99,8 @@ impl Session {
             .args(["--input-format", "stream-json"])
             .args(["--output-format", "stream-json"])
             .arg("--include-partial-messages")
+            // Hidden in --help; without it print mode sends thinking blocks empty.
+            .args(["--thinking-display", "summarized"])
             .arg("--permission-mode")
             .arg(cli_mode(config.profile))
             .arg("--verbose")
@@ -255,32 +255,17 @@ fn parse_line(line: &str) -> Vec<EngineEvent> {
             .into_iter()
             .collect(),
 
-        // Token-level text deltas. Tool input arrives here too (as
+        // Token-level text and thinking deltas. Tool input arrives here too (as
         // input_json_delta) but we render tools from the complete `assistant`
-        // message below, so only text deltas matter here.
-        "stream_event" => text_delta(&v).into_iter().collect(),
+        // message below.
+        "stream_event" => stream_delta(&v).into_iter().collect(),
 
         // Completed assistant message: pull out tool_use blocks (text is already
         // streamed via deltas, so skip it to avoid duplication).
         "assistant" => content_blocks(&v)
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-            .map(|b| EngineEvent::ToolStarted {
-                call_id: b
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                name: b
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_string(),
-                input: b
-                    .get("input")
-                    .map(|i| serde_json::to_string_pretty(i).unwrap_or_default())
-                    .unwrap_or_default(),
-            })
+            .map(|b| EngineEvent::ToolStarted(tool_call(b)))
             .collect(),
 
         // Tool results are delivered as `user` messages by Claude Code.
@@ -311,6 +296,44 @@ fn parse_line(line: &str) -> Vec<EngineEvent> {
     }
 }
 
+/// A `tool_use` block, from stream-json or a transcript, before its result arrives.
+pub(crate) fn tool_call(block: &Value) -> ToolCall {
+    let field = |key| block.get(key).and_then(Value::as_str);
+    let input = block.get("input");
+    ToolCall {
+        call_id: field("id").unwrap_or("").to_string(),
+        name: field("name").unwrap_or("tool").to_string(),
+        summary: input.map(summarize).unwrap_or_default(),
+        input: input
+            .map(|i| serde_json::to_string_pretty(i).unwrap_or_default())
+            .unwrap_or_default(),
+        result: None,
+        is_error: false,
+    }
+}
+
+/// Input fields that say what a Claude Code tool acts on, most telling first.
+const SUMMARY_FIELDS: [&str; 9] = [
+    "command",
+    "file_path",
+    "notebook_path",
+    "pattern",
+    "url",
+    "query",
+    "description",
+    "skill",
+    "prompt",
+];
+
+fn summarize(input: &Value) -> String {
+    SUMMARY_FIELDS
+        .iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .and_then(|s| s.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Context size for the turn, from the `result` event: everything that made up
 /// the request's context, plus the model's window from `modelUsage`.
 fn context_usage(v: &Value) -> ContextUsage {
@@ -339,18 +362,22 @@ fn context_usage(v: &Value) -> ContextUsage {
     ContextUsage { used, window }
 }
 
-fn text_delta(v: &Value) -> Option<EngineEvent> {
+fn stream_delta(v: &Value) -> Option<EngineEvent> {
     let event = v.get("event")?;
     if event.get("type")?.as_str()? != "content_block_delta" {
         return None;
     }
     let delta = event.get("delta")?;
-    if delta.get("type")?.as_str()? != "text_delta" {
-        return None;
+    let field = |key| Some(delta.get(key)?.as_str()?.to_string());
+    match delta.get("type")?.as_str()? {
+        "text_delta" => Some(EngineEvent::Delta {
+            text: field("text")?,
+        }),
+        "thinking_delta" => Some(EngineEvent::ThinkingDelta {
+            text: field("thinking")?,
+        }),
+        _ => None,
     }
-    Some(EngineEvent::Delta {
-        text: delta.get("text")?.as_str()?.to_string(),
-    })
 }
 
 fn content_blocks(v: &Value) -> Vec<Value> {
