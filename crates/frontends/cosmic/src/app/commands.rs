@@ -1,10 +1,9 @@
-//! The Commands drawer: the shell commands a conversation's agent ran, running ones first.
+//! The Commands panel: the shell commands a conversation's agent ran, running ones first.
 
 use super::*;
 use claudo_protocol::TaskStatus;
-use cosmic::app::context_drawer::{ContextDrawer, context_drawer};
 
-/// Selection blocks of a drawer row, apart from the same call's row in the transcript.
+/// Selection blocks of a panel row, apart from the same call's row in the transcript.
 const COMMAND_BLOCK: usize = 10;
 const OUTPUT_BLOCK: usize = 11;
 
@@ -63,9 +62,18 @@ impl ConversationView {
 }
 
 impl ClaudoApp {
-    /// The header bar's button for the drawer, with how many commands are running.
+    /// Its width and the handle's, when it shows.
+    pub(super) fn commands_room(&self) -> f32 {
+        if self.layout.commands_open && self.page == Page::Chat {
+            self.layout.commands_width + HANDLE_WIDTH
+        } else {
+            0.0
+        }
+    }
+
+    /// The header bar's button for the panel, with how many commands are running.
     pub(super) fn commands_button(&self) -> Element<'_, Message> {
-        let open = self.core.window.show_context;
+        let open = self.layout.commands_open;
         let running = self
             .focused()
             .and_then(|id| self.views.get(id))
@@ -98,7 +106,10 @@ impl ClaudoApp {
         .into()
     }
 
-    pub(super) fn commands_drawer(&self) -> Option<ContextDrawer<'_, Message>> {
+    pub(super) fn commands_panel(&self) -> Option<Element<'_, Message>> {
+        if self.commands_room() == 0.0 {
+            return None;
+        }
         let id = self.focused()?;
         let view = self.views.get(id)?;
         let size = 13.0 * self.zoom;
@@ -134,15 +145,39 @@ impl ClaudoApp {
                     .map(|(idx, call)| self.command_row(id, view, idx, call, texts, size)),
             );
         }
-        let title = self.info(id).map_or("Commands".to_string(), |c| {
-            format!("Commands · {}", c.title)
-        });
+        let title = self
+            .info(id)
+            .map_or("New conversation", |c| c.title.as_str());
+        let header = widget::Row::with_children(vec![
+            widget::Column::with_children(vec![
+                widget::text::heading("Commands").into(),
+                widget::text(title)
+                    .size(size * 0.9)
+                    .class(dim())
+                    .wrapping(text::Wrapping::None)
+                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                    .into(),
+            ])
+            .width(Length::Fill)
+            .into(),
+            widget::button::icon(widget::icon::from_name("window-close-symbolic"))
+                .on_press(Message::ShowCommands(false))
+                .into(),
+        ])
+        .align_y(Alignment::Center);
+        let list = widget::scrollable(
+            widget::container(widget::Column::with_children(rows).spacing(6))
+                .padding([0, 12, 12, 0]),
+        )
+        .height(Length::Fill);
         Some(
-            context_drawer(
-                widget::Column::with_children(rows).spacing(6),
-                Message::ShowCommands(false),
+            widget::container(
+                widget::Column::with_children(vec![header.into(), list.into()]).spacing(12),
             )
-            .title(title),
+            .padding([8, 4, 0, 12])
+            .width(Length::Fixed(self.layout.commands_width))
+            .height(Length::Fill)
+            .into(),
         )
     }
 

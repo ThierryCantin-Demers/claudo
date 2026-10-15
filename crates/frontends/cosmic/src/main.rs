@@ -67,6 +67,10 @@ mod app {
     /// squeezed dropdown wraps its label, and libcosmic's has no way to stop it.
     const COMPACT_TILE: f32 = 600.0;
     const HANDLE_WIDTH: f32 = 8.0;
+    const COMMANDS_WIDTH: f32 = 420.0;
+    const COMMANDS_MIN: f32 = 280.0;
+    /// Dragging the Commands panel narrower than this closes it.
+    const COMMANDS_COLLAPSE: f32 = 160.0;
     const PULSE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
     /// A transcript row. Replies keep their parsed markdown so a frame only
@@ -408,6 +412,8 @@ mod app {
         focused: usize,
         sidebar_open: bool,
         sidebar_width: f32,
+        commands_open: bool,
+        commands_width: f32,
         size: Option<(f32, f32)>,
     }
 
@@ -437,6 +443,8 @@ mod app {
     enum Drag {
         /// The sidebar's edge; `offset` is the cursor's distance from it.
         Sidebar { offset: Option<f32> },
+        /// The Commands panel's edge; `offset` is the cursor's distance from it.
+        Commands { offset: Option<f32> },
         /// The handle between tile `left` and the next, from their shares at the start.
         Divider {
             left: usize,
@@ -542,6 +550,8 @@ mod app {
     pub struct UiState {
         sidebar_open: bool,
         sidebar_width: f32,
+        commands_open: bool,
+        commands_width: f32,
         page: Page,
         tiles: Vec<Tile>,
         focused: usize,
@@ -557,6 +567,8 @@ mod app {
             Self {
                 sidebar_open: true,
                 sidebar_width: SIDEBAR_WIDTH,
+                commands_open: false,
+                commands_width: COMMANDS_WIDTH,
                 page: Page::Chat,
                 tiles: Vec::new(),
                 focused: 0,
@@ -607,8 +619,9 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
-        /// Open or close the Commands drawer.
+        /// Open or close the Commands panel.
         ShowCommands(bool),
+        StartCommandsDrag,
         /// Expand or collapse a command in the Commands drawer.
         ToggleCommand(ConversationId, usize),
         /// Up or Down at the message box's edge: an earlier or later prompt.
@@ -817,6 +830,7 @@ mod app {
             let count = self.layout.tiles.len();
             let room = self.layout.size.map_or(f32::INFINITY, |(w, _)| w)
                 - start
+                - self.commands_room()
                 - count.saturating_sub(1) as f32 * HANDLE_WIDTH;
             (
                 start,
@@ -849,6 +863,18 @@ mod app {
                     layout.sidebar_open = width >= SIDEBAR_COLLAPSE;
                     if layout.sidebar_open {
                         layout.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                    }
+                }
+                Some(Drag::Commands { offset }) => {
+                    let layout = &mut self.layout;
+                    let Some((window, _)) = layout.size else {
+                        return;
+                    };
+                    let edge = window - layout.commands_width;
+                    let width = window - (x - *offset.get_or_insert(x - edge));
+                    layout.commands_open = width >= COMMANDS_COLLAPSE;
+                    if layout.commands_open {
+                        layout.commands_width = width.clamp(COMMANDS_MIN, window * 0.6);
                     }
                 }
                 Some(Drag::Divider {
@@ -1131,6 +1157,8 @@ mod app {
             UiState {
                 sidebar_open: self.layout.sidebar_open,
                 sidebar_width: self.layout.sidebar_width,
+                commands_open: self.layout.commands_open,
+                commands_width: self.layout.commands_width,
                 page: self.page,
                 tiles: self.layout.tiles.clone(),
                 focused: self.layout.focused,
@@ -2709,6 +2737,8 @@ mod app {
                     focused: 0,
                     sidebar_open: ui.sidebar_open,
                     sidebar_width: ui.sidebar_width,
+                    commands_open: ui.commands_open,
+                    commands_width: ui.commands_width,
                     size: ui.window,
                 },
                 pending: HashMap::new(),
@@ -2799,7 +2829,11 @@ mod app {
                     self.focus(&id);
                     self.send(id);
                 }
-                Message::ShowCommands(show) => self.core.window.show_context = show,
+                Message::ShowCommands(show) => {
+                    self.layout.commands_open = show;
+                    self.persist();
+                }
+                Message::StartCommandsDrag => self.drag = Some(Drag::Commands { offset: None }),
                 Message::ToggleCommand(id, idx) => {
                     if let Some(view) = self.views.get_mut(&id)
                         && !view.commands_open.remove(&idx)
@@ -3119,6 +3153,19 @@ mod app {
                 );
             }
             columns.push(main);
+            if let Some(panel) = self.commands_panel() {
+                columns.push(
+                    widget::mouse_area(
+                        widget::container(widget::divider::vertical::default())
+                            .center_x(Length::Fixed(HANDLE_WIDTH))
+                            .height(Length::Fill),
+                    )
+                    .on_press(Message::StartCommandsDrag)
+                    .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
+                    .into(),
+                );
+                columns.push(panel);
+            }
             widget::Row::with_children(columns)
                 .height(Length::Fill)
                 .into()
@@ -3167,14 +3214,6 @@ mod app {
                 .into_iter()
                 .chain([self.commands_button()])
                 .collect()
-        }
-
-        fn context_drawer(
-            &self,
-        ) -> Option<cosmic::app::context_drawer::ContextDrawer<'_, Message>> {
-            (self.page == Page::Chat)
-                .then(|| self.commands_drawer())
-                .flatten()
         }
 
         fn dialog(&self) -> Option<Element<'_, Message>> {

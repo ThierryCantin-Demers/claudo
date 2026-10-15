@@ -113,21 +113,6 @@ impl Harness {
         render_alone(&mut self.renderer, dialog, name);
     }
 
-    /// Renders the context drawer alone, as libcosmic shows it at the window's right.
-    fn snapshot_drawer(&mut self, name: &str) {
-        let drawer = self.app.context_drawer().expect("a drawer");
-        let drawer = cosmic::widget::ContextDrawer::new_inner(
-            drawer.title,
-            drawer.actions,
-            drawer.header,
-            drawer.footer,
-            drawer.content,
-            drawer.on_close,
-            480.0,
-        );
-        render_alone(&mut self.renderer, drawer, name);
-    }
-
     /// What Ctrl+C would copy.
     fn selected(&mut self) -> String {
         use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
@@ -374,9 +359,7 @@ fn snapshots() {
     let _ = app.update(Message::ShowCommands(true));
     let idx = app.views[ALPHA].commands().nth(2).unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
-    let mut h = Harness::new(app);
-    h.snapshot_drawer("commands");
-    h.snapshot("commands-window");
+    Harness::new(app).snapshot("commands");
 }
 
 #[test]
@@ -635,13 +618,45 @@ fn the_commands_drawer_lists_running_commands_first() {
     assert_eq!(order, ["t4", "t3", "t2", "t1"]);
 
     let _ = app.update(Message::ShowCommands(true));
-    assert!(app.context_drawer().is_some());
+    assert!(app.commands_panel().is_some());
     let idx = app.views[ALPHA].commands().next().unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
     assert!(app.views[ALPHA].commands_open.contains(&idx));
+}
 
-    let _ = app.update(Message::ShowCommands(false));
-    assert!(!app.core.window.show_context);
+#[test]
+fn the_commands_panel_resizes_from_its_edge_and_closes() {
+    let mut app = with_commands();
+    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    app.layout.commands_open = true;
+    let mut h = Harness::new(app);
+    let edge = WINDOW.width - COMMANDS_WIDTH - HANDLE_WIDTH / 2.0;
+
+    h.move_to(edge, 400.0);
+    h.send(vec![button(true)]);
+    assert!(
+        matches!(h.app.drag, Some(Drag::Commands { .. })),
+        "pressing the edge grabs it"
+    );
+    let _ = h.app.update(Message::DragTo(edge));
+    let _ = h.app.update(Message::DragTo(edge - 100.0));
+    let _ = h.app.update(Message::DragEnd);
+    assert_eq!(h.app.layout.commands_width, COMMANDS_WIDTH + 100.0);
+
+    // The close button sits at the panel's top right.
+    h.move_to(WINDOW.width - 24.0, 24.0);
+    h.send(vec![button(true), button(false)]);
+    assert!(!h.app.layout.commands_open, "the close button closes it");
+
+    h.app.layout.commands_open = true;
+    let _ = h.app.update(Message::StartCommandsDrag);
+    let _ = h.app.update(Message::DragTo(edge - 100.0));
+    let _ = h.app.update(Message::DragTo(WINDOW.width - 140.0));
+    let _ = h.app.update(Message::DragEnd);
+    assert!(
+        !h.app.layout.commands_open,
+        "dragged nearly shut, it closes"
+    );
 }
 
 #[test]
