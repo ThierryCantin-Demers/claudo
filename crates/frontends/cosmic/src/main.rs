@@ -41,7 +41,9 @@ mod app {
     use cosmic::iced::futures::stream::BoxStream;
     use cosmic::iced::futures::{SinkExt, Stream, StreamExt};
     use cosmic::iced::widget::{container, text};
-    use cosmic::iced::{Alignment, Border, Color, Length, Padding, Subscription, keyboard, stream};
+    use cosmic::iced::{
+        Alignment, Border, Color, Length, Padding, Point, Subscription, keyboard, stream,
+    };
     use cosmic::widget::{self, markdown, menu, text_editor};
     use cosmic::{Application, Element};
 
@@ -354,11 +356,14 @@ mod app {
             origin: Option<f32>,
             start: (f32, f32),
         },
-        /// A tile by its header, with the gap it would drop into once it has moved.
+        /// A tile picked up by its title, or with Ctrl anywhere in it. Positions are in the
+        /// tile row; `at` is set once the cursor has moved far enough to lift the tile, and
+        /// `slot` is where it would land among the others.
         Tile {
             from: usize,
-            origin: Option<f32>,
-            slot: Option<usize>,
+            origin: Option<Point>,
+            at: Option<Point>,
+            slot: usize,
         },
     }
 
@@ -506,7 +511,11 @@ mod app {
         StartSidebarDrag,
         StartResize(usize),
         StartMove(ConversationId),
+        /// A left press with Ctrl held, at this window x coordinate.
+        CtrlPress(f32),
         DragTo(f32),
+        /// The cursor in the tile row while a tile is dragged.
+        DragTile(Point),
         DragEnd,
         /// Move a tile this many places, negative to the left.
         Move(ConversationId, i32),
@@ -675,7 +684,7 @@ mod app {
         }
 
         fn drag_to(&mut self, x: f32) {
-            let (start, room) = self.tile_room();
+            let room = self.tile_room().1;
             let total = self.total_share();
             let min = self.tile_min();
             match &mut self.drag {
@@ -709,22 +718,78 @@ mod app {
                         tiles[*left + 1].share = *a + *b - left_share;
                     }
                 }
-                Some(Drag::Tile { origin, slot, .. }) => {
-                    let origin = *origin.get_or_insert(x);
-                    if slot.is_none() && (x - origin).abs() < 8.0 {
-                        return;
-                    }
-                    let mut edge = start;
-                    let centers = self.layout.tiles.iter().map(|t| {
-                        let width = room.map_or(min, |room| t.share / total * room);
-                        let center = edge + width / 2.0;
-                        edge += width + HANDLE_WIDTH;
-                        center
-                    });
-                    *slot = Some(centers.filter(|c| *c < x).count());
-                }
-                None => {}
+                Some(Drag::Tile { .. }) | None => {}
             }
+        }
+
+        fn drag_tile(&mut self, point: Point) {
+            let Some(Drag::Tile { from, .. }) = self.drag else {
+                return;
+            };
+            let centers = self.centers_without(from);
+            let Some(Drag::Tile {
+                origin, at, slot, ..
+            }) = &mut self.drag
+            else {
+                return;
+            };
+            let origin = *origin.get_or_insert(point);
+            if at.is_none() && origin.distance(point) < 8.0 {
+                return;
+            }
+            *at = Some(point);
+            *slot = centers.iter().filter(|c| **c < point.x).count();
+        }
+
+        /// The centers, from the tile row's left edge, of every tile but `skip` in a row
+        /// without it.
+        fn centers_without(&self, skip: usize) -> Vec<f32> {
+            let (_, room) = self.tile_room();
+            let total = self.total_share() - self.layout.tiles.get(skip).map_or(0.0, |t| t.share);
+            let room = room.map(|room| room + HANDLE_WIDTH);
+            let mut edge = 0.0;
+            self.layout
+                .tiles
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, t)| {
+                    let width = room.map_or(self.tile_min(), |room| t.share / total * room);
+                    let center = edge + width / 2.0;
+                    edge += width + HANDLE_WIDTH;
+                    center
+                })
+                .collect()
+        }
+
+        /// The tile under window x coordinate `x`.
+        fn tile_at(&self, x: f32) -> Option<usize> {
+            let (start, room) = self.tile_room();
+            let total = self.total_share();
+            let mut edge = start;
+            self.layout
+                .tiles
+                .iter()
+                .position(|t| {
+                    edge +=
+                        room.map_or(self.tile_min(), |room| t.share / total * room) + HANDLE_WIDTH;
+                    x < edge
+                })
+                .filter(|_| x >= start)
+        }
+
+        fn start_move(&mut self, from: usize) {
+            let Some(id) = self.layout.tiles.get(from).map(|t| t.conversation.clone()) else {
+                return;
+            };
+            self.layout.focused = from;
+            self.focus_composer = Some(id);
+            self.drag = Some(Drag::Tile {
+                from,
+                origin: None,
+                at: None,
+                slot: from,
+            });
         }
 
         /// Move the tile at `from` to `to`, focusing it there.
@@ -1081,55 +1146,163 @@ mod app {
             let room = self.tile_room().1;
             let overflow = room.is_none();
             let total = self.total_share();
-            let slot = match self.drag {
-                Some(Drag::Tile { from, slot, .. }) => {
-                    slot.filter(|s| *s != from && *s != from + 1)
-                }
+            let lifted = match self.drag {
+                Some(Drag::Tile {
+                    from,
+                    at: Some(at),
+                    slot,
+                    ..
+                }) => Some((from, at, slot)),
                 _ => None,
             };
-
-            let mut row: Vec<Element<Message>> = Vec::new();
-            for (i, tile) in self.layout.tiles.iter().enumerate() {
-                let Some(view) = self.views.get(&tile.conversation) else {
-                    continue;
-                };
-                if slot == Some(i) {
-                    row.push(drop_marker());
-                } else if i > 0 && overflow {
-                    row.push(divider());
-                } else if i > 0 {
-                    row.push(
-                        widget::mouse_area(divider())
-                            .on_press(Message::StartResize(i - 1))
-                            .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
-                            .into(),
-                    );
-                }
-                let width = if overflow {
+            let width = |share: f32| {
+                if overflow {
                     Length::Fixed(self.tile_min())
                 } else {
-                    Length::FillPortion((tile.share * 1000.0).round().max(1.0) as u16)
-                };
-                let pixels = room.map_or(self.tile_min(), |room| tile.share / total * room);
-                let tile_view = TileView {
-                    several,
-                    focused: several && i == self.layout.focused,
-                    compact: pixels < COMPACT_TILE,
-                };
-                row.push(self.tile(&tile.conversation, view, tile_view, width));
+                    Length::FillPortion((share * 1000.0).round().max(1.0) as u16)
+                }
+            };
+
+            // A lifted tile leaves the row, and an empty slot shows where it would land.
+            let mut order: Vec<Option<usize>> = (0..count)
+                .filter(|i| lifted.is_none_or(|(from, ..)| *i != from))
+                .map(Some)
+                .collect();
+            if let Some((_, _, slot)) = lifted {
+                order.insert(slot.min(order.len()), None);
             }
-            if slot == Some(count) {
-                row.push(drop_marker());
+
+            let mut row: Vec<Element<Message>> = Vec::new();
+            for (k, item) in order.iter().enumerate() {
+                if k > 0 {
+                    row.push(if overflow || lifted.is_some() {
+                        divider()
+                    } else {
+                        widget::mouse_area(divider())
+                            .on_press(Message::StartResize(k - 1))
+                            .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
+                            .into()
+                    });
+                }
+                match *item {
+                    Some(i) => {
+                        let tile = &self.layout.tiles[i];
+                        let Some(view) = self.views.get(&tile.conversation) else {
+                            continue;
+                        };
+                        let pixels = room.map_or(self.tile_min(), |room| tile.share / total * room);
+                        let tile_view = TileView {
+                            several,
+                            focused: several && i == self.layout.focused,
+                            compact: pixels < COMPACT_TILE,
+                        };
+                        row.push(self.tile(&tile.conversation, view, tile_view, width(tile.share)));
+                    }
+                    None => {
+                        let share = lifted.map_or(1.0, |(from, ..)| self.layout.tiles[from].share);
+                        row.push(drop_slot(width(share)));
+                    }
+                }
             }
             let row = widget::Row::with_children(row).height(Length::Fill);
-            if overflow {
+            let row: Element<Message> = if overflow {
                 widget::scrollable::horizontal(row)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
             } else {
                 row.width(Length::Fill).into()
+            };
+
+            // The layers and the mouse area stay while idle, so starting a drag does not
+            // rebuild the tiles and lose their scroll positions.
+            let card: Element<Message> = match lifted {
+                Some((from, at, _)) => {
+                    let pixels = room.map_or(self.tile_min(), |room| {
+                        self.layout.tiles[from].share / total * room
+                    });
+                    let (w, h) = ((pixels * 0.55).clamp(220.0, 420.0), 180.0 * self.zoom);
+                    widget::container(self.lifted_card(&self.layout.tiles[from].conversation, w, h))
+                        .padding(Padding {
+                            top: (at.y - h / 2.0).max(0.0),
+                            left: (at.x - w / 2.0).max(0.0),
+                            ..Padding::ZERO
+                        })
+                        .into()
+                }
+                None => widget::space::horizontal().width(Length::Fixed(0.0)).into(),
+            };
+            let mut area = widget::mouse_area(
+                cosmic::iced::widget::Stack::with_children(vec![row, card])
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            );
+            if matches!(self.drag, Some(Drag::Tile { .. })) {
+                area = area
+                    .on_move(Message::DragTile)
+                    .interaction(cosmic::iced::mouse::Interaction::Grabbing);
             }
+            area.into()
+        }
+
+        /// A dragged tile, shrunk to its title, context and latest message.
+        fn lifted_card<'a>(
+            &'a self,
+            id: &'a ConversationId,
+            width: f32,
+            height: f32,
+        ) -> Element<'a, Message> {
+            let size = 13.0 * self.zoom;
+            let info = self.info(id);
+            let latest = self.views.get(id).and_then(|view| {
+                view.items.iter().rev().find_map(|entry| match entry {
+                    Entry::User(text) | Entry::Incoming { text, .. } => Some(text.as_str()),
+                    Entry::Reply(reply) => Some(reply.text.as_str()),
+                    _ => None,
+                })
+            });
+            let mut column = vec![
+                widget::text::heading(info.map_or("New conversation", |c| c.title.as_str()))
+                    .wrapping(text::Wrapping::None)
+                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                    .into(),
+            ];
+            if let Some(label) = info.and_then(|c| context_label(&c.context)) {
+                column.push(widget::text(label).size(size * 0.9).class(dim()).into());
+            }
+            if let Some(latest) = latest {
+                column.push(
+                    widget::text(truncate(latest, 400))
+                        .size(size)
+                        .class(dim())
+                        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Height(height * 0.6)))
+                        .into(),
+                );
+            }
+            widget::container(widget::Column::with_children(column).spacing(6))
+                .padding(14)
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(height))
+                .clip(true)
+                .class(cosmic::theme::Container::custom(|theme| {
+                    let cosmic = theme.cosmic();
+                    container::Style {
+                        background: Some(Color::from(cosmic.bg_component_color()).into()),
+                        text_color: Some(cosmic.on_bg_component_color().into()),
+                        border: Border {
+                            radius: cosmic.corner_radii.radius_m.into(),
+                            width: 1.5,
+                            color: cosmic.accent_color().into(),
+                        },
+                        shadow: cosmic::iced::Shadow {
+                            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                            offset: cosmic::iced::Vector::new(0.0, 6.0),
+                            blur_radius: 18.0,
+                        },
+                        ..container::Style::default()
+                    }
+                }))
+                .into()
         }
 
         /// A conversation with, beside others, a header naming it and an outline when focused.
@@ -1147,6 +1320,7 @@ mod app {
                 body
             };
             let framed = widget::container(content)
+                .id(widget::Id::new(format!("tile-{id}")))
                 .width(width)
                 .height(Length::Fill)
                 .class(tile_style(tile.focused));
@@ -1469,19 +1643,26 @@ mod app {
             .into()
     }
 
-    /// Where a dragged tile would land.
-    fn drop_marker<'a>() -> Element<'a, Message> {
-        widget::container(
-            widget::container(widget::space::horizontal().width(Length::Fixed(3.0)))
-                .height(Length::Fill)
-                .class(cosmic::theme::Container::custom(|theme| container::Style {
-                    background: Some(Color::from(theme.cosmic().accent_color()).into()),
+    /// Where a dragged tile would land, as wide as the tile.
+    fn drop_slot<'a>(width: Length) -> Element<'a, Message> {
+        widget::container(widget::space::horizontal())
+            .width(width)
+            .height(Length::Fill)
+            .padding(6)
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                let accent: Color = cosmic.accent_color().into();
+                container::Style {
+                    background: Some(Color { a: 0.08, ..accent }.into()),
+                    border: Border {
+                        radius: cosmic.corner_radii.radius_m.into(),
+                        width: 2.0,
+                        color: Color { a: 0.6, ..accent },
+                    },
                     ..container::Style::default()
-                })),
-        )
-        .center_x(Length::Fixed(HANDLE_WIDTH))
-        .height(Length::Fill)
-        .into()
+                }
+            }))
+            .into()
     }
 
     fn tile_style(focused: bool) -> cosmic::theme::Container<'static> {
@@ -1790,9 +1971,18 @@ mod app {
         press: text_editor::KeyPress,
         conversation: &ConversationId,
     ) -> Option<text_editor::Binding<Message>> {
-        let enter = matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter));
+        use keyboard::key::Named;
+        let enter = matches!(press.key, keyboard::Key::Named(Named::Enter));
         let focused = matches!(press.status, text_editor::Status::Focused { .. });
         let modifiers = press.modifiers;
+        let arrow = matches!(
+            press.key,
+            keyboard::Key::Named(Named::ArrowLeft | Named::ArrowRight)
+        );
+        // Alt+arrows switch and move tiles.
+        if arrow && modifiers.alt() {
+            return None;
+        }
         if enter && focused && !modifiers.shift() {
             return Some(text_editor::Binding::Custom(Message::Send(
                 conversation.clone(),
@@ -1864,7 +2054,9 @@ mod app {
             let mut subscriptions = vec![named("backend", backend_worker), window_events()];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
-            if self.drag.is_some() {
+            if matches!(self.drag, Some(Drag::Tile { .. })) {
+                subscriptions.push(cosmic::iced::event::listen_with(release_events));
+            } else if self.drag.is_some() {
                 subscriptions.push(cosmic::iced::event::listen_with(drag_events));
             }
             // Timers run only while something animates; idle stays event-driven.
@@ -1991,24 +2183,29 @@ mod app {
                 }
                 Message::StartMove(id) => {
                     if let Some(from) = self.tile_of(&id) {
-                        self.layout.focused = from;
-                        self.focus_composer = Some(id);
-                        self.drag = Some(Drag::Tile {
-                            from,
-                            origin: None,
-                            slot: None,
-                        });
+                        self.start_move(from);
+                    }
+                }
+                Message::CtrlPress(x) => {
+                    if self.page == Page::Chat
+                        && self.layout.tiles.len() > 1
+                        && let Some(from) = self.tile_at(x)
+                    {
+                        self.start_move(from);
                     }
                 }
                 Message::DragTo(x) => self.drag_to(x),
+                Message::DragTile(point) => self.drag_tile(point),
                 Message::DragEnd => {
                     if let Some(Drag::Tile {
                         from,
-                        slot: Some(slot),
+                        at: Some(_),
+                        slot,
                         ..
                     }) = self.drag.take()
                     {
-                        self.move_tile(from, if slot > from { slot - 1 } else { slot });
+                        self.move_tile(from, slot);
+                        self.focus_composer = self.focused().cloned();
                     }
                     self.persist();
                 }
@@ -2233,13 +2430,15 @@ mod app {
     /// modifier state, so Ctrl is tracked here; a plain scroll yields no message, as each
     /// one rebuilds the view.
     fn window_events() -> Subscription<Message> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
         use cosmic::iced::Event;
         use cosmic::iced::keyboard::{Event as Key, Key as K, key::Named};
         use cosmic::iced::mouse::{Event as Mouse, ScrollDelta};
 
         static CTRL: AtomicBool = AtomicBool::new(false);
+        // Presses carry no position, so a Ctrl+press is placed by the last move.
+        static CURSOR_X: AtomicU32 = AtomicU32::new(0);
 
         cosmic::iced::event::listen_with(|event, _status, id| match event {
             Event::Keyboard(Key::ModifiersChanged(m)) => {
@@ -2256,12 +2455,33 @@ mod app {
                     K::Character("0") => Some(Message::ZoomReset),
                     K::Character("w" | "W") => Some(Message::CloseFocused),
                     K::Character("n" | "N") => Some(Message::New),
-                    K::Named(Named::PageUp) if modifiers.shift() => Some(Message::MoveFocused(-1)),
-                    K::Named(Named::PageDown) if modifiers.shift() => Some(Message::MoveFocused(1)),
-                    K::Named(Named::PageUp) => Some(Message::FocusStep(-1)),
-                    K::Named(Named::PageDown) => Some(Message::FocusStep(1)),
                     _ => None,
                 }
+            }
+            Event::Keyboard(Key::KeyPressed { key, modifiers, .. })
+                if modifiers.alt() && !modifiers.control() =>
+            {
+                let step = match key.as_ref() {
+                    K::Named(Named::ArrowLeft) => -1,
+                    K::Named(Named::ArrowRight) => 1,
+                    _ => return None,
+                };
+                Some(if modifiers.shift() {
+                    Message::MoveFocused(step)
+                } else {
+                    Message::FocusStep(step)
+                })
+            }
+            Event::Mouse(Mouse::CursorMoved { position }) => {
+                CURSOR_X.store(position.x.to_bits(), Ordering::Relaxed);
+                None
+            }
+            Event::Mouse(Mouse::ButtonPressed(cosmic::iced::mouse::Button::Left))
+                if CTRL.load(Ordering::Relaxed) =>
+            {
+                Some(Message::CtrlPress(f32::from_bits(
+                    CURSOR_X.load(Ordering::Relaxed),
+                )))
             }
             Event::Mouse(Mouse::WheelScrolled { delta }) if CTRL.load(Ordering::Relaxed) => {
                 let dy = match delta {
@@ -2290,6 +2510,20 @@ mod app {
             }
             _ => None,
         }
+    }
+
+    /// The release ending a tile drag; the tile row reports the cursor itself.
+    fn release_events(
+        event: cosmic::iced::Event,
+        _status: cosmic::iced::event::Status,
+        _id: cosmic::iced::window::Id,
+    ) -> Option<Message> {
+        use cosmic::iced::mouse::{Button, Event as Mouse};
+        matches!(
+            event,
+            cosmic::iced::Event::Mouse(Mouse::ButtonReleased(Button::Left))
+        )
+        .then_some(Message::DragEnd)
     }
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its

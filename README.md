@@ -67,8 +67,8 @@ The COSMIC frontend cannot attach a project folder yet.
 | Open it in a new tile at the right | Shift+click, or right-click → Open in new tile |
 | New conversation | New chat or Ctrl+N; Shift+click or Ctrl+Shift+N for a new tile |
 | Resize tiles | Drag the line between two tiles |
-| Move a tile | Drag its title, right-click it for Move left/right, or Ctrl+Shift+PageUp/PageDown |
-| Focus the previous or next tile | Ctrl+PageUp/PageDown |
+| Move a tile | Drag its title or Ctrl+drag anywhere in it, right-click its title for Move left/right, or Alt+Shift+Left/Right |
+| Focus the previous or next tile | Alt+Left/Right |
 | Close a tile | Its ✕, or Ctrl+W |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
