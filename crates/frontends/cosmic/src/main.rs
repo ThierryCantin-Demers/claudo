@@ -1656,12 +1656,18 @@ mod app {
     ) -> Option<text_editor::Binding<Message>> {
         let enter = matches!(press.key, keyboard::Key::Named(keyboard::key::Named::Enter));
         let focused = matches!(press.status, text_editor::Status::Focused { .. });
-        if enter && focused && !press.modifiers.shift() {
+        let modifiers = press.modifiers;
+        if enter && focused && !modifiers.shift() {
             return Some(text_editor::Binding::Custom(Message::Send(
                 conversation.clone(),
             )));
         }
-        text_editor::Binding::from_key_press(press)
+        // Ctrl with `-`, `=` or `0` still reports the plain character, which would be typed
+        // along with the zoom.
+        match text_editor::Binding::from_key_press(press)? {
+            text_editor::Binding::Insert(_) if modifiers.control() && !modifiers.alt() => None,
+            binding => Some(binding),
+        }
     }
 
     /// The editor without its own frame, since the composer box draws one.
