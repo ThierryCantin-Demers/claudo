@@ -104,12 +104,11 @@ cargo probe live_probe      # probes hit the real CLI and cost tokens
 
 ```bash
 cargo install cargo-hot --version 0.1.1 --locked   # once
-cargo cosmic-hot              # dev build
-cargo cosmic-release-hot      # release build
+cargo cosmic-hot
 ```
 
-`cargo cosmic` is the plain dev build. In a release build the optimizer inlines small
-functions into their callers, so a patch to one of those may not show until a restart.
+It needs the dev build. A release build loads each patch but keeps running the old
+view code, which the optimizer inlined into callers the patch does not replace.
 
 Saving a file in `crates/frontends/cosmic/src/` patches the running window in about two
 seconds, keeping its state. Changing a type (a new `Message` variant or field) or another
