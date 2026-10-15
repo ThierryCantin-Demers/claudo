@@ -423,6 +423,8 @@ mod app {
         drag: Option<Drag>,
         /// Where a tile dragged from another window would land, from the tile row's left.
         drop_at: Option<f32>,
+        /// The window exists; until then it cannot take a blur.
+        opened: bool,
     }
 
     impl Default for WindowLayout {
@@ -438,6 +440,7 @@ mod app {
                 size: None,
                 drag: None,
                 drop_at: None,
+                opened: false,
             }
         }
     }
@@ -574,6 +577,8 @@ mod app {
         /// How far from the bottom tiles moved to another window were scrolled, until the
         /// window they went to has drawn them.
         carried_scroll: HashMap<ConversationId, f32>,
+        /// Whether the other windows have the blur libcosmic gives the main one.
+        blurred: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -784,6 +789,7 @@ mod app {
         WindowMinimize,
         CloseWindow,
         WindowClosed(window::Id),
+        WindowOpened(window::Id),
         Focus(ConversationId),
         Close(ConversationId),
         CloseFocused,
@@ -1018,13 +1024,8 @@ mod app {
             }
             let (id, opened) = window::open(settings);
             self.windows.insert(id, layout);
-            // libcosmic blurs the main window's background; a blur asked for before the
-            // window exists is dropped, so it waits for the window to open.
-            self.tasks.push(if cosmic::theme::active().transparent {
-                opened.then(window::enable_blur)
-            } else {
-                opened.discard()
-            });
+            self.tasks
+                .push(opened.map(|id| cosmic::Action::App(Message::WindowOpened(id))));
             id
         }
 
@@ -1104,6 +1105,26 @@ mod app {
                     (*id, format!("window {} · {}", n + 1, truncate(title, 40)))
                 })
                 .collect()
+        }
+
+        /// libcosmic blurs the main window's background once the compositor says it can, and
+        /// follows the frosted windows setting after; the other windows follow it here.
+        fn follow_blur(&mut self) {
+            let blur = cosmic::theme::active().transparent;
+            if blur == self.blurred {
+                return;
+            }
+            self.blurred = blur;
+            let main = self.main_window();
+            for (w, layout) in &self.windows {
+                if *w != main && layout.opened {
+                    self.tasks.push(if blur {
+                        window::enable_blur(*w)
+                    } else {
+                        window::disable_blur(*w)
+                    });
+                }
+            }
         }
 
         /// Show a conversation in a new tile of another open window, taking it from its own.
@@ -3304,6 +3325,7 @@ mod app {
                 quota: None,
                 minutes: 0,
                 carried_scroll: HashMap::new(),
+                blurred: false,
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -3531,6 +3553,14 @@ mod app {
                 Message::WindowMinimize => return window::minimize(self.current, true),
                 Message::CloseWindow => return window::close(self.current),
                 Message::WindowClosed(w) => self.window_closed(w),
+                Message::WindowOpened(w) => {
+                    if let Some(layout) = self.windows.get_mut(&w) {
+                        layout.opened = true;
+                        if self.blurred {
+                            self.tasks.push(window::enable_blur(w));
+                        }
+                    }
+                }
                 Message::Focus(id) => {
                     self.selection = None;
                     self.focus(&id);
@@ -3789,6 +3819,7 @@ mod app {
                     }
                 }
             }
+            self.follow_blur();
             let mut tasks = std::mem::take(&mut self.tasks);
             if let Some(id) = self.focus_composer.take() {
                 tasks.push(widget::text_input::focus(composer_id(&id)));
