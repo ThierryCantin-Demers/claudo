@@ -1018,7 +1018,13 @@ mod app {
             }
             let (id, opened) = window::open(settings);
             self.windows.insert(id, layout);
-            self.tasks.push(opened.discard());
+            // libcosmic blurs the main window's background; a blur asked for before the
+            // window exists is dropped, so it waits for the window to open.
+            self.tasks.push(if cosmic::theme::active().transparent {
+                opened.then(window::enable_blur)
+            } else {
+                opened.discard()
+            });
             id
         }
 
