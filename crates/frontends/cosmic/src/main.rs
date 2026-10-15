@@ -57,9 +57,9 @@ mod app {
     const SIDEBAR_COLLAPSE: f32 = 120.0;
     /// Tiles stop shrinking here and the row scrolls sideways instead.
     const TILE_MIN: f32 = 360.0;
-    /// Narrower tiles put the message box's controls on two lines: a squeezed dropdown
-    /// wraps its label, and libcosmic's has no way to stop it.
-    const ONE_LINE_CONTROLS: f32 = 600.0;
+    /// Narrower tiles give the message box's menus short labels and less padding: a
+    /// squeezed dropdown wraps its label, and libcosmic's has no way to stop it.
+    const COMPACT_TILE: f32 = 600.0;
     const HANDLE_WIDTH: f32 = 8.0;
     const PULSE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -368,7 +368,7 @@ mod app {
         /// Beside other tiles, so it names its conversation in a header.
         several: bool,
         focused: bool,
-        /// Too narrow for the message box's controls on one line.
+        /// Narrower than `COMPACT_TILE`.
         compact: bool,
     }
 
@@ -1108,7 +1108,7 @@ mod app {
                 let tile_view = TileView {
                     several,
                     focused: several && i == self.layout.focused,
-                    compact: pixels < ONE_LINE_CONTROLS,
+                    compact: pixels < COMPACT_TILE,
                 };
                 row.push(self.tile(&tile.conversation, view, tile_view, width));
             }
@@ -1298,15 +1298,34 @@ mod app {
                 .key_binding(move |press| send_on_enter(press, id))
                 .size(size)
                 .padding(0)
-                .min_height(size * 2.6)
+                .min_height(if compact { size * 1.3 } else { size * 2.6 })
                 .max_height(240.0 * self.zoom)
                 .class(cosmic::theme::iced::TextEditor::Custom(Box::new(
                     borderless_editor,
                 )));
 
-            let profiles: Vec<&str> = PROFILES.iter().map(|p| p.label()).collect();
-            let efforts: Vec<&str> = Effort::ALL.iter().map(|e| e.label()).collect();
-            let models: Vec<&str> = MODEL_PRESETS.iter().map(|(label, _)| *label).collect();
+            let profiles: Vec<&str> = PROFILES
+                .iter()
+                .map(|p| match (compact, p) {
+                    (true, Profile::AcceptEdits) => "Edits",
+                    (true, Profile::FullAuto) => "Auto",
+                    _ => p.label(),
+                })
+                .collect();
+            let efforts: Vec<&str> = Effort::ALL
+                .iter()
+                .map(|e| match (compact, e) {
+                    (true, Effort::Default) => "Thinking",
+                    _ => e.label(),
+                })
+                .collect();
+            let models: Vec<&str> = MODEL_PRESETS
+                .iter()
+                .map(|(label, _)| match compact {
+                    true => label.split(" (").next().unwrap_or(label),
+                    false => label,
+                })
+                .collect();
             let send = if view.streaming {
                 widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
                     .class(cosmic::theme::Button::Standard)
@@ -1332,38 +1351,24 @@ mod app {
                 MODEL_PRESETS.iter().position(|(_, m)| *m == model),
                 move |i| Message::OvModel(on_model.clone(), i),
             );
-            let line = |children| {
-                widget::Row::with_children(children)
-                    .spacing(8)
-                    .align_y(Alignment::Center)
+            let small = |dropdown: widget::Dropdown<'a, &'static str, Message, Message>| {
+                dropdown.text_size(13.0 * self.zoom).padding([4, 8])
             };
-            let controls: Element<Message> = if compact {
-                widget::Column::with_children(vec![
-                    line(vec![profile.into(), effort.into()]).into(),
-                    line(vec![
-                        model.into(),
-                        widget::space::horizontal().into(),
-                        send.into(),
-                    ])
-                    .into(),
-                ])
-                .spacing(8)
-                .into()
-            } else {
-                line(vec![
-                    profile.into(),
-                    effort.into(),
-                    widget::space::horizontal().into(),
-                    model.into(),
-                    send.into(),
-                ])
-                .into()
-            };
+            let controls = widget::Row::with_children(vec![
+                small(profile).into(),
+                small(effort).into(),
+                widget::space::horizontal().into(),
+                small(model).into(),
+                send.into(),
+            ])
+            .spacing(if compact { 2 } else { 6 })
+            .align_y(Alignment::Center);
 
             let boxed = widget::container(
-                widget::Column::with_children(vec![editor.into(), controls]).spacing(12),
+                widget::Column::with_children(vec![editor.into(), controls.into()])
+                    .spacing(if compact { 6 } else { 10 }),
             )
-            .padding([16, 18])
+            .padding(if compact { [10, 10] } else { [14, 16] })
             .width(Length::Fill)
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
@@ -1379,7 +1384,11 @@ mod app {
             }));
             widget::container(widget::container(boxed).max_width(COLUMN_WIDTH * self.zoom))
                 .center_x(Length::Fill)
-                .padding([0, 16, 16, 16])
+                .padding(if compact {
+                    [0, 8, 8, 8]
+                } else {
+                    [0, 16, 16, 16]
+                })
                 .into()
         }
 
