@@ -1300,19 +1300,21 @@ mod app {
             } else {
                 body
             };
-            // Named for the conversation, so the tile's scroll and editor state move with
-            // it when tiles reorder.
-            let content = CtrlPress {
+            // Named for the conversation, so libcosmic gives the tile its own scroll and
+            // editor state back wherever it moves. The name sits below the row's direct
+            // child: between siblings, libcosmic finds a moved state by name but leaves it
+            // at its old index.
+            let named = CtrlPress {
                 id: widget::Id::new(format!("tile-{id}")),
-                content: widget::mouse_area(content)
-                    .on_press(Message::Focus(id.clone()))
-                    .into(),
+                content,
                 on_press: Message::StartMove(id.clone()),
             };
-            widget::container(content)
+            let framed = widget::container(named)
                 .width(width)
                 .height(Length::Fill)
-                .class(tile_style(tile.focused, tile.lifted))
+                .class(tile_style(tile.focused, tile.lifted));
+            widget::mouse_area(framed)
+                .on_press(Message::Focus(id.clone()))
                 .into()
         }
 
