@@ -13,16 +13,21 @@ use claudo_protocol::ConversationId;
 use crate::claude_bin;
 use crate::engine::{EngineEvent, Session, SessionConfig};
 
+/// Events of turns a conversation's process started on its own, such as for another
+/// agent's message, with the conversation they belong to.
+pub type IncomingSender = mpsc::Sender<(ConversationId, EngineEvent)>;
+
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 pub struct LiveSessions {
     sessions: Arc<Mutex<HashMap<ConversationId, Session>>>,
+    incoming: Option<IncomingSender>,
     _stop_reaper: mpsc::Sender<()>,
 }
 
 impl LiveSessions {
     /// A process with no turn running and no output for `idle_timeout` is closed.
-    pub fn new(idle_timeout: Duration) -> Self {
+    pub fn new(idle_timeout: Duration, incoming: Option<IncomingSender>) -> Self {
         let sessions: Arc<Mutex<HashMap<ConversationId, Session>>> = Arc::default();
         let (stop_reaper, stopped) = mpsc::channel::<()>();
         let reaped = sessions.clone();
@@ -36,40 +41,59 @@ impl LiveSessions {
         });
         Self {
             sessions,
+            incoming,
             _stop_reaper: stop_reaper,
         }
     }
 
-    /// Start a turn on the conversation's process. A new one is spawned,
-    /// resuming `resume`, when there is none, it exited, or its flags differ
-    /// from `config`.
+    /// Start a turn on the conversation's process, or queue it behind the running
+    /// one. A new process named `name` is spawned, resuming `resume`, when there is
+    /// none, it exited, or its flags differ from `config`.
     pub fn send_turn(
         &self,
         conversation_id: &str,
         config: SessionConfig,
         resume: Option<&str>,
+        name: &str,
         prompt: &str,
     ) -> Result<Receiver<EngineEvent>, String> {
         let mut sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.get_mut(conversation_id) {
-            if session.is_busy() {
-                return Err("a turn is already running in this conversation".to_string());
-            }
-            if session.is_alive()
-                && *session.config() == config
+        if let Some(session) = sessions.get_mut(conversation_id)
+            && session.is_alive()
+        {
+            if *session.config() == config
                 && let Ok(turn) = session.send(prompt)
             {
                 return Ok(turn);
             }
+            if session.is_busy() {
+                return Err(
+                    "a turn is running; change the model, thinking or permissions after it ends"
+                        .to_string(),
+                );
+            }
         }
 
-        let mut session = Session::spawn(config, resume)
+        let incoming = self.incoming.clone().map(|incoming| {
+            let conversation_id = conversation_id.to_owned();
+            Box::new(move |ev| {
+                let _ = incoming.send((conversation_id.clone(), ev));
+            }) as crate::engine::cli::Incoming
+        });
+        let mut session = Session::spawn(config, resume, name, incoming)
             .map_err(|e| format!("failed to launch `{}`: {e}", claude_bin()))?;
         let turn = session
             .send(prompt)
             .map_err(|e| format!("claude exited before the turn was sent: {e}"))?;
         sessions.insert(conversation_id.to_owned(), session);
         Ok(turn)
+    }
+
+    /// Rename a conversation's process for the other agents, if it has one.
+    pub fn rename(&self, conversation_id: &str, name: &str) {
+        if let Some(session) = self.sessions.lock().unwrap().get(conversation_id) {
+            let _ = session.rename(name);
+        }
     }
 
     /// Stop a conversation's running turn.

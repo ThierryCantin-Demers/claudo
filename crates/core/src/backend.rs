@@ -3,9 +3,10 @@
 //! daemon's WebSocket server) feeds it `Command`s and forwards its events.
 //!
 //! Events go out on a tokio unbounded channel: the sender is `Send + Sync` and
-//! usable from the per-turn worker threads, while a consumer can either
+//! usable from the worker threads forwarding each turn, while a consumer can either
 //! `try_recv` (native, no runtime) or `recv().await` (the daemon).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{Command, ConversationInfo, ServerEvent};
@@ -23,9 +24,23 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(events: UnboundedSender<ServerEvent>) -> Self {
+        let store = Arc::new(Mutex::new(Store::load()));
+        let (incoming, turns) = std::sync::mpsc::channel();
+        let (forwarded, kept) = (events.clone(), store.clone());
+        std::thread::spawn(move || {
+            let mut forwards: HashMap<String, Forward> = HashMap::new();
+            for (id, ev) in turns {
+                forwards
+                    .entry(id)
+                    .or_insert_with_key(|id| {
+                        Forward::new(forwarded.clone(), kept.clone(), id.clone(), None)
+                    })
+                    .event(ev);
+            }
+        });
         Self {
-            store: Arc::new(Mutex::new(Store::load())),
-            live: LiveSessions::new(IDLE_TIMEOUT),
+            store,
+            live: LiveSessions::new(IDLE_TIMEOUT, Some(incoming)),
             events,
         }
     }
@@ -130,8 +145,10 @@ impl Backend {
                     let mut store = self.store.lock().unwrap();
                     if let Some(meta) = store.get_mut(&id)
                         && !meta.attached
+                        && meta.title != title
                     {
-                        meta.title = title;
+                        meta.title = title.clone();
+                        self.live.rename(&id, &title);
                     }
                     store.save();
                 }
@@ -156,16 +173,17 @@ impl Backend {
         model: String,
         effort: claudo_protocol::Effort,
     ) {
-        let (cwd, session_id) = {
-            let store = self.store.lock().unwrap();
-            match store.get(&conversation_id) {
-                Some(meta) => (meta.cwd.clone(), meta.session_id.clone()),
-                None => {
-                    self.error(conversation_id, "unknown conversation".to_string());
-                    return;
-                }
-            }
+        let (cwd, session_id, name) = {
+            let mut store = self.store.lock().unwrap();
+            let Some(name) = store.title_for(&conversation_id, &text) else {
+                drop(store);
+                self.error(conversation_id, "unknown conversation".to_string());
+                return;
+            };
+            let meta = store.get(&conversation_id).expect("titled above");
+            (meta.cwd.clone(), meta.session_id.clone(), name)
         };
+        self.emit(conversations_event(&self.store));
 
         let config = SessionConfig {
             cwd,
@@ -173,10 +191,13 @@ impl Backend {
             model: (!model.trim().is_empty()).then_some(model),
             effort: effort.cli().map(str::to_owned),
         };
-        let turn = match self
-            .live
-            .send_turn(&conversation_id, config, session_id.as_deref(), &text)
-        {
+        let turn = match self.live.send_turn(
+            &conversation_id,
+            config,
+            session_id.as_deref(),
+            &name,
+            &text,
+        ) {
             Ok(turn) => turn,
             Err(detail) => {
                 self.error(conversation_id, detail);
@@ -184,95 +205,124 @@ impl Backend {
             }
         };
 
-        let events = self.events.clone();
-        let store = self.store.clone();
-
+        let mut forward = Forward::new(
+            self.events.clone(),
+            self.store.clone(),
+            conversation_id,
+            session_id,
+        );
         std::thread::spawn(move || {
-            let mut latest = session_id;
             for ev in turn {
-                match ev {
-                    EngineEvent::Started { session_id } => {
-                        latest = Some(session_id.clone());
-                        store.lock().unwrap().record_turn(
-                            &conversation_id,
-                            Some(&session_id),
-                            &text,
-                        );
-                        let _ = events.send(ServerEvent::Started {
-                            conversation_id: conversation_id.clone(),
-                            session_id,
-                        });
-                        let _ = events.send(conversations_event(&store));
-                    }
-                    EngineEvent::Delta { text } => {
-                        let _ = events.send(ServerEvent::Delta {
-                            conversation_id: conversation_id.clone(),
-                            text,
-                        });
-                    }
-                    EngineEvent::ThinkingDelta { text } => {
-                        let _ = events.send(ServerEvent::ThinkingDelta {
-                            conversation_id: conversation_id.clone(),
-                            text,
-                        });
-                    }
-                    EngineEvent::Quota(quota) => {
-                        let _ = events.send(ServerEvent::Quota(quota));
-                    }
-                    EngineEvent::ApprovalNeeded { request_id, call } => {
-                        let _ = events.send(ServerEvent::ApprovalRequested {
-                            conversation_id: conversation_id.clone(),
-                            request_id,
-                            call,
-                        });
-                    }
-                    EngineEvent::ToolStarted(call) => {
-                        let _ = events.send(ServerEvent::ToolStarted {
-                            conversation_id: conversation_id.clone(),
-                            call,
-                        });
-                    }
-                    EngineEvent::ToolResult {
-                        call_id,
-                        content,
-                        is_error,
-                    } => {
-                        let _ = events.send(ServerEvent::ToolResult {
-                            conversation_id: conversation_id.clone(),
-                            call_id,
-                            content,
-                            is_error,
-                        });
-                    }
-                    EngineEvent::Completed {
-                        session_id,
-                        is_error,
-                        context,
-                    } => {
-                        if let Some(sid) = &session_id {
-                            latest = Some(sid.clone());
-                        }
-                        {
-                            let mut s = store.lock().unwrap();
-                            s.record_turn(&conversation_id, latest.as_deref(), &text);
-                            s.set_context(&conversation_id, context);
-                        }
-                        let _ = events.send(ServerEvent::Completed {
-                            conversation_id: conversation_id.clone(),
-                            is_error,
-                            context,
-                        });
-                        let _ = events.send(conversations_event(&store));
-                    }
-                    EngineEvent::Error { detail } => {
-                        let _ = events.send(ServerEvent::Error {
-                            conversation_id: Some(conversation_id.clone()),
-                            detail,
-                        });
-                    }
-                }
+                forward.event(ev);
             }
         });
+    }
+}
+
+/// Turns a conversation's engine events into `ServerEvent`s, keeping the store's
+/// session id and recency up to date along the way.
+struct Forward {
+    events: UnboundedSender<ServerEvent>,
+    store: Arc<Mutex<Store>>,
+    conversation_id: String,
+    /// The session id to resume with, as last reported.
+    latest: Option<String>,
+}
+
+impl Forward {
+    fn new(
+        events: UnboundedSender<ServerEvent>,
+        store: Arc<Mutex<Store>>,
+        conversation_id: String,
+        latest: Option<String>,
+    ) -> Self {
+        Self {
+            events,
+            store,
+            conversation_id,
+            latest,
+        }
+    }
+
+    fn emit(&self, event: ServerEvent) {
+        let _ = self.events.send(event);
+    }
+
+    fn event(&mut self, ev: EngineEvent) {
+        let conversation_id = self.conversation_id.clone();
+        match ev {
+            EngineEvent::Started { session_id } => {
+                self.latest = Some(session_id.clone());
+                self.store
+                    .lock()
+                    .unwrap()
+                    .record_turn(&conversation_id, Some(&session_id));
+                self.emit(ServerEvent::Started {
+                    conversation_id,
+                    session_id,
+                });
+                self.emit(conversations_event(&self.store));
+            }
+            EngineEvent::Incoming { from, text } => self.emit(ServerEvent::Incoming {
+                conversation_id,
+                from,
+                text,
+            }),
+            EngineEvent::Delta { text } => self.emit(ServerEvent::Delta {
+                conversation_id,
+                text,
+            }),
+            EngineEvent::ThinkingDelta { text } => self.emit(ServerEvent::ThinkingDelta {
+                conversation_id,
+                text,
+            }),
+            EngineEvent::Quota(quota) => self.emit(ServerEvent::Quota(quota)),
+            EngineEvent::ApprovalNeeded { request_id, call } => {
+                self.emit(ServerEvent::ApprovalRequested {
+                    conversation_id,
+                    request_id,
+                    call,
+                })
+            }
+            EngineEvent::ToolStarted(call) => self.emit(ServerEvent::ToolStarted {
+                conversation_id,
+                call,
+            }),
+            EngineEvent::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => self.emit(ServerEvent::ToolResult {
+                conversation_id,
+                call_id,
+                content,
+                is_error,
+            }),
+            EngineEvent::Completed {
+                session_id,
+                is_error,
+                context,
+            } => {
+                if session_id.is_some() {
+                    self.latest = session_id;
+                }
+                {
+                    let mut store = self.store.lock().unwrap();
+                    store.record_turn(&conversation_id, self.latest.as_deref());
+                    store.set_context(&conversation_id, context);
+                }
+                self.emit(ServerEvent::Completed {
+                    conversation_id,
+                    is_error,
+                    context,
+                });
+                self.emit(conversations_event(&self.store));
+            }
+            EngineEvent::Error { detail } => self.emit(ServerEvent::Error {
+                conversation_id: Some(conversation_id),
+                detail,
+            }),
+        }
     }
 }
 

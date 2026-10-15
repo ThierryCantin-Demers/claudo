@@ -26,7 +26,8 @@ fn main() {
         model: None,
         effort: None,
     };
-    let mut session = Session::spawn(config, None).expect("spawn claude");
+    let name = store.title_for(&id, prompt).expect("the new conversation");
+    let mut session = Session::spawn(config, None, &name, None).expect("spawn claude");
     for ev in session.send(prompt).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
@@ -38,7 +39,7 @@ fn main() {
         }
     }
     let session_id = session_id.expect("a session id");
-    store.record_turn(&id, Some(&session_id), prompt);
+    store.record_turn(&id, Some(&session_id));
     println!("session {session_id}");
     println!("title  -> {:?}", store.get(&id).unwrap().title);
 
@@ -48,6 +49,7 @@ fn main() {
     for it in &items {
         match it {
             Item::User(t) => println!("  USER: {}", clip(t)),
+            Item::Incoming { from, text } => println!("  FROM {from}: {}", clip(text)),
             Item::Thinking(t) => println!("  THINKING: {}", clip(t)),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
             Item::Tool(tc) => println!(

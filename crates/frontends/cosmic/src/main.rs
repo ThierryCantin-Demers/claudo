@@ -67,9 +67,20 @@ mod app {
     /// parses the text revealed since the last one.
     enum Entry {
         User(String),
-        Thinking { text: String, open: bool },
+        /// A message another agent sent.
+        Incoming {
+            from: String,
+            text: String,
+        },
+        Thinking {
+            text: String,
+            open: bool,
+        },
         Reply(Box<Reply>),
-        Tool { call: ToolCall, open: bool },
+        Tool {
+            call: ToolCall,
+            open: bool,
+        },
     }
 
     struct Reply {
@@ -112,6 +123,7 @@ mod app {
         fn from(item: Item) -> Self {
             match item {
                 Item::User(text) => Entry::User(text),
+                Item::Incoming { from, text } => Entry::Incoming { from, text },
                 Item::Assistant(text) => Entry::Reply(Box::new(Reply::complete(text))),
                 Item::Thinking(text) => Entry::Thinking { text, open: false },
                 Item::Tool(call) => Entry::Tool { call, open: false },
@@ -132,6 +144,8 @@ mod app {
         /// in large chunks; revealing gradually reads as smooth typing.
         reveal: f32,
         error: Option<String>,
+        /// Made for a message another agent sent, so it holds only that turn so far.
+        partial: bool,
     }
 
     impl ConversationView {
@@ -144,6 +158,7 @@ mod app {
                 assistant_idx: None,
                 reveal: 0.0,
                 error: None,
+                partial: false,
             }
         }
 
@@ -247,6 +262,12 @@ mod app {
                 ServerEvent::History { items, .. } => {
                     self.items = items.into_iter().map(Entry::from).collect();
                     self.assistant_idx = None;
+                }
+                ServerEvent::Incoming { from, text, .. } => {
+                    self.finish_reply();
+                    self.error = None;
+                    self.streaming = true;
+                    self.items.push(Entry::Incoming { from, text });
                 }
                 ServerEvent::Delta { text, .. } => self.push_assistant(&text),
                 ServerEvent::ThinkingDelta { text, .. } => {
@@ -834,6 +855,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Incoming {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Delta {
                     ref conversation_id,
                     ..
@@ -867,10 +892,26 @@ mod app {
                         ev,
                         ServerEvent::Completed { .. } | ServerEvent::Error { .. }
                     );
+                    // A turn in a conversation no tile shows still gets a view, which
+                    // the sidebar marks as working.
+                    if matches!(ev, ServerEvent::Incoming { .. }) && !self.views.contains_key(&id) {
+                        let draft = self.drafts.remove(&id).unwrap_or_default();
+                        let mut view = ConversationView::new(&draft);
+                        view.partial = true;
+                        self.views.insert(id.clone(), view);
+                    }
                     if let Some(view) = self.views.get_mut(&id) {
                         view.apply(ev);
                     }
                     if over {
+                        let shown = self.tile_of(&id).is_some();
+                        if let Some(view) = self.views.get_mut(&id)
+                            && view.partial
+                            && shown
+                        {
+                            view.partial = false;
+                            self.cmd(Command::OpenConversation { id: id.clone() });
+                        }
                         self.release(&id);
                     }
                 }
@@ -1354,6 +1395,7 @@ mod app {
                 let toggle = || Message::Toggle(id.clone(), idx);
                 rows.push(match entry {
                     Entry::User(text) => user_bubble(text, size, self.zoom),
+                    Entry::Incoming { from, text } => incoming_bubble(from, text, size, self.zoom),
                     Entry::Reply(reply) => {
                         markdown::view(reply.markdown.items(), settings).map(Message::Link)
                     }
@@ -1492,6 +1534,42 @@ mod app {
                 }
             }));
         widget::container(bubble).align_right(Length::Fill).into()
+    }
+
+    /// Another agent's message, on Claude's side since the user did not write it.
+    fn incoming_bubble<'a>(
+        from: &'a str,
+        text: &'a str,
+        size: f32,
+        zoom: f32,
+    ) -> Element<'a, Message> {
+        let accent: Color = cosmic::theme::active().cosmic().accent_text_color().into();
+        let bubble = widget::container(
+            widget::Column::with_children(vec![
+                widget::text(format!("From {from}"))
+                    .size(size * 0.85)
+                    .font(cosmic::font::semibold())
+                    .class(cosmic::theme::Text::Color(accent))
+                    .into(),
+                widget::text(text).size(size).into(),
+            ])
+            .spacing(4.0 * zoom),
+        )
+        .padding([10.0 * zoom, 14.0 * zoom])
+        .max_width(BUBBLE_WIDTH * zoom)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            container::Style {
+                background: Some(Color::from(cosmic.bg_component_color()).into()),
+                text_color: Some(cosmic.on_bg_component_color().into()),
+                border: Border {
+                    radius: cosmic.corner_radii.radius_l.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            }
+        }));
+        widget::container(bubble).align_left(Length::Fill).into()
     }
 
     /// A one-line row naming the tool and what it acted on; expands to its input and output.

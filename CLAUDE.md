@@ -80,12 +80,16 @@ One process per conversation, turns written to stdin as JSONL
 (`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`):
 
 ```bash
+CLAUDE_CODE_SESSION_NAME=<conversation title> \
 claude -p --input-format stream-json --output-format stream-json \
   --include-partial-messages --verbose --thinking-display summarized \
   --permission-mode <default|acceptEdits|bypassPermissions> \
   --settings '{"permissions":{"ask":[...]}}' --permission-prompt-tool stdio \
+  --replay-user-messages \
   [--resume <session-id>] [--model <m>] [--effort <low|medium|high|xhigh|max>]
 ```
+
+Each user line carries a `uuid`, and an `initialize` control request goes first.
 
 Every turn emits its own `system`/`init` and ends with its own `result`; the process then
 waits for the next line. Closing stdin makes it finish the running turn and exit.
@@ -105,6 +109,8 @@ Events consumed from the JSONL stream:
 | `assistant` message, `tool_use` block | tool invoked |
 | `user` message, `tool_result` block | tool returned (denials arrive here as errors) |
 | `control_request` / `can_use_tool` | a call waits for approval; answered with a `control_response` |
+| `command_lifecycle` | `state` `queued`/`started`/`completed` for the message with `command_uuid` |
+| `user` with `isReplay` | a message starting its turn; one from another agent has `origin.name` and `origin.body` |
 | `rate_limit_event` | `rate_limit_info.unifiedWindows` five-hour and seven-day `utilization` and `resetsAt` |
 | `result` | turn complete; `usage` and `modelUsage[*].contextWindow` for context display |
 
@@ -176,9 +182,16 @@ unoptimized text shaping made the cosmic frontend feel like it had a one second 
 Each conversation has at most one live `claude` process (`core/src/live.rs`), driven by
 `engine::Session`. Things to keep in mind when touching it:
 
-- **One turn at a time per process.** Events are attributed to the running turn by
-  position: a turn starts when its line is written and ends at its `result`. A second
-  `SendMessage` while one runs is refused, not queued.
+- **Turns follow the CLI's message ids.** A turn belongs to the message whose
+  `command_lifecycle` reports it `started`, and ends at its `result`. The CLI also starts
+  turns itself, for another agent's message, and queues the client's messages behind
+  them; those turns go to the `incoming` callback given at spawn, which the backend
+  forwards like any other, starting with `Incoming`.
+- **Agents are named after their conversation's title.** That is the name other
+  sessions see in `ListAgents` and message with `SendMessage`. The `initialize` request
+  makes the process visible at once instead of after its first turn, and a title
+  change renames a live process with the `rename_session` control request. Only a
+  conversation with a live process can be messaged.
 - **Flags are per process.** Profile, model and effort are command line flags, so a turn
   with different ones replaces the process with a `--resume` one. Only an idle process is
   replaced.

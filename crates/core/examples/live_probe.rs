@@ -16,7 +16,7 @@ const IDLE: Duration = Duration::from_secs(5);
 fn main() {
     let cwd = std::env::temp_dir().join("claudo_live_probe");
     std::fs::create_dir_all(&cwd).unwrap();
-    let live = LiveSessions::new(IDLE);
+    let live = LiveSessions::new(IDLE, None);
     let config = |effort: Option<&str>| SessionConfig {
         cwd: cwd.clone(),
         profile: Profile::Safe,
@@ -97,7 +97,7 @@ fn turn(
     let mut text = String::new();
     let mut session_id = String::new();
     let events = live
-        .send_turn(CONVERSATION, config, resume, prompt)
+        .send_turn(CONVERSATION, config, resume, "claudo live probe", prompt)
         .expect("send turn");
     for ev in events {
         match ev {

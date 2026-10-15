@@ -35,6 +35,8 @@ fn cli_mode(profile: Profile) -> &'static str {
 pub enum EngineEvent {
     /// Session initialised; carries the id used to resume later turns.
     Started { session_id: String },
+    /// A message from someone other than the client, such as another agent, started this turn.
+    Incoming { from: String, text: String },
     /// A chunk of assistant text.
     Delta { text: String },
     /// A chunk of the summary of Claude's reasoning.
@@ -71,6 +73,10 @@ pub struct SessionConfig {
     pub effort: Option<String>,
 }
 
+/// Where the events of turns the client did not start go, such as one another agent's
+/// message started.
+pub type Incoming = Box<dyn Fn(EngineEvent) + Send + Sync>;
+
 /// One long-lived `claude -p --input-format stream-json` process. Turns are
 /// written to its stdin; dropping the session closes stdin, which lets the
 /// process finish a running turn and then exit.
@@ -84,17 +90,41 @@ pub struct Session {
 struct Shared {
     /// `None` once the session is dropped.
     stdin: Mutex<Option<ChildStdin>>,
-    turn: Mutex<TurnSlot>,
+    turns: Mutex<Turns>,
+    incoming: Option<Incoming>,
     last_activity: Mutex<Instant>,
     /// Inputs of approvals awaiting an answer, keyed by request id; an allow echoes them back.
     approvals: Mutex<HashMap<String, Value>>,
 }
 
+/// Turns are told apart by the ids the CLI reports as it starts each message, since it
+/// also starts turns of its own, and queues the client's messages behind them.
 #[derive(Default)]
-struct TurnSlot {
+struct Turns {
+    /// Messages written but not started yet, oldest first, by id.
+    queued: VecDeque<(String, Sender<EngineEvent>)>,
     /// Where the running turn's events go; `None` between turns.
-    sink: Option<Sender<EngineEvent>>,
+    running: Option<Route>,
     exited: bool,
+}
+
+enum Route {
+    Client(Sender<EngineEvent>),
+    Incoming,
+}
+
+impl Turns {
+    fn start(&mut self, message: Option<&str>) {
+        let client = self
+            .queued
+            .iter()
+            .position(|(id, _)| Some(id.as_str()) == message)
+            .and_then(|i| self.queued.remove(i));
+        self.running = Some(match client {
+            Some((_, sink)) => Route::Client(sink),
+            None => Route::Incoming,
+        });
+    }
 }
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -108,9 +138,16 @@ const ASK_RULES: [&str; 4] = [
 ];
 
 impl Session {
-    pub fn spawn(config: SessionConfig, resume: Option<&str>) -> io::Result<Self> {
+    /// `name` is how other agents find this one (`ListAgents`) and address it.
+    pub fn spawn(
+        config: SessionConfig,
+        resume: Option<&str>,
+        name: &str,
+        incoming: Option<Incoming>,
+    ) -> io::Result<Self> {
         let mut cmd = Command::new(claude_bin());
         cmd.current_dir(&config.cwd)
+            .env("CLAUDE_CODE_SESSION_NAME", name)
             .arg("-p")
             .args(["--input-format", "stream-json"])
             .args(["--output-format", "stream-json"])
@@ -123,6 +160,8 @@ impl Session {
             .arg(json!({ "permissions": { "ask": ASK_RULES } }).to_string())
             // Without it the CLI denies whatever would prompt instead of asking over stdin.
             .args(["--permission-prompt-tool", "stdio"])
+            // Echoes each message as its turn starts, with who sent it.
+            .arg("--replay-user-messages")
             .arg("--verbose")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -144,10 +183,17 @@ impl Session {
         let stderr = child.stderr.take().expect("stderr piped");
         let shared = Arc::new(Shared {
             stdin: Mutex::new(Some(stdin)),
-            turn: Mutex::default(),
+            turns: Mutex::default(),
+            incoming,
             last_activity: Mutex::new(Instant::now()),
             approvals: Mutex::default(),
         });
+        // Without it the process joins the other agents only once its first turn ends.
+        shared.write(&json!({
+            "type": "control_request",
+            "request_id": Uuid::new_v4().to_string(),
+            "request": { "subtype": "initialize" },
+        }))?;
 
         // Drained continuously: a long-lived process would block once the pipe filled.
         let stderr = thread::spawn(move || stderr_tail(stderr));
@@ -158,6 +204,10 @@ impl Session {
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
+                if let Some(message) = started_message(&v) {
+                    reader.turns.lock().unwrap().start(message);
+                    continue;
+                }
                 if v.get("type").and_then(Value::as_str) == Some("control_cancel_request") {
                     if let Some(id) = v.get("request_id").and_then(Value::as_str) {
                         reader.approvals.lock().unwrap().remove(id);
@@ -188,30 +238,47 @@ impl Session {
                 };
                 for ev in events {
                     let completed = matches!(ev, EngineEvent::Completed { .. });
-                    let mut turn = reader.turn.lock().unwrap();
-                    if let Some(sink) = &turn.sink {
-                        let _ = sink.send(ev);
+                    let mut turns = reader.turns.lock().unwrap();
+                    let incoming = matches!(ev, EngineEvent::Incoming { .. });
+                    if turns.running.is_none()
+                        && (incoming || matches!(ev, EngineEvent::Started { .. }))
+                    {
+                        // A CLI that reports no message ids: turns run in the order sent.
+                        let next = turns.queued.front().map(|(id, _)| id.clone());
+                        turns.start(next.as_deref().filter(|_| !incoming));
                     }
+                    reader.route(&turns, ev);
                     if completed {
-                        turn.sink = None;
+                        turns.running = None;
                     }
                 }
             }
 
             let status = child.wait();
             let err = stderr.join().unwrap_or_default();
-            let mut turn = reader.turn.lock().unwrap();
-            turn.exited = true;
-            if let Some(sink) = turn.sink.take() {
-                let detail = if err.trim().is_empty() {
-                    match status {
-                        Ok(s) => format!("claude exited without completing the turn ({s})"),
-                        Err(e) => format!("waiting on claude failed: {e}"),
-                    }
-                } else {
-                    err.trim().to_string()
-                };
-                let _ = sink.send(EngineEvent::Error { detail });
+            let mut turns = reader.turns.lock().unwrap();
+            turns.exited = true;
+            let detail = if err.trim().is_empty() {
+                match status {
+                    Ok(s) => format!("claude exited without completing the turn ({s})"),
+                    Err(e) => format!("waiting on claude failed: {e}"),
+                }
+            } else {
+                err.trim().to_string()
+            };
+            if turns.running.is_some() {
+                reader.route(
+                    &turns,
+                    EngineEvent::Error {
+                        detail: detail.clone(),
+                    },
+                );
+            }
+            turns.running = None;
+            for (_, sink) in std::mem::take(&mut turns.queued) {
+                let _ = sink.send(EngineEvent::Error {
+                    detail: detail.clone(),
+                });
             }
         });
 
@@ -222,28 +289,45 @@ impl Session {
         })
     }
 
-    /// Start a turn. Its events arrive on the returned receiver, which closes
-    /// after `Completed` or `Error`. Fails if the process has exited.
+    /// Start a turn, or queue it behind the running one. Its events arrive on the
+    /// returned receiver, which closes after `Completed` or `Error`. Fails if the
+    /// process has exited.
     pub fn send(&mut self, prompt: &str) -> io::Result<Receiver<EngineEvent>> {
         let (tx, rx) = mpsc::channel();
+        let id = Uuid::new_v4().to_string();
         {
-            let mut turn = self.shared.turn.lock().unwrap();
-            if turn.exited {
+            let mut turns = self.shared.turns.lock().unwrap();
+            if turns.exited {
                 return Err(io::ErrorKind::BrokenPipe.into());
             }
-            turn.sink = Some(tx);
+            turns.queued.push_back((id.clone(), tx));
         }
         self.shared.touch();
 
         let message = json!({
             "type": "user",
+            "uuid": id,
             "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] },
         });
         if let Err(e) = self.shared.write(&message) {
-            self.shared.turn.lock().unwrap().sink = None;
+            self.shared
+                .turns
+                .lock()
+                .unwrap()
+                .queued
+                .retain(|(queued, _)| *queued != id);
             return Err(e);
         }
         Ok(rx)
+    }
+
+    /// Change the name other agents know this one by.
+    pub fn rename(&self, name: &str) -> io::Result<()> {
+        self.shared.write(&json!({
+            "type": "control_request",
+            "request_id": Uuid::new_v4().to_string(),
+            "request": { "subtype": "rename_session", "title": name, "source": "host" },
+        }))
     }
 
     /// Stop the running turn; it still ends with `Completed`, and the process
@@ -285,11 +369,13 @@ impl Session {
     }
 
     pub fn is_alive(&self) -> bool {
-        !self.shared.turn.lock().unwrap().exited
+        !self.shared.turns.lock().unwrap().exited
     }
 
+    /// A turn is running or waiting to.
     pub fn is_busy(&self) -> bool {
-        self.shared.turn.lock().unwrap().sink.is_some()
+        let turns = self.shared.turns.lock().unwrap();
+        turns.running.is_some() || !turns.queued.is_empty()
     }
 
     /// Time since a turn was sent or the process last wrote anything.
@@ -308,6 +394,20 @@ impl Drop for Session {
 impl Shared {
     fn touch(&self) {
         *self.last_activity.lock().unwrap() = Instant::now();
+    }
+
+    fn route(&self, turns: &Turns, ev: EngineEvent) {
+        match &turns.running {
+            Some(Route::Client(sink)) => {
+                let _ = sink.send(ev);
+            }
+            Some(Route::Incoming) => {
+                if let Some(incoming) = &self.incoming {
+                    incoming(ev);
+                }
+            }
+            None => {}
+        }
     }
 
     fn write(&self, message: &Value) -> io::Result<()> {
@@ -360,6 +460,34 @@ fn permission_prompt(v: &Value) -> Option<Prompt> {
         call,
         input,
     })
+}
+
+/// The message id of a `command_lifecycle` line reporting a message's turn starting.
+/// The outer `Option` is whether the line is one; the id is missing for a turn the
+/// CLI started without a message.
+fn started_message(v: &Value) -> Option<Option<&str>> {
+    if v.get("type")?.as_str()? != "command_lifecycle" || v.get("state")?.as_str()? != "started" {
+        return None;
+    }
+    Some(v.get("command_uuid").and_then(Value::as_str))
+}
+
+/// Who sent a message the client did not, and what it says, from its stream-json
+/// echo or its transcript line. The client's own messages carry no `origin`.
+pub(crate) fn incoming(v: &Value) -> Option<(String, String)> {
+    let origin = v.get("origin")?;
+    let field = |key| origin.get(key).and_then(Value::as_str);
+    let from = field("name").or(field("kind")).unwrap_or("another session");
+    let text = match (field("body"), v.pointer("/message/content")) {
+        (Some(body), _) => body.to_string(),
+        (None, Some(Value::String(text))) => text.clone(),
+        (None, _) => content_blocks(v)
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    Some((from.to_string(), text))
 }
 
 fn control_response(request_id: &str, response: Value) -> Value {
@@ -416,6 +544,12 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
             .map(|b| EngineEvent::ToolStarted(tool_call(b)))
+            .collect(),
+
+        // A message starting its turn, echoed by `--replay-user-messages`.
+        "user" if v.get("isReplay").and_then(Value::as_bool) == Some(true) => incoming(v)
+            .map(|(from, text)| EngineEvent::Incoming { from, text })
+            .into_iter()
             .collect(),
 
         // Tool results are delivered as `user` messages by Claude Code.
@@ -725,5 +859,49 @@ mod tests {
             "ls -la"
         );
         assert_eq!(summarize(&line(r#"{"todos":[]}"#)), "");
+    }
+
+    #[test]
+    fn another_agents_message_is_incoming_and_the_clients_own_is_not() {
+        let peer = line(
+            r#"{"type":"user","isReplay":true,"uuid":"5b4e","message":{"role":"user","content":"Another Claude session sent a message: ..."},"origin":{"kind":"peer","name":"bravo","body":"ping"}}"#,
+        );
+        assert!(matches!(
+            &decode(&peer)[..],
+            [EngineEvent::Incoming { from, text }] if from == "bravo" && text == "ping"
+        ));
+
+        let own = line(
+            r#"{"type":"user","isReplay":true,"uuid":"1111","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+        );
+        assert!(decode(&own).is_empty());
+    }
+
+    #[test]
+    fn turns_follow_the_ids_the_cli_starts() {
+        let started = |id: &str| {
+            line(&format!(
+                r#"{{"type":"command_lifecycle","command_uuid":"{id}","state":"started"}}"#
+            ))
+        };
+        assert_eq!(started_message(&started("a")), Some(Some("a")));
+        assert_eq!(
+            started_message(&line(
+                r#"{"type":"command_lifecycle","command_uuid":"a","state":"queued"}"#
+            )),
+            None
+        );
+
+        let mut turns = Turns::default();
+        let (first, _) = mpsc::channel();
+        let (second, _) = mpsc::channel();
+        turns.queued.push_back(("a".to_string(), first));
+        turns.queued.push_back(("b".to_string(), second));
+
+        turns.start(started_message(&started("peer")).unwrap());
+        assert!(matches!(turns.running, Some(Route::Incoming)));
+        turns.start(started_message(&started("b")).unwrap());
+        assert!(matches!(turns.running, Some(Route::Client(_))));
+        assert_eq!(turns.queued.len(), 1);
     }
 }

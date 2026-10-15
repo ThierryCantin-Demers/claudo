@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::engine::cli::tool_call;
+use crate::engine::cli::{incoming, tool_call};
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
 pub fn data_root() -> PathBuf {
@@ -144,19 +144,26 @@ impl Store {
         self.save();
     }
 
-    /// Record a completed turn: bump `updated`, store the session id, and set a
-    /// title from the first prompt if it is still the placeholder.
-    pub fn record_turn(&mut self, id: &str, session_id: Option<&str>, first_prompt: &str) {
+    /// Record a turn: bump `updated` and store the session id.
+    pub fn record_turn(&mut self, id: &str, session_id: Option<&str>) {
         if let Some(c) = self.get_mut(id) {
             c.updated = now_secs();
             if let Some(sid) = session_id {
                 c.session_id = Some(sid.to_string());
             }
-            if c.title == "New conversation" {
-                c.title = title_from_prompt(first_prompt);
-            }
         }
         self.save();
+    }
+
+    /// The conversation's title, first taken from `prompt` if it is still the placeholder.
+    pub fn title_for(&mut self, id: &str, prompt: &str) -> Option<String> {
+        let c = self.get_mut(id)?;
+        if c.title == "New conversation" {
+            c.title = title_from_prompt(prompt);
+        }
+        let title = c.title.clone();
+        self.save();
+        Some(title)
     }
 
     /// Conversations sorted most-recently-updated first (for the sidebar).
@@ -218,6 +225,9 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
         match v.get("type").and_then(Value::as_str) {
             Some("ai-title") => {
                 ai_title = v.get("aiTitle").and_then(Value::as_str).map(str::to_owned);
+            }
+            Some("user") if let Some((from, text)) = incoming(&v) => {
+                items.push(Item::Incoming { from, text });
             }
             Some("user") => match v.pointer("/message/content") {
                 Some(Value::String(s)) => items.push(Item::User(s.clone())),

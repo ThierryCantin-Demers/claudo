@@ -174,6 +174,11 @@ pub enum Item {
     Thinking(String),
     Assistant(String),
     Tool(ToolCall),
+    /// A message another agent sent; it starts a turn like a user's message does.
+    Incoming {
+        from: String,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,6 +318,12 @@ pub enum ServerEvent {
     Started {
         conversation_id: ConversationId,
         session_id: SessionId,
+    },
+    /// Another agent's message started a turn the client did not send.
+    Incoming {
+        conversation_id: ConversationId,
+        from: String,
+        text: String,
     },
     Delta {
         conversation_id: ConversationId,

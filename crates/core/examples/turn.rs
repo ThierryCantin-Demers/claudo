@@ -37,7 +37,8 @@ fn turn(
         model: None,
         effort: None,
     };
-    let mut session = Session::spawn(config, resume).expect("spawn claude");
+    let mut session =
+        Session::spawn(config, resume, "claudo turn probe", None).expect("spawn claude");
     for ev in session.send(prompt).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
@@ -45,6 +46,7 @@ fn turn(
             EngineEvent::ThinkingDelta { text: t } => println!("  [thinking: {}]", t.trim()),
             EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
             EngineEvent::Quota(_) => {}
+            EngineEvent::Incoming { from, text } => println!("  [from {from}: {text}]"),
             EngineEvent::ApprovalNeeded { call, .. } => {
                 println!("  [needs approval: {}]", call.summary)
             }

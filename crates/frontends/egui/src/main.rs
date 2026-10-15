@@ -280,6 +280,18 @@ impl ClaudoApp {
 
                 ServerEvent::Started { .. } => {}
 
+                ServerEvent::Incoming {
+                    conversation_id,
+                    from,
+                    text,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.assistant_idx = None;
+                        self.streaming = true;
+                        self.items.push(Item::Incoming { from, text });
+                    }
+                }
+
                 ServerEvent::Delta {
                     conversation_id,
                     text,
@@ -830,6 +842,11 @@ impl ClaudoApp {
                         match item {
                             Item::User(text) => {
                                 ui.strong("You");
+                                ui.label(text);
+                                ui.separator();
+                            }
+                            Item::Incoming { from, text } => {
+                                ui.strong(format!("From {from}"));
                                 ui.label(text);
                                 ui.separator();
                             }
