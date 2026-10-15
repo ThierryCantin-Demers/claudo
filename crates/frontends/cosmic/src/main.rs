@@ -57,6 +57,9 @@ mod app {
     const SIDEBAR_COLLAPSE: f32 = 120.0;
     /// Tiles stop shrinking here and the row scrolls sideways instead.
     const TILE_MIN: f32 = 360.0;
+    /// Narrower tiles put the message box's controls on two lines: a squeezed dropdown
+    /// wraps its label, and libcosmic's has no way to stop it.
+    const ONE_LINE_CONTROLS: f32 = 600.0;
     const HANDLE_WIDTH: f32 = 8.0;
     const PULSE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -336,6 +339,16 @@ mod app {
             origin: Option<f32>,
             slot: Option<usize>,
         },
+    }
+
+    /// How a tile is drawn.
+    #[derive(Debug, Clone, Copy)]
+    struct TileView {
+        /// Beside other tiles, so it names its conversation in a header.
+        several: bool,
+        focused: bool,
+        /// Too narrow for the message box's controls on one line.
+        compact: bool,
     }
 
     /// Where an opened or created conversation goes.
@@ -625,8 +638,13 @@ mod app {
                 - count.saturating_sub(1) as f32 * HANDLE_WIDTH;
             (
                 start,
-                (room >= count as f32 * TILE_MIN * self.zoom).then_some(room),
+                (room >= count as f32 * self.tile_min()).then_some(room),
             )
+        }
+
+        /// Zooming out never makes a tile narrower than its message box's controls.
+        fn tile_min(&self) -> f32 {
+            TILE_MIN * self.zoom.max(1.0)
         }
 
         fn total_share(&self) -> f32 {
@@ -636,7 +654,7 @@ mod app {
         fn drag_to(&mut self, x: f32) {
             let (start, room) = self.tile_room();
             let total = self.total_share();
-            let min = TILE_MIN * self.zoom;
+            let min = self.tile_min();
             match &mut self.drag {
                 Some(Drag::Sidebar { offset }) => {
                     let layout = &mut self.layout;
@@ -1013,7 +1031,9 @@ mod app {
         fn tiles(&self) -> Element<'_, Message> {
             let count = self.layout.tiles.len();
             let several = count > 1;
-            let overflow = self.tile_room().1.is_none();
+            let room = self.tile_room().1;
+            let overflow = room.is_none();
+            let total = self.total_share();
             let slot = match self.drag {
                 Some(Drag::Tile { from, slot, .. }) => {
                     slot.filter(|s| *s != from && *s != from + 1)
@@ -1039,12 +1059,17 @@ mod app {
                     );
                 }
                 let width = if overflow {
-                    Length::Fixed(TILE_MIN * self.zoom)
+                    Length::Fixed(self.tile_min())
                 } else {
                     Length::FillPortion((tile.share * 1000.0).round().max(1.0) as u16)
                 };
-                let focused = several && i == self.layout.focused;
-                row.push(self.tile(&tile.conversation, view, several, focused, width));
+                let pixels = room.map_or(self.tile_min(), |room| tile.share / total * room);
+                let tile_view = TileView {
+                    several,
+                    focused: several && i == self.layout.focused,
+                    compact: pixels < ONE_LINE_CONTROLS,
+                };
+                row.push(self.tile(&tile.conversation, view, tile_view, width));
             }
             if slot == Some(count) {
                 row.push(drop_marker());
@@ -1065,12 +1090,11 @@ mod app {
             &'a self,
             id: &'a ConversationId,
             view: &'a ConversationView,
-            several: bool,
-            focused: bool,
+            tile: TileView,
             width: Length,
         ) -> Element<'a, Message> {
-            let body = self.conversation(id, view);
-            let content: Element<Message> = if several {
+            let body = self.conversation(id, view, tile.compact);
+            let content: Element<Message> = if tile.several {
                 widget::Column::with_children(vec![self.tile_header(id), body]).into()
             } else {
                 body
@@ -1078,7 +1102,7 @@ mod app {
             let framed = widget::container(content)
                 .width(width)
                 .height(Length::Fill)
-                .class(tile_style(focused));
+                .class(tile_style(tile.focused));
             widget::mouse_area(framed)
                 .on_press(Message::Focus(id.clone()))
                 .into()
@@ -1131,6 +1155,7 @@ mod app {
             &'a self,
             id: &'a ConversationId,
             view: &'a ConversationView,
+            compact: bool,
         ) -> Element<'a, Message> {
             if view.items.is_empty() && !view.streaming {
                 let greeting =
@@ -1138,7 +1163,7 @@ mod app {
                 return widget::Column::with_children(vec![
                     widget::space::vertical().into(),
                     widget::container(greeting).center_x(Length::Fill).into(),
-                    self.composer(id, view),
+                    self.composer(id, view, compact),
                     widget::space::vertical().into(),
                 ])
                 .spacing(24)
@@ -1150,7 +1175,7 @@ mod app {
                     .iter()
                     .map(|(request, call)| self.approval_card(id, request, call)),
             );
-            column.push(self.composer(id, view));
+            column.push(self.composer(id, view, compact));
             widget::Column::with_children(column).spacing(8).into()
         }
 
@@ -1216,6 +1241,7 @@ mod app {
             &'a self,
             id: &'a ConversationId,
             view: &'a ConversationView,
+            compact: bool,
         ) -> Element<'a, Message> {
             let size = 14.0 * self.zoom;
             let (model, effort, profile) = self.effective(id);
@@ -1249,33 +1275,51 @@ mod app {
                     .on_press_maybe(view.can_send().then(|| Message::Send(id.clone())))
             };
             let (on_profile, on_effort, on_model) = (id.clone(), id.clone(), id.clone());
-            let controls = widget::Row::with_children(vec![
-                widget::dropdown(
-                    profiles,
-                    PROFILES.iter().position(|p| *p == profile),
-                    move |i| Message::OvProfile(on_profile.clone(), i),
-                )
-                .into(),
-                widget::dropdown(
-                    efforts,
-                    Effort::ALL.iter().position(|e| *e == effort),
-                    move |i| Message::OvEffort(on_effort.clone(), i),
-                )
-                .into(),
-                widget::space::horizontal().into(),
-                widget::dropdown(
-                    models,
-                    MODEL_PRESETS.iter().position(|(_, m)| *m == model),
-                    move |i| Message::OvModel(on_model.clone(), i),
-                )
-                .into(),
-                send.into(),
-            ])
-            .spacing(8)
-            .align_y(Alignment::Center);
+            let profile = widget::dropdown(
+                profiles,
+                PROFILES.iter().position(|p| *p == profile),
+                move |i| Message::OvProfile(on_profile.clone(), i),
+            );
+            let effort = widget::dropdown(
+                efforts,
+                Effort::ALL.iter().position(|e| *e == effort),
+                move |i| Message::OvEffort(on_effort.clone(), i),
+            );
+            let model = widget::dropdown(
+                models,
+                MODEL_PRESETS.iter().position(|(_, m)| *m == model),
+                move |i| Message::OvModel(on_model.clone(), i),
+            );
+            let line = |children| {
+                widget::Row::with_children(children)
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+            };
+            let controls: Element<Message> = if compact {
+                widget::Column::with_children(vec![
+                    line(vec![profile.into(), effort.into()]).into(),
+                    line(vec![
+                        model.into(),
+                        widget::space::horizontal().into(),
+                        send.into(),
+                    ])
+                    .into(),
+                ])
+                .spacing(8)
+                .into()
+            } else {
+                line(vec![
+                    profile.into(),
+                    effort.into(),
+                    widget::space::horizontal().into(),
+                    model.into(),
+                    send.into(),
+                ])
+                .into()
+            };
 
             let boxed = widget::container(
-                widget::Column::with_children(vec![editor.into(), controls.into()]).spacing(10),
+                widget::Column::with_children(vec![editor.into(), controls]).spacing(10),
             )
             .padding([12, 14])
             .width(Length::Fill)
