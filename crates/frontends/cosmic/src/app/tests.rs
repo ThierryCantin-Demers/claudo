@@ -181,17 +181,25 @@ fn button(pressed: bool) -> Event {
     })
 }
 
-fn escape() -> Event {
-    use keyboard::key::{Code, Named, Physical};
+fn key(
+    named: keyboard::key::Named,
+    code: keyboard::key::Code,
+    modifiers: keyboard::Modifiers,
+) -> Event {
     Event::Keyboard(keyboard::Event::KeyPressed {
-        key: keyboard::Key::Named(Named::Escape),
-        modified_key: keyboard::Key::Named(Named::Escape),
-        physical_key: Physical::Code(Code::Escape),
+        key: keyboard::Key::Named(named),
+        modified_key: keyboard::Key::Named(named),
+        physical_key: keyboard::key::Physical::Code(code),
         location: keyboard::Location::Standard,
-        modifiers: keyboard::Modifiers::empty(),
+        modifiers,
         text: None,
         repeat: false,
     })
+}
+
+fn escape() -> Event {
+    use keyboard::key::{Code, Named};
+    key(Named::Escape, Code::Escape, keyboard::Modifiers::empty())
 }
 
 fn wheel(lines: f32) -> Event {
@@ -426,4 +434,37 @@ fn rename_from_the_sidebar_edits_the_row() {
         h.app.info(BRAVO).map(|c| c.title.as_str()),
         Some("Reviewer")
     );
+}
+
+#[test]
+fn ctrl_backspace_and_delete_remove_whole_words() {
+    use keyboard::key::{Code, Named};
+    let mut app = two_tiles();
+    app.views.get_mut(ALPHA).expect("Alpha").draft =
+        text_editor::Content::with_text("hello brave new world");
+    let mut h = Harness::new(app);
+    h.focus(composer_id(ALPHA));
+    let ctrl = keyboard::Modifiers::CTRL;
+    let draft = |h: &Harness| h.app.views[ALPHA].draft.text();
+
+    let _ = h.app.update(Message::Edit(
+        ALPHA.to_string(),
+        text_editor::Action::Move(text_editor::Motion::DocumentEnd),
+    ));
+    h.send(vec![key(Named::Backspace, Code::Backspace, ctrl)]);
+    assert_eq!(draft(&h), "hello brave new ");
+
+    let _ = h.app.update(Message::Edit(
+        ALPHA.to_string(),
+        text_editor::Action::Move(text_editor::Motion::DocumentStart),
+    ));
+    h.send(vec![key(Named::Delete, Code::Delete, ctrl)]);
+    assert_eq!(draft(&h), " brave new ");
+
+    h.send(vec![key(
+        Named::Backspace,
+        Code::Backspace,
+        keyboard::Modifiers::empty(),
+    )]);
+    assert_eq!(draft(&h), " brave new ", "nothing before the cursor");
 }

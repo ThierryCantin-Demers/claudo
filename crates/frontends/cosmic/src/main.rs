@@ -1583,7 +1583,7 @@ mod app {
                 .id(composer_id(id))
                 .placeholder(placeholder)
                 .on_action(move |action| Message::Edit(id.clone(), action))
-                .key_binding(move |press| send_on_enter(press, id))
+                .key_binding(move |press| send_on_enter(press, id, &view.draft))
                 .size(size)
                 .padding(0)
                 .min_height(if compact { size * 1.3 } else { size * 2.6 })
@@ -2366,8 +2366,10 @@ mod app {
     fn send_on_enter(
         press: text_editor::KeyPress,
         conversation: &ConversationId,
+        draft: &text_editor::Content,
     ) -> Option<text_editor::Binding<Message>> {
         use keyboard::key::Named;
+        use text_editor::{Binding, Motion};
         let enter = matches!(press.key, keyboard::Key::Named(Named::Enter));
         let focused = matches!(press.status, text_editor::Status::Focused { .. });
         let modifiers = press.modifiers;
@@ -2380,14 +2382,28 @@ mod app {
             return None;
         }
         if enter && focused && !modifiers.shift() {
-            return Some(text_editor::Binding::Custom(Message::Send(
-                conversation.clone(),
-            )));
+            return Some(Binding::Custom(Message::Send(conversation.clone())));
+        }
+        // iced's editor deletes one character whatever the modifiers; with Ctrl it is a word,
+        // or the selection when there is one.
+        let word = match press.key {
+            keyboard::Key::Named(Named::Backspace) => Some((Motion::WordLeft, Binding::Backspace)),
+            keyboard::Key::Named(Named::Delete) => Some((Motion::WordRight, Binding::Delete)),
+            _ => None,
+        };
+        if let Some((motion, delete)) = word
+            && focused
+            && modifiers.control()
+        {
+            return Some(match draft.selection() {
+                Some(_) => delete,
+                None => Binding::Sequence(vec![Binding::Select(motion), delete]),
+            });
         }
         // Ctrl with `-`, `=` or `0` still reports the plain character, which would be typed
         // along with the zoom.
-        match text_editor::Binding::from_key_press(press)? {
-            text_editor::Binding::Insert(_) if modifiers.control() && !modifiers.alt() => None,
+        match Binding::from_key_press(press)? {
+            Binding::Insert(_) if modifiers.control() && !modifiers.alt() => None,
             binding => Some(binding),
         }
     }
