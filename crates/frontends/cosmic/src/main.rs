@@ -1744,7 +1744,13 @@ mod app {
                 }
                 Message::Modifiers(modifiers) => self.modifiers = modifiers,
                 Message::Edit(id, action) => {
-                    self.focus(&id);
+                    // An editor losing focus clears its selection through this message too.
+                    if !matches!(
+                        action,
+                        text_editor::Action::ClearSelection | text_editor::Action::Scroll { .. }
+                    ) {
+                        self.focus(&id);
+                    }
                     if let Some(view) = self.views.get_mut(&id) {
                         view.draft.perform(action);
                     }
