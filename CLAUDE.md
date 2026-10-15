@@ -37,6 +37,12 @@ cargo run -p claudo-cosmic --features cosmic --release   # COSMIC frontend
 cargo build -p claudo-egui --target wasm32-unknown-unknown
 ```
 
+The COSMIC UI can be driven without a window: `crates/frontends/cosmic/src/app/tests.rs`
+builds the real view on a headless renderer, sends it events, applies the messages to
+`update`, and keeps widget state between frames. Use it to check UI behaviour yourself,
+and its ignored `snapshots` test (`cargo test -p claudo-cosmic --features cosmic --
+--ignored`) to render PNGs into `target/snapshots` and look at them.
+
 Verify changes with the probe examples (they hit the real CLI and cost tokens, so keep
 prompts tiny):
 
