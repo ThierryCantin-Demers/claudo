@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use claudo_protocol::{
-    Command, ConversationInfo, Effort, Item, MODEL_PRESETS, Overrides, Profile, ServerEvent,
+    Command, ConversationInfo, Effort, Item, ModelOption, Overrides, Profile, ServerEvent,
     Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
@@ -75,6 +75,8 @@ struct ClaudoApp {
     input: String,
     /// Persisted global defaults (model, thinking, permissions) used for turns.
     settings: Settings,
+    /// The CLI's model families, with the versions their aliases run today.
+    models: Vec<ModelOption>,
     /// Current conversation's per-field overrides (each falls back to `settings`).
     overrides: Overrides,
     show_settings: bool,
@@ -96,6 +98,7 @@ impl ClaudoApp {
         let mut transport = connect();
         transport.send(Command::GetStatus);
         transport.send(Command::GetSettings);
+        transport.send(Command::GetModels);
         transport.send(Command::ListConversations);
         Self {
             transport,
@@ -105,6 +108,7 @@ impl ClaudoApp {
             items: Vec::new(),
             input: String::new(),
             settings: Settings::default(),
+            models: Vec::new(),
             overrides: Overrides::default(),
             show_settings: false,
             streaming: false,
@@ -244,6 +248,8 @@ impl ClaudoApp {
                 ServerEvent::Status(s) => self.status = Some(s),
 
                 ServerEvent::Settings(s) => self.settings = s,
+
+                ServerEvent::Models(models) => self.models = models,
 
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
@@ -543,12 +549,12 @@ impl ClaudoApp {
                 egui::ComboBox::from_id_salt("settings_model")
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
-                        for (label, value) in MODEL_PRESETS {
+                        for model in &self.models {
                             if ui
-                                .selectable_label(self.settings.model == *value, *label)
+                                .selectable_label(self.settings.model == model.value, &model.label)
                                 .clicked()
                             {
-                                self.settings.model = (*value).to_string();
+                                self.settings.model = model.value.clone();
                                 changed = true;
                             }
                         }
@@ -644,12 +650,15 @@ impl ClaudoApp {
                     self.overrides.model = None;
                     changed = true;
                 }
-                for (label, value) in MODEL_PRESETS {
+                for model in &self.models {
                     if ui
-                        .selectable_label(self.overrides.model.as_deref() == Some(*value), *label)
+                        .selectable_label(
+                            self.overrides.model.as_deref() == Some(model.value.as_str()),
+                            &model.label,
+                        )
                         .clicked()
                     {
-                        self.overrides.model = Some((*value).to_string());
+                        self.overrides.model = Some(model.value.clone());
                         changed = true;
                     }
                 }

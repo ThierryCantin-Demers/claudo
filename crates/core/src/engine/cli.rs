@@ -13,11 +13,57 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use claudo_protocol::{ContextUsage, Profile, Quota, QuotaWindow, ToolCall};
+use claudo_protocol::{ContextUsage, ModelOption, Profile, Quota, QuotaWindow, ToolCall};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::claude_bin;
+
+/// The model families the CLI offers, by the alias that runs each one's newest version,
+/// as its `initialize` response lists them. Pinned older versions and `default` are left out.
+pub fn models() -> io::Result<Vec<ModelOption>> {
+    let mut child = Command::new(claude_bin())
+        .current_dir(std::env::temp_dir())
+        .arg("-p")
+        .args(["--input-format", "stream-json"])
+        .args(["--output-format", "stream-json"])
+        .arg("--verbose")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    writeln!(
+        stdin,
+        "{}",
+        json!({ "type": "control_request", "request_id": "models", "request": { "subtype": "initialize" } })
+    )?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let response = BufReader::new(stdout)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .find(|v| v.get("type").and_then(Value::as_str) == Some("control_response"));
+    drop(stdin);
+    let _ = child.wait();
+
+    let models = response
+        .as_ref()
+        .and_then(|v| v.pointer("/response/response/models"))
+        .and_then(Value::as_array)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    Ok(models
+        .iter()
+        .filter_map(|m| {
+            let value = m.get("value")?.as_str()?;
+            let label = m.get("displayName")?.as_str()?;
+            (value != "default" && !value.starts_with("claude-")).then(|| ModelOption {
+                value: value.to_string(),
+                label: label.to_string(),
+            })
+        })
+        .collect())
+}
 
 /// Map the shared `Profile` to the CLI's `--permission-mode` value. True
 /// per-call approve/deny prompting needs the CLI's undocumented control protocol

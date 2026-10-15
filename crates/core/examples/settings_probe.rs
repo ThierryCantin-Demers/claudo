@@ -1,4 +1,5 @@
-//! Smoke test: settings persist across backend instances (temp data dir).
+//! Smoke test: settings persist across backend instances (temp data dir), a model
+//! version claudo once saved loads as its family's alias, and the CLI lists its models.
 //! Usage: cargo run -p claudo-core --example settings_probe
 
 use claudo_core::backend::Backend;
@@ -30,6 +31,13 @@ fn main() {
     let backend2 = Backend::new(tx2);
     backend2.handle(Command::GetSettings);
     show(&mut rx2, "reloaded (new backend)");
+
+    backend2.handle(Command::GetModels);
+    if let Some(ServerEvent::Models(models)) = rx2.blocking_recv() {
+        for m in models {
+            println!("model: {:?} runs {}", m.value, m.label);
+        }
+    }
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

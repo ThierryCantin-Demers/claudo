@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Command, ConversationInfo, ServerEvent};
+use claudo_protocol::{Command, ConversationInfo, ModelOption, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{EngineEvent, SessionConfig};
@@ -56,6 +56,21 @@ impl Backend {
             Command::GetStatus => self.emit(ServerEvent::Status(crate::detect_system())),
 
             Command::GetSettings => self.emit(ServerEvent::Settings(crate::settings::load())),
+
+            Command::GetModels => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let models = crate::engine::cli::models().unwrap_or_else(|_| {
+                        ["Opus", "Fable", "Sonnet", "Haiku"]
+                            .map(|label| ModelOption {
+                                value: label.to_lowercase(),
+                                label: label.to_string(),
+                            })
+                            .to_vec()
+                    });
+                    let _ = events.send(ServerEvent::Models(models));
+                });
+            }
 
             Command::UpdateSettings { settings } => {
                 crate::settings::save(&settings);

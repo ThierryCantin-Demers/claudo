@@ -68,23 +68,19 @@ impl Profile {
     }
 }
 
-/// A `--model` value: an alias (`opus`) or a specific version
-/// (`claude-sonnet-5-5`). Empty string means "use the CLI's configured model".
-/// The frontend offers presets plus a free-text field so any version works.
-pub const MODEL_PRESETS: &[(&str, &str)] = &[
-    ("Opus 5.5 (default)", DEFAULT_MODEL),
-    ("Sonnet 5.5", "claude-sonnet-5-5"),
-    ("Haiku 5.5", "claude-haiku-5-5"),
-    ("Fable 5.1", "claude-fable-5-1"),
-    ("Opus (latest alias)", "opus"),
-    ("Sonnet (latest alias)", "sonnet"),
-    ("Haiku (latest alias)", "haiku"),
-    ("Fable (latest alias)", "fable"),
-    ("CLI default (unset)", ""),
-];
+/// A model family the CLI offers. Its value is an alias, so choosing "Opus 5.5" keeps
+/// running the newest Opus once a later version ships.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    /// The `--model` value, such as `opus`.
+    pub value: String,
+    /// The version the alias runs today, such as "Opus 5.5".
+    pub label: String,
+}
 
-/// Model used when the user hasn't chosen one.
-pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+/// Model used when the user hasn't chosen one. A `--model` value is an alias
+/// (`opus`) or a specific version (`claude-sonnet-5-5`); empty means the CLI's own.
+pub const DEFAULT_MODEL: &str = "opus";
 
 /// Subscription usage the CLI reports during each turn; account-wide, not per conversation.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -257,6 +253,8 @@ impl Default for Settings {
 pub enum Command {
     GetStatus,
     GetSettings,
+    /// Answered by `Models`.
+    GetModels,
     UpdateSettings {
         settings: Settings,
     },
@@ -301,6 +299,7 @@ pub enum Command {
 pub enum ServerEvent {
     Status(SystemStatus),
     Settings(Settings),
+    Models(Vec<ModelOption>),
     /// Full conversation list.
     Conversations {
         list: Vec<ConversationInfo>,

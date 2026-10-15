@@ -13,10 +13,27 @@ fn path() -> PathBuf {
 }
 
 pub fn load() -> Settings {
-    fs::read_to_string(path())
+    let mut settings: Settings = fs::read_to_string(path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    follow_latest(&mut settings.model);
+    settings
+}
+
+/// Versions claudo itself once saved, now the aliases that follow each family's
+/// newest; a version the user typed stays as it is.
+const FORMER_PRESETS: [(&str, &str); 4] = [
+    ("claude-opus-5-5", "opus"),
+    ("claude-sonnet-5-5", "sonnet"),
+    ("claude-haiku-5-5", "haiku"),
+    ("claude-fable-5-1", "fable"),
+];
+
+pub(crate) fn follow_latest(model: &mut String) {
+    if let Some((_, alias)) = FORMER_PRESETS.iter().find(|(id, _)| id == model) {
+        *model = alias.to_string();
+    }
 }
 
 pub fn save(settings: &Settings) {

@@ -89,7 +89,9 @@ claude -p --input-format stream-json --output-format stream-json \
   [--resume <session-id>] [--model <m>] [--effort <low|medium|high|xhigh|max>]
 ```
 
-Each user line carries a `uuid`, and an `initialize` control request goes first.
+Each user line carries a `uuid`, and an `initialize` control request goes first. Its response
+lists the models: claudo offers the family aliases (`opus`, `sonnet`, ...) labelled with
+the version each runs today (`displayName`), so a choice follows new releases.
 
 Every turn emits its own `system`/`init` and ends with its own `result`; the process then
 waits for the next line. Closing stdin makes it finish the running turn and exit.

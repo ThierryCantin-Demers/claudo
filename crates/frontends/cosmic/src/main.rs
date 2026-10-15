@@ -24,7 +24,7 @@ fn main() -> cosmic::iced::Result {
 #[cfg(feature = "cosmic")]
 mod app {
     use claudo_protocol::{
-        Command, ConversationId, ConversationInfo, Effort, Item, MODEL_PRESETS, Overrides, Profile,
+        Command, ConversationId, ConversationInfo, Effort, Item, ModelOption, Overrides, Profile,
         ServerEvent, Settings, SystemStatus, ToolCall,
     };
     use claudo_transport::{Commands, spawn_backend};
@@ -386,6 +386,8 @@ mod app {
         commands: Option<Commands>,
         status: Option<SystemStatus>,
         settings: Settings,
+        /// The CLI's model families, with the versions their aliases run today.
+        models: Vec<ModelOption>,
         conversations: Vec<ConversationInfo>,
         /// A conversation appears in at most one tile, so one view each is enough.
         views: HashMap<ConversationId, ConversationView>,
@@ -821,6 +823,7 @@ mod app {
             match ev {
                 ServerEvent::Status(s) => self.status = Some(s),
                 ServerEvent::Settings(s) => self.settings = s,
+                ServerEvent::Models(models) => self.models = models,
                 ServerEvent::Quota(_) => {}
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
@@ -918,21 +921,24 @@ mod app {
             }
         }
 
+        /// A model menu's entries, and which one `model` is.
+        fn model_menu(&self, model: &str) -> (Vec<String>, Option<usize>) {
+            (
+                self.models.iter().map(|m| m.label.clone()).collect(),
+                self.models.iter().position(|m| m.value == model),
+            )
+        }
+
         fn settings_page(&self) -> Element<'_, Message> {
-            let models: Vec<&str> = MODEL_PRESETS.iter().map(|(label, _)| *label).collect();
+            let (models, model) = self.model_menu(&self.settings.model);
             let efforts: Vec<&str> = Effort::ALL.iter().map(|e| e.label()).collect();
             let profiles: Vec<&str> = PROFILES.iter().map(|p| p.label()).collect();
             let defaults = widget::settings::section()
                 .title("Defaults")
                 .add(widget::settings::item(
                     "Model",
-                    widget::dropdown(
-                        models,
-                        MODEL_PRESETS
-                            .iter()
-                            .position(|(_, m)| *m == self.settings.model),
-                        Message::SetModel,
-                    ),
+                    widget::dropdown(models, model, Message::SetModel)
+                        .placeholder(model_name(&self.settings.model)),
                 ))
                 .add(widget::settings::item(
                     "Model version",
@@ -1315,15 +1321,8 @@ mod app {
             let efforts: Vec<&str> = Effort::ALL
                 .iter()
                 .map(|e| match (compact, e) {
-                    (true, Effort::Default) => "Thinking",
+                    (true, Effort::Default) => "Default",
                     _ => e.label(),
-                })
-                .collect();
-            let models: Vec<&str> = MODEL_PRESETS
-                .iter()
-                .map(|(label, _)| match compact {
-                    true => label.split(" (").next().unwrap_or(label),
-                    false => label,
                 })
                 .collect();
             let send = if view.streaming {
@@ -1346,11 +1345,11 @@ mod app {
                 Effort::ALL.iter().position(|e| *e == effort),
                 move |i| Message::OvEffort(on_effort.clone(), i),
             );
-            let model = widget::dropdown(
-                models,
-                MODEL_PRESETS.iter().position(|(_, m)| *m == model),
-                move |i| Message::OvModel(on_model.clone(), i),
-            );
+            let (models, selected) = self.model_menu(&model);
+            let model = widget::dropdown(models, selected, move |i| {
+                Message::OvModel(on_model.clone(), i)
+            })
+            .placeholder(model_name(&model));
             let small = |dropdown: widget::Dropdown<'a, &'static str, Message, Message>| {
                 dropdown.text_size(13.0 * self.zoom).padding([4, 8])
             };
@@ -1358,7 +1357,7 @@ mod app {
                 small(profile).into(),
                 small(effort).into(),
                 widget::space::horizontal().into(),
-                small(model).into(),
+                model.text_size(13.0 * self.zoom).padding([4, 8]).into(),
                 send.into(),
             ])
             .spacing(if compact { 2 } else { 6 })
@@ -1837,6 +1836,7 @@ mod app {
                 commands: None,
                 status: None,
                 settings: Settings::default(),
+                models: Vec::new(),
                 conversations: Vec::new(),
                 views: HashMap::new(),
                 layout: WindowLayout {
@@ -2062,8 +2062,8 @@ mod app {
                     std::process::exit(0)
                 }
                 Message::SetModel(i) => {
-                    if let Some((_, v)) = MODEL_PRESETS.get(i) {
-                        self.settings.model = (*v).to_string();
+                    if let Some(model) = self.models.get(i) {
+                        self.settings.model = model.value.clone();
                         self.save_settings();
                     }
                 }
@@ -2084,8 +2084,8 @@ mod app {
                     }
                 }
                 Message::OvModel(id, i) => {
-                    if let Some((_, model)) = MODEL_PRESETS.get(i) {
-                        self.set_override(id, |o| o.model = Some((*model).to_string()));
+                    if let Some(model) = self.models.get(i).map(|m| m.value.clone()) {
+                        self.set_override(id, |o| o.model = Some(model));
                     }
                 }
                 Message::OvEffort(id, i) => {
@@ -2204,6 +2204,15 @@ mod app {
             n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
             n if n >= 1_000 => format!("{:.1}k", n as f64 / 1_000.0),
             n => n.to_string(),
+        }
+    }
+
+    /// How a model menu names a `--model` value that is not one of its entries.
+    fn model_name(model: &str) -> String {
+        if model.is_empty() {
+            "CLI default".to_string()
+        } else {
+            model.to_string()
         }
     }
 
@@ -2334,6 +2343,7 @@ mod app {
                 let (commands, mut events) = spawn_backend();
                 commands.send(Command::GetStatus);
                 commands.send(Command::GetSettings);
+                commands.send(Command::GetModels);
                 commands.send(Command::ListConversations);
                 let _ = output.send(Message::Connected(commands)).await;
                 while let Some(ev) = events.recv().await {

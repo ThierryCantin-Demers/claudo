@@ -70,10 +70,16 @@ impl Store {
     }
 
     pub fn load() -> Self {
-        match fs::read_to_string(Self::path()) {
+        let mut store: Self = match fs::read_to_string(Self::path()) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        for c in &mut store.conversations {
+            if let Some(model) = &mut c.overrides.model {
+                crate::settings::follow_latest(model);
+            }
         }
+        store
     }
 
     pub fn save(&self) {
