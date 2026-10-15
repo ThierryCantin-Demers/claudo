@@ -371,6 +371,22 @@ mod app {
         },
     }
 
+    /// A conversation's title being edited, the text so far, and where its field is.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Renaming {
+        conversation: ConversationId,
+        text: String,
+        at: TitleAt,
+    }
+
+    /// Where a title is edited: its tile's header (or the window's, with one tile), or its
+    /// row in the sidebar.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TitleAt {
+        Header,
+        Sidebar,
+    }
+
     /// How a tile is drawn.
     #[derive(Debug, Clone, Copy)]
     struct TileView {
@@ -418,8 +434,7 @@ mod app {
         drag: Option<Drag>,
         /// Text selected in a transcript; one at a time, as in a browser.
         selection: Option<Selection>,
-        /// The conversation whose title is being edited, and the text so far.
-        renaming: Option<(ConversationId, String)>,
+        renaming: Option<Renaming>,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
         /// The tiles to reopen, with the focused one, once the conversation list arrives.
@@ -510,8 +525,8 @@ mod app {
         /// A double or triple click selected a word or a block.
         SelectRange(ConversationId, Mark, Mark),
         Copy,
-        /// A click on a conversation's title, to edit it.
-        StartRename(ConversationId),
+        /// A click on a conversation's title, or Rename in its sidebar menu, to edit it.
+        StartRename(ConversationId, TitleAt),
         RenameText(String),
         /// Enter, or a click elsewhere, keeps the edited title.
         CommitRename,
@@ -860,14 +875,11 @@ mod app {
 
         /// The title being edited, in place of the conversation's name.
         fn rename_input(&self, width: Length) -> Element<'_, Message> {
-            let text = self
-                .renaming
-                .as_ref()
-                .map_or("", |(_, title)| title.as_str());
+            let text = self.renaming.as_ref().map_or("", |r| r.text.as_str());
             Intercept {
                 on_escape: Some(Message::CancelRename),
                 ..Intercept::new(
-                    widget::inline_input("Conversation title", text)
+                    widget::text_input("Conversation title", text)
                         .id(rename_id())
                         .on_input(Message::RenameText)
                         .on_submit(|_| Message::CommitRename)
@@ -891,13 +903,13 @@ mod app {
             )
             .class(title_style())
             .padding([2, 6])
-            .on_press(Message::StartRename(id.clone()))
+            .on_press(Message::StartRename(id.clone(), TitleAt::Header))
         }
 
-        fn renaming(&self, id: &str) -> bool {
+        fn renaming(&self, id: &str, at: TitleAt) -> bool {
             self.renaming
                 .as_ref()
-                .is_some_and(|(renaming, _)| renaming == id)
+                .is_some_and(|r| r.conversation == id && r.at == at)
         }
 
         /// Copies the selected transcript text, gathered from the blocks on screen.
@@ -1138,6 +1150,11 @@ mod app {
                 .conversations
                 .iter()
                 .map(|c| {
+                    if self.renaming(&c.id, TitleAt::Sidebar) {
+                        return widget::container(self.rename_input(Length::Fill))
+                            .padding([2, 4])
+                            .into();
+                    }
                     let mut row = vec![
                         widget::text(c.title.as_str())
                             .size(size)
@@ -1160,10 +1177,13 @@ mod app {
                     .on_press(Message::Open(c.id.clone()))
                     .padding([6, 10])
                     .width(Length::Fill);
-                    let menu = vec![menu_item(
-                        "Open in new tile",
-                        Message::OpenTile(c.id.clone()),
-                    )];
+                    let menu = vec![
+                        menu_item("Open in new tile", Message::OpenTile(c.id.clone())),
+                        menu_item(
+                            "Rename",
+                            Message::StartRename(c.id.clone(), TitleAt::Sidebar),
+                        ),
+                    ];
                     widget::context_menu(item, Some(menu))
                         .on_surface_action(Message::Surface)
                         .into()
@@ -1411,7 +1431,7 @@ mod app {
         fn tile_header<'a>(&'a self, id: &'a ConversationId, width: f32) -> Element<'a, Message> {
             let info = self.info(id);
             let mut row =
-                if self.renaming(id) {
+                if self.renaming(id, TitleAt::Header) {
                     vec![self.rename_input(Length::Fill)]
                 } else {
                     // The title stays as wide as its text, so the rest of the header can be
@@ -2556,22 +2576,29 @@ mod app {
                     return self.collect_selection(true);
                 }
                 Message::Copy => return self.collect_selection(false),
-                Message::StartRename(id) => {
-                    let title = self.info(&id).map(|c| c.title.clone()).unwrap_or_default();
-                    self.renaming = Some((id, title));
+                Message::StartRename(conversation, at) => {
+                    let text = self
+                        .info(&conversation)
+                        .map(|c| c.title.clone())
+                        .unwrap_or_default();
+                    self.renaming = Some(Renaming {
+                        conversation,
+                        text,
+                        at,
+                    });
                     return Task::batch([
                         widget::text_input::focus(rename_id()),
                         widget::text_input::select_all(rename_id()),
                     ]);
                 }
                 Message::RenameText(text) => {
-                    if let Some((_, title)) = &mut self.renaming {
-                        *title = text;
+                    if let Some(renaming) = &mut self.renaming {
+                        renaming.text = text;
                     }
                 }
                 Message::CommitRename => {
-                    if let Some((id, title)) = self.renaming.take() {
-                        self.rename(id, title.trim().to_string());
+                    if let Some(renaming) = self.renaming.take() {
+                        self.rename(renaming.conversation, renaming.text.trim().to_string());
                     }
                 }
                 Message::CancelRename => self.renaming = None,
@@ -2789,7 +2816,7 @@ mod app {
             let title: Option<Element<Message>> = match self.page {
                 Page::Settings => Some(widget::text::heading("Settings").into()),
                 Page::Chat if self.layout.tiles.len() == 1 => self.focused().map(|id| {
-                    if self.renaming(id) {
+                    if self.renaming(id, TitleAt::Header) {
                         self.rename_input(Length::Fixed(360.0))
                     } else {
                         let title = self

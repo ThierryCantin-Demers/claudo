@@ -71,7 +71,7 @@ The COSMIC frontend cannot attach a project folder yet.
 | Move a tile | Drag its title or Ctrl+drag anywhere in it, right-click its title for Move left/right, or Alt+Shift+Left/Right |
 | Focus the previous or next tile | Alt+Left/Right |
 | Close a tile | Its ✕, or Ctrl+W |
-| Rename a conversation | Click its title; Enter keeps it, Escape cancels |
+| Rename a conversation | Click its title, or right-click it in the sidebar → Rename; Enter keeps it, Escape cancels |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
 shows pulsing dots beside each agent still working, and an Approve badge beside one waiting

@@ -108,6 +108,15 @@ impl Harness {
             .expect("a written snapshot");
     }
 
+    /// Focuses a widget, as the tasks `update` returns would.
+    fn focus(&mut self, id: widget::Id) {
+        use cosmic::iced::advanced::widget::operation::{black_box, focusable};
+        self.frame(|ui, renderer| {
+            let mut focus = focusable::focus::<()>(id);
+            ui.operate(renderer, &mut black_box(&mut focus));
+        });
+    }
+
     /// What Ctrl+C would copy.
     fn selected(&mut self) -> String {
         use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
@@ -359,7 +368,11 @@ fn clicking_a_title_renames_the_conversation() {
     h.send(vec![button(true), button(false)]);
     assert_eq!(
         h.app.renaming,
-        Some((ALPHA.to_string(), "Alpha".to_string()))
+        Some(Renaming {
+            conversation: ALPHA.to_string(),
+            text: "Alpha".to_string(),
+            at: TitleAt::Header,
+        })
     );
 
     let _ = h
@@ -388,5 +401,29 @@ fn rename_snapshot() {
     let _ = h
         .app
         .update(Message::RenameText("Research agent".to_string()));
+    h.focus(rename_id());
     h.snapshot("rename");
+}
+
+#[test]
+fn rename_from_the_sidebar_edits_the_row() {
+    let mut h = Harness::new(two_tiles());
+    let _ = h
+        .app
+        .update(Message::StartRename(BRAVO.to_string(), TitleAt::Sidebar));
+    h.focus(rename_id());
+    h.snapshot("rename-sidebar");
+    assert!(h.app.renaming(BRAVO, TitleAt::Sidebar));
+    assert!(
+        !h.app.renaming(BRAVO, TitleAt::Header),
+        "the open tile keeps its title"
+    );
+
+    let _ = h.app.update(Message::RenameText("Reviewer".to_string()));
+    h.send(vec![button(true)]);
+    let _ = h.app.update(Message::CommitRename);
+    assert_eq!(
+        h.app.info(BRAVO).map(|c| c.title.as_str()),
+        Some("Reviewer")
+    );
 }
