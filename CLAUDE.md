@@ -169,8 +169,11 @@ check the reveal animation before suspecting the backend.
 **Hot reload depends on `vendor/iced_core`.** libcosmic's iced keeps named widget states
 in a thread-local, and a hot patch gets its own copy of every thread-local, so patched widgets
 would not see the states the unpatched event loop stored. The vendored `iced_core` moves them
-to a plain static behind its `hot` feature, which only `claudo-cosmic/hot` enables. When the
-libcosmic rev changes, refresh the copy from that rev's `iced/core` and reapply the change in
+to a plain static behind its `hot` feature, which only `claudo-cosmic/hot` enables. Its
+`Tree::diff_children_custom` also moves a child's state with it when siblings with custom ids
+reorder (upstream leaves it at the old index); tiles rely on that to keep their scroll
+positions, and the copy is patched in for every build, not only hot ones. When the libcosmic
+rev changes, refresh the copy from that rev's `iced/core` and reapply both changes in
 `src/widget/tree.rs`. `cargo hot` only reacts to in-place writes, so `sed -i`, which replaces
 the file, does not trigger a patch. New COSMIC subscriptions go through `named(...)`, not
 `Subscription::run`: iced identifies a `run` subscription by its function's address, which

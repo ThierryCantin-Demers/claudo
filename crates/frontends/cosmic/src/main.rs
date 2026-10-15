@@ -375,6 +375,8 @@ mod app {
         focused: bool,
         /// Narrower than `COMPACT_TILE`.
         compact: bool,
+        /// Being dragged; it shows where it would land.
+        lifted: bool,
     }
 
     /// Where an opened or created conversation goes.
@@ -1163,17 +1165,16 @@ mod app {
                 }
             };
 
-            // A lifted tile leaves the row, and an empty slot shows where it would land.
-            let mut order: Vec<Option<usize>> = (0..count)
+            // A lifted tile sits where it would land, so the row previews the drop.
+            let mut order: Vec<usize> = (0..count)
                 .filter(|i| lifted.is_none_or(|(from, ..)| *i != from))
-                .map(Some)
                 .collect();
-            if let Some((_, _, slot)) = lifted {
-                order.insert(slot.min(order.len()), None);
+            if let Some((from, _, slot)) = lifted {
+                order.insert(slot.min(order.len()), from);
             }
 
             let mut row: Vec<Element<Message>> = Vec::new();
-            for (k, item) in order.iter().enumerate() {
+            for (k, &i) in order.iter().enumerate() {
                 if k > 0 {
                     row.push(if overflow || lifted.is_some() {
                         divider()
@@ -1184,25 +1185,18 @@ mod app {
                             .into()
                     });
                 }
-                match *item {
-                    Some(i) => {
-                        let tile = &self.layout.tiles[i];
-                        let Some(view) = self.views.get(&tile.conversation) else {
-                            continue;
-                        };
-                        let pixels = room.map_or(self.tile_min(), |room| tile.share / total * room);
-                        let tile_view = TileView {
-                            several,
-                            focused: several && i == self.layout.focused,
-                            compact: pixels < COMPACT_TILE,
-                        };
-                        row.push(self.tile(&tile.conversation, view, tile_view, width(tile.share)));
-                    }
-                    None => {
-                        let share = lifted.map_or(1.0, |(from, ..)| self.layout.tiles[from].share);
-                        row.push(drop_slot(width(share)));
-                    }
-                }
+                let tile = &self.layout.tiles[i];
+                let Some(view) = self.views.get(&tile.conversation) else {
+                    continue;
+                };
+                let pixels = room.map_or(self.tile_min(), |room| tile.share / total * room);
+                let tile_view = TileView {
+                    several,
+                    focused: several && i == self.layout.focused,
+                    compact: pixels < COMPACT_TILE,
+                    lifted: lifted.is_some_and(|(from, ..)| from == i),
+                };
+                row.push(self.tile(&tile.conversation, view, tile_view, width(tile.share)));
             }
             let row = widget::Row::with_children(row).height(Length::Fill);
             let row: Element<Message> = if overflow {
@@ -1319,13 +1313,13 @@ mod app {
             } else {
                 body
             };
-            let framed = widget::container(content)
+            // The id is on the row's direct child, so the tile's scroll and editor state
+            // move with it when tiles reorder.
+            widget::container(widget::mouse_area(content).on_press(Message::Focus(id.clone())))
                 .id(widget::Id::new(format!("tile-{id}")))
                 .width(width)
                 .height(Length::Fill)
-                .class(tile_style(tile.focused));
-            widget::mouse_area(framed)
-                .on_press(Message::Focus(id.clone()))
+                .class(tile_style(tile.focused, tile.lifted))
                 .into()
         }
 
@@ -1643,36 +1637,20 @@ mod app {
             .into()
     }
 
-    /// Where a dragged tile would land, as wide as the tile.
-    fn drop_slot<'a>(width: Length) -> Element<'a, Message> {
-        widget::container(widget::space::horizontal())
-            .width(width)
-            .height(Length::Fill)
-            .padding(6)
-            .class(cosmic::theme::Container::custom(|theme| {
-                let cosmic = theme.cosmic();
-                let accent: Color = cosmic.accent_color().into();
-                container::Style {
-                    background: Some(Color { a: 0.08, ..accent }.into()),
-                    border: Border {
-                        radius: cosmic.corner_radii.radius_m.into(),
-                        width: 2.0,
-                        color: Color { a: 0.6, ..accent },
-                    },
-                    ..container::Style::default()
-                }
-            }))
-            .into()
-    }
-
-    fn tile_style(focused: bool) -> cosmic::theme::Container<'static> {
+    fn tile_style(focused: bool, lifted: bool) -> cosmic::theme::Container<'static> {
         cosmic::theme::Container::custom(move |theme| {
             let cosmic = theme.cosmic();
+            let accent: Color = cosmic.accent_color().into();
             container::Style {
+                background: lifted.then(|| Color { a: 0.08, ..accent }.into()),
                 border: Border {
                     radius: cosmic.corner_radii.radius_s.into(),
-                    width: if focused { 1.0 } else { 0.0 },
-                    color: cosmic.accent_color().into(),
+                    width: match (lifted, focused) {
+                        (true, _) => 2.0,
+                        (false, true) => 1.0,
+                        (false, false) => 0.0,
+                    },
+                    color: accent,
                 },
                 ..container::Style::default()
             }

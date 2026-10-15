@@ -3,7 +3,7 @@ use crate::Widget;
 use crate::id::{Id, Internal};
 use std::any::{self, Any};
 use std::borrow::{Borrow, BorrowMut, Cow};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::{fmt, mem};
 
@@ -302,6 +302,10 @@ impl Tree {
 
     /// Reconciles the children of the tree with the provided list of widgets using custom
     /// logic both for diffing and creating new widget state.
+    ///
+    /// A child with a custom id keeps its state wherever it moves among its siblings; the
+    /// rest are matched by position. Upstream finds the moved state but leaves it at its
+    /// old index, so it ends up paired with whichever widget now sits there.
     pub fn diff_children_custom<T>(
         &mut self,
         new_children: &mut [T],
@@ -309,75 +313,40 @@ impl Tree {
         diff: impl Fn(&mut Tree, &mut T),
         new_state: impl Fn(&T) -> Self,
     ) {
-        if self.children.len() > new_children.len() {
-            self.children.truncate(new_children.len());
-        }
+        let custom = |id: &Option<Id>| match id {
+            Some(Id(Internal::Custom(_, name))) => Some(name.clone()),
+            _ => None,
+        };
+        let mut old: Vec<Option<Tree>> = mem::take(&mut self.children)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut named: HashMap<Cow<'static, str>, usize> = old
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| Some((custom(&c.as_ref()?.id)?, i)))
+            .collect();
 
-        let children_len = self.children.len();
-        let (mut id_map, mut id_list): (
-            HashMap<String, &mut Tree>,
-            VecDeque<(usize, &mut Tree)>,
-        ) = self.children.iter_mut().enumerate().fold(
-            (HashMap::new(), VecDeque::with_capacity(children_len)),
-            |(mut id_map, mut id_list), (i, c)| {
-                if let Some(id) = c.id.as_ref() {
-                    if let Internal::Custom(_, ref name) = id.0 {
-                        let _ = id_map.insert(name.to_string(), c);
-                    } else {
-                        id_list.push_back((i, c));
-                    }
-                } else {
-                    id_list.push_back((i, c));
-                }
-                (id_map, id_list)
-            },
-        );
-
-        let mut new_trees: Vec<(Tree, usize)> =
-            Vec::with_capacity(new_children.len());
-        for (i, (new, new_id)) in
-            new_children.iter_mut().zip(new_ids.iter()).enumerate()
-        {
-            let child_state = if let Some(c) = new_id.as_ref().and_then(|id| {
-                if let Internal::Custom(_, ref name) = id.0 {
-                    id_map.remove(name.as_ref())
-                } else {
-                    None
-                }
-            }) {
-                c
-            } else if let Some(i) = {
-                let mut found = None;
-                for c_i in 0..id_list.len() {
-                    if id_list[c_i].0 == i {
-                        found = Some(c_i);
-                        break;
-                    }
-                    if i < c_i {
-                        break;
-                    }
-                }
-                found
-            } {
-                let c = id_list.remove(i).unwrap().1;
-                c
-            } else {
-                let mut my_new_state = new_state(new);
-                diff(&mut my_new_state, new);
-                new_trees.push((my_new_state, i));
-                continue;
-            };
-
-            diff(child_state, new);
-        }
-
-        for (new_tree, i) in new_trees {
-            if self.children.len() > i {
-                self.children[i] = new_tree;
-            } else {
-                self.children.push(new_tree);
-            }
-        }
+        self.children = new_children
+            .iter_mut()
+            .zip(new_ids)
+            .enumerate()
+            .map(|(i, (new, id))| {
+                let moved = custom(&id)
+                    .and_then(|name| named.remove(&name))
+                    .and_then(|j| old[j].take());
+                let in_place = || {
+                    old.get_mut(i)
+                        .filter(|c| c.as_ref().is_some_and(|c| custom(&c.id).is_none()))
+                        .and_then(Option::take)
+                };
+                let mut tree = moved
+                    .or_else(in_place)
+                    .unwrap_or_else(|| new_state(new));
+                diff(&mut tree, new);
+                tree
+            })
+            .collect();
     }
 }
 
