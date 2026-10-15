@@ -49,6 +49,8 @@ pub struct ConversationMeta {
     /// The user chose the title, so a generated one never replaces it.
     #[serde(default)]
     pub renamed: bool,
+    #[serde(default)]
+    pub archived: bool,
     pub session_id: Option<String>,
     #[serde(default)]
     pub overrides: Overrides,
@@ -131,6 +133,7 @@ impl Store {
             cwd,
             attached,
             renamed: false,
+            archived: false,
             session_id: None,
             overrides: Overrides::default(),
             context: ContextUsage::default(),
@@ -170,6 +173,15 @@ impl Store {
         let removed = self.conversations.remove(index);
         self.save();
         Some(removed)
+    }
+
+    pub fn set_archived(&mut self, id: &str, archived: bool) {
+        if let Some(c) = self.get_mut(id)
+            && c.archived != archived
+        {
+            c.archived = archived;
+            self.save();
+        }
     }
 
     pub fn rename(&mut self, id: &str, title: String) {

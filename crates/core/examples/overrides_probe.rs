@@ -38,11 +38,19 @@ fn main() {
     });
     print_titles(&mut rx, "after renaming, then a blank rename");
 
+    backend.handle(Command::Archive {
+        id: id.clone(),
+        archived: true,
+    });
+    print_archived(&mut rx, "after archiving");
+
     // Fresh backend loads it from disk.
     let (tx2, mut rx2) = unbounded_channel::<ServerEvent>();
     let backend2 = Backend::new(tx2);
     backend2.handle(Command::ListConversations);
     print_titles(&mut rx2, "reloaded");
+    backend2.handle(Command::ListConversations);
+    print_archived(&mut rx2, "reloaded");
     backend2.handle(Command::ListConversations);
     print_overrides(&mut rx2, "reloaded");
 
@@ -80,6 +88,16 @@ fn print_titles(rx: &mut UnboundedReceiver<ServerEvent>, label: &str) {
         if let ServerEvent::Conversations { list } = ev {
             for c in list {
                 println!("{label}: title={:?}", c.title);
+            }
+        }
+    }
+}
+
+fn print_archived(rx: &mut UnboundedReceiver<ServerEvent>, label: &str) {
+    while let Ok(ev) = rx.try_recv() {
+        if let ServerEvent::Conversations { list } = ev {
+            for c in list {
+                println!("{label}: archived={}", c.archived);
             }
         }
     }

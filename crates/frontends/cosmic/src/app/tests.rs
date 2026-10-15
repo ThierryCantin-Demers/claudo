@@ -260,6 +260,7 @@ fn two_tiles() -> ClaudoApp {
             title: title.to_string(),
             cwd: "/tmp".to_string(),
             attached: false,
+            archived: false,
             overrides: Overrides::default(),
             context: Default::default(),
         });
@@ -516,4 +517,28 @@ fn deleting_asks_first_then_drops_the_conversation_everywhere() {
     let _ = h.app.update(Message::ConfirmDelete);
     assert!(h.app.conversations.is_empty());
     assert!(!h.app.views.contains_key(ALPHA));
+}
+
+#[test]
+fn archiving_puts_a_conversation_away_without_deleting_it() {
+    let mut h = Harness::new(two_tiles());
+    let _ = h.app.update(Message::Archive(BRAVO.to_string(), true));
+    assert!(
+        h.app.info(BRAVO).is_some_and(|c| c.archived),
+        "kept, marked"
+    );
+    assert_eq!(h.app.layout.tiles.len(), 1, "its tile closed");
+
+    let _ = h.app.update(Message::ToggleArchived);
+    h.snapshot("archived");
+
+    // With nothing else left unarchived, the last tile asks for a new conversation.
+    let _ = h.app.update(Message::Archive(ALPHA.to_string(), true));
+    assert!(
+        !h.app.pending.is_empty(),
+        "a new conversation was requested"
+    );
+
+    let _ = h.app.update(Message::Archive(BRAVO.to_string(), false));
+    assert!(h.app.info(BRAVO).is_some_and(|c| !c.archived));
 }

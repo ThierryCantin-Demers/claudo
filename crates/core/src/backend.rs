@@ -109,6 +109,11 @@ impl Backend {
                 });
             }
 
+            Command::Archive { id, archived } => {
+                self.store.lock().unwrap().set_archived(&id, archived);
+                self.emit(conversations_event(&self.store));
+            }
+
             Command::Rename { id, title } => {
                 let title = title.trim().to_string();
                 if !title.is_empty() {
@@ -215,6 +220,8 @@ impl Backend {
     ) {
         let (cwd, session_id, name) = {
             let mut store = self.store.lock().unwrap();
+            // A message to an archived conversation means it is in use again.
+            store.set_archived(&conversation_id, false);
             let Some(name) = store.title_for(&conversation_id, &text) else {
                 drop(store);
                 self.error(conversation_id, "unknown conversation".to_string());
@@ -377,6 +384,7 @@ fn conversations_event(store: &Mutex<Store>) -> ServerEvent {
             title: m.title,
             cwd: m.cwd.display().to_string(),
             attached: m.attached,
+            archived: m.archived,
             overrides: m.overrides,
             context: m.context,
         })

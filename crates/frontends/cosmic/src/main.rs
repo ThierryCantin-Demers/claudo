@@ -437,6 +437,8 @@ mod app {
         renaming: Option<Renaming>,
         /// The conversation the delete confirmation is asking about.
         deleting: Option<ConversationId>,
+        /// The sidebar lists archived conversations too.
+        show_archived: bool,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
         /// The tiles to reopen, with the focused one, once the conversation list arrives.
@@ -462,6 +464,7 @@ mod app {
         focused: usize,
         zoom: f32,
         pub window: Option<(f32, f32)>,
+        show_archived: bool,
         /// Unsent text, per conversation.
         drafts: HashMap<ConversationId, String>,
     }
@@ -476,6 +479,7 @@ mod app {
                 focused: 0,
                 zoom: 1.0,
                 window: None,
+                show_archived: false,
                 drafts: HashMap::new(),
             }
         }
@@ -534,6 +538,10 @@ mod app {
         CommitRename,
         /// Escape leaves the title as it was.
         CancelRename,
+        /// Put a conversation away, or bring it back.
+        Archive(ConversationId, bool),
+        /// Show or hide the archived conversations in the sidebar.
+        ToggleArchived,
         /// Delete in a conversation's sidebar menu; asks first.
         AskDelete(ConversationId),
         ConfirmDelete,
@@ -859,7 +867,8 @@ mod app {
                 }
             }
             if self.layout.tiles.is_empty() {
-                match self.conversations.first().map(|c| c.id.clone()) {
+                let first = self.conversations.iter().find(|c| !c.archived);
+                match first.map(|c| c.id.clone()) {
                     Some(id) => self.open(id, Placement::Right),
                     None => self.new_conversation(Placement::Right),
                 }
@@ -868,20 +877,31 @@ mod app {
             self.focus_composer = self.focused().cloned();
         }
 
-        /// Drops a deleted conversation everywhere it shows; a window keeps at least one tile,
-        /// so the last one takes another conversation, or a new one.
+        /// Takes a conversation out of the window. A window keeps at least one tile, so the
+        /// last one takes another conversation, or a new one.
+        fn untile(&mut self, id: &str) {
+            if self.tile_of(id).is_none() {
+                return;
+            }
+            if self.layout.tiles.len() > 1 {
+                self.close(id);
+                return;
+            }
+            let next = self
+                .conversations
+                .iter()
+                .find(|c| c.id != id && !c.archived)
+                .map(|c| c.id.clone());
+            match next {
+                Some(next) => self.open(next, Placement::Focused),
+                None => self.new_conversation(Placement::Focused),
+            }
+        }
+
+        /// Drops a deleted conversation everywhere it shows.
         fn forget(&mut self, id: &str) {
             self.conversations.retain(|c| c.id != id);
-            if self.tile_of(id).is_some() {
-                if self.layout.tiles.len() > 1 {
-                    self.close(id);
-                } else {
-                    match self.conversations.first().map(|c| c.id.clone()) {
-                        Some(next) => self.open(next, Placement::Focused),
-                        None => self.new_conversation(Placement::Focused),
-                    }
-                }
-            }
+            self.untile(id);
             self.views.remove(id);
             self.drafts.remove(id);
             if self
@@ -1023,6 +1043,7 @@ mod app {
                 focused: self.layout.focused,
                 zoom: self.zoom,
                 window: self.layout.size,
+                show_archived: self.show_archived,
                 drafts,
             }
             .save();
@@ -1206,52 +1227,26 @@ mod app {
         }
 
         fn sidebar(&self) -> Element<'_, Message> {
-            let size = 14.0 * self.zoom;
-            let radius = cosmic::theme::active().cosmic().corner_radii.radius_s;
-            let recents: Vec<Element<Message>> = self
-                .conversations
-                .iter()
-                .map(|c| {
-                    if self.renaming(&c.id, TitleAt::Sidebar) {
-                        return widget::container(self.rename_input(Length::Fill))
-                            .padding([2, 4])
-                            .into();
-                    }
-                    let mut row = vec![
-                        widget::text(c.title.as_str())
-                            .size(size)
-                            .wrapping(text::Wrapping::None)
-                            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
-                            .width(Length::Fill)
-                            .into(),
-                    ];
-                    if let Some(badge) = self.views.get(&c.id).and_then(|v| self.badge(v, size)) {
-                        row.push(badge);
-                    }
-                    let shown = self.page == Page::Chat && self.tile_of(&c.id).is_some();
-                    let item = widget::button::custom(
-                        widget::Row::with_children(row)
-                            .spacing(8)
-                            .align_y(Alignment::Center),
-                    )
-                    .class(conversation_style(radius, shown))
-                    .selected(shown)
-                    .on_press(Message::Open(c.id.clone()))
-                    .padding([6, 10])
-                    .width(Length::Fill);
-                    let menu = vec![
-                        menu_item("Open in new tile", Message::OpenTile(c.id.clone())),
-                        menu_item(
-                            "Rename",
-                            Message::StartRename(c.id.clone(), TitleAt::Sidebar),
-                        ),
-                        menu_item("Delete…", Message::AskDelete(c.id.clone())),
-                    ];
-                    widget::context_menu(item, Some(menu))
-                        .on_surface_action(Message::Surface)
-                        .into()
-                })
-                .collect();
+            let (archived, active): (Vec<&ConversationInfo>, Vec<&ConversationInfo>) =
+                self.conversations.iter().partition(|c| c.archived);
+            let mut list: Vec<Element<Message>> =
+                active.iter().map(|c| self.conversation_row(c)).collect();
+            if !archived.is_empty() {
+                let chevron = if self.show_archived {
+                    "go-down-symbolic"
+                } else {
+                    "go-next-symbolic"
+                };
+                list.push(
+                    widget::button::text(format!("Archived ({})", archived.len()))
+                        .leading_icon(widget::icon::from_name(chevron))
+                        .on_press(Message::ToggleArchived)
+                        .into(),
+                );
+                if self.show_archived {
+                    list.extend(archived.iter().map(|c| self.conversation_row(c)));
+                }
+            }
 
             widget::container(
                 widget::Column::with_children(vec![
@@ -1271,7 +1266,7 @@ mod app {
                         .size(12.0 * self.zoom)
                         .class(dim())
                         .into(),
-                    widget::scrollable(widget::Column::with_children(recents).spacing(2))
+                    widget::scrollable(widget::Column::with_children(list).spacing(2))
                         .height(Length::Fill)
                         .into(),
                     widget::button::text("Settings")
@@ -1286,6 +1281,54 @@ mod app {
             .height(Length::Fill)
             .padding(8)
             .into()
+        }
+
+        /// A conversation in the sidebar, with its right-click menu.
+        fn conversation_row<'a>(&'a self, c: &'a ConversationInfo) -> Element<'a, Message> {
+            if self.renaming(&c.id, TitleAt::Sidebar) {
+                return widget::container(self.rename_input(Length::Fill))
+                    .padding([2, 4])
+                    .into();
+            }
+            let size = 14.0 * self.zoom;
+            let radius = cosmic::theme::active().cosmic().corner_radii.radius_s;
+            let mut title = widget::text(c.title.as_str())
+                .size(size)
+                .wrapping(text::Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                .width(Length::Fill);
+            if c.archived {
+                title = title.class(dim());
+            }
+            let mut row = vec![title.into()];
+            if let Some(badge) = self.views.get(&c.id).and_then(|v| self.badge(v, size)) {
+                row.push(badge);
+            }
+            let shown = self.page == Page::Chat && self.tile_of(&c.id).is_some();
+            let item = widget::button::custom(
+                widget::Row::with_children(row)
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .class(conversation_style(radius, shown))
+            .selected(shown)
+            .on_press(Message::Open(c.id.clone()))
+            .padding([6, 10])
+            .width(Length::Fill);
+            let id = || c.id.clone();
+            let menu = vec![
+                menu_item("Open in new tile", Message::OpenTile(id())),
+                menu_item("Rename", Message::StartRename(id(), TitleAt::Sidebar)),
+                if c.archived {
+                    menu_item("Unarchive", Message::Archive(id(), false))
+                } else {
+                    menu_item("Archive", Message::Archive(id(), true))
+                },
+                menu_item("Delete…", Message::AskDelete(id())),
+            ];
+            widget::context_menu(item, Some(menu))
+                .on_surface_action(Message::Surface)
+                .into()
         }
 
         /// Marks a conversation an agent is working in, so it shows wherever its tile is.
@@ -2521,6 +2564,7 @@ mod app {
                 selection: None,
                 renaming: None,
                 deleting: None,
+                show_archived: ui.show_archived,
                 drafts: ui.drafts,
                 restore: Some((ui.tiles, ui.focused)),
                 focus_composer: None,
@@ -2683,6 +2727,19 @@ mod app {
                 }
                 Message::CancelRename => self.renaming = None,
                 Message::AskDelete(id) => self.deleting = Some(id),
+                Message::Archive(id, archived) => {
+                    if let Some(info) = self.conversations.iter_mut().find(|c| c.id == id) {
+                        info.archived = archived;
+                    }
+                    if archived {
+                        self.untile(&id);
+                    }
+                    self.cmd(Command::Archive { id, archived });
+                }
+                Message::ToggleArchived => {
+                    self.show_archived = !self.show_archived;
+                    self.persist();
+                }
                 Message::CancelDelete => self.deleting = None,
                 Message::ConfirmDelete => {
                     if let Some(id) = self.deleting.take() {
