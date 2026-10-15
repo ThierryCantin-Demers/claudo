@@ -168,8 +168,12 @@ mod ws {
                         }
                     }
                     WsEvent::Message(_) => {}
-                    WsEvent::Error(detail) => out.push(ServerEvent::Error { detail }),
+                    WsEvent::Error(detail) => out.push(ServerEvent::Error {
+                        conversation_id: None,
+                        detail,
+                    }),
                     WsEvent::Closed => out.push(ServerEvent::Error {
+                        conversation_id: None,
                         detail: "connection to daemon closed".to_string(),
                     }),
                 }

@@ -14,7 +14,7 @@ fn main() {
     let (tx, mut rx) = unbounded_channel::<ServerEvent>();
     let backend = Backend::new(tx);
 
-    backend.handle(Command::NewScratch);
+    backend.handle(Command::NewScratch { request: 0 });
     let id = new_id(&mut rx).expect("a new conversation id");
 
     backend.handle(Command::SetOverrides {
@@ -40,11 +40,11 @@ fn main() {
 fn new_id(rx: &mut UnboundedReceiver<ServerEvent>) -> Option<String> {
     let mut id = None;
     while let Ok(ev) = rx.try_recv() {
-        if let ServerEvent::Conversations {
-            current: Some(c), ..
+        if let ServerEvent::Created {
+            conversation_id, ..
         } = ev
         {
-            id = Some(c);
+            id = Some(conversation_id);
         }
     }
     id

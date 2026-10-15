@@ -48,33 +48,25 @@ impl Backend {
             }
 
             Command::ListConversations => {
-                let event = conversations_event(&self.store, None);
+                let event = conversations_event(&self.store);
                 self.emit(event);
             }
 
-            Command::NewScratch => {
+            Command::NewScratch { request } => {
                 let id = self.store.lock().unwrap().create_scratch();
-                self.emit(conversations_event(&self.store, Some(id.clone())));
-                self.emit(ServerEvent::History {
-                    conversation_id: id,
-                    items: Vec::new(),
-                });
+                self.created(id, request);
             }
 
-            Command::NewAttached { path } => {
+            Command::NewAttached { path, request } => {
                 let id = self.store.lock().unwrap().create_attached(path.into());
-                self.emit(conversations_event(&self.store, Some(id.clone())));
-                self.emit(ServerEvent::History {
-                    conversation_id: id,
-                    items: Vec::new(),
-                });
+                self.created(id, request);
             }
 
             Command::OpenConversation { id } => self.open(id),
 
             Command::SetOverrides { id, overrides } => {
                 self.store.lock().unwrap().set_overrides(&id, overrides);
-                self.emit(conversations_event(&self.store, None));
+                self.emit(conversations_event(&self.store));
             }
 
             Command::SendMessage {
@@ -87,7 +79,7 @@ impl Backend {
 
             Command::Stop { conversation_id } => {
                 if let Err(detail) = self.live.interrupt(&conversation_id) {
-                    self.emit(ServerEvent::Error { detail });
+                    self.error(conversation_id, detail);
                 }
             }
 
@@ -97,10 +89,29 @@ impl Backend {
                 allow,
             } => {
                 if let Err(detail) = self.live.answer(&conversation_id, &request_id, allow) {
-                    self.emit(ServerEvent::Error { detail });
+                    self.error(conversation_id, detail);
                 }
             }
         }
+    }
+
+    fn created(&self, id: String, request: u64) {
+        self.emit(conversations_event(&self.store));
+        self.emit(ServerEvent::History {
+            conversation_id: id.clone(),
+            items: Vec::new(),
+        });
+        self.emit(ServerEvent::Created {
+            conversation_id: id,
+            request,
+        });
+    }
+
+    fn error(&self, conversation_id: String, detail: String) {
+        self.emit(ServerEvent::Error {
+            conversation_id: Some(conversation_id),
+            detail,
+        });
     }
 
     fn open(&self, id: String) {
@@ -134,7 +145,7 @@ impl Backend {
             items,
         });
         // Title may have been upgraded from the transcript's ai-title.
-        self.emit(conversations_event(&self.store, None));
+        self.emit(conversations_event(&self.store));
     }
 
     fn send(
@@ -150,9 +161,7 @@ impl Backend {
             match store.get(&conversation_id) {
                 Some(meta) => (meta.cwd.clone(), meta.session_id.clone()),
                 None => {
-                    self.emit(ServerEvent::Error {
-                        detail: "unknown conversation".to_string(),
-                    });
+                    self.error(conversation_id, "unknown conversation".to_string());
                     return;
                 }
             }
@@ -170,7 +179,7 @@ impl Backend {
         {
             Ok(turn) => turn,
             Err(detail) => {
-                self.emit(ServerEvent::Error { detail });
+                self.error(conversation_id, detail);
                 return;
             }
         };
@@ -193,7 +202,7 @@ impl Backend {
                             conversation_id: conversation_id.clone(),
                             session_id,
                         });
-                        let _ = events.send(conversations_event(&store, None));
+                        let _ = events.send(conversations_event(&store));
                     }
                     EngineEvent::Delta { text } => {
                         let _ = events.send(ServerEvent::Delta {
@@ -253,10 +262,13 @@ impl Backend {
                             is_error,
                             context,
                         });
-                        let _ = events.send(conversations_event(&store, None));
+                        let _ = events.send(conversations_event(&store));
                     }
                     EngineEvent::Error { detail } => {
-                        let _ = events.send(ServerEvent::Error { detail });
+                        let _ = events.send(ServerEvent::Error {
+                            conversation_id: Some(conversation_id.clone()),
+                            detail,
+                        });
                     }
                 }
             }
@@ -264,7 +276,7 @@ impl Backend {
     }
 }
 
-fn conversations_event(store: &Mutex<Store>, current: Option<String>) -> ServerEvent {
+fn conversations_event(store: &Mutex<Store>) -> ServerEvent {
     let list = store
         .lock()
         .unwrap()
@@ -278,5 +290,5 @@ fn conversations_event(store: &Mutex<Store>, current: Option<String>) -> ServerE
             context: m.context,
         })
         .collect();
-    ServerEvent::Conversations { list, current }
+    ServerEvent::Conversations { list }
 }

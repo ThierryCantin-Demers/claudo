@@ -18,13 +18,13 @@ fn main() {
 
     let (tx, mut rx) = unbounded_channel();
     let backend = Backend::new(tx);
-    backend.handle(Command::NewScratch);
+    backend.handle(Command::NewScratch { request: 0 });
     let id = loop {
-        if let Some(ServerEvent::Conversations {
-            current: Some(id), ..
+        if let Some(ServerEvent::Created {
+            conversation_id, ..
         }) = rx.blocking_recv()
         {
-            break id;
+            break conversation_id;
         }
     };
 
@@ -131,7 +131,7 @@ fn turn(
                 }
             }
             ServerEvent::Completed { .. } => break,
-            ServerEvent::Error { detail } => {
+            ServerEvent::Error { detail, .. } => {
                 println!("  error: {detail}");
                 break;
             }

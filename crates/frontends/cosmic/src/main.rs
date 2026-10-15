@@ -148,6 +148,7 @@ mod app {
         drafts: HashMap<String, String>,
         /// The conversation to reopen once the list first arrives.
         restore: Option<String>,
+        creating: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +294,11 @@ mod app {
                 self.overrides.effort.unwrap_or(self.settings.effort),
                 self.overrides.profile.unwrap_or(self.settings.profile),
             )
+        }
+
+        fn new_scratch(&mut self) {
+            self.creating = true;
+            self.cmd(Command::NewScratch { request: 0 });
         }
 
         fn open(&mut self, id: String) {
@@ -458,27 +464,31 @@ mod app {
             match ev {
                 ServerEvent::Status(s) => self.status = Some(s),
                 ServerEvent::Settings(s) => self.settings = s,
-                ServerEvent::Conversations { list, current } => {
+                ServerEvent::Conversations { list } => {
                     self.conversations = list;
-                    if let Some(id) = current {
-                        self.stash_draft();
-                        self.draft = text_editor::Content::new();
-                        self.current = Some(id);
-                        self.sync_overrides();
-                        self.items.clear();
-                        self.assistant_idx = None;
-                        self.error = None;
-                        self.focus_composer = true;
-                    } else if self.current.is_none() {
+                    if self.current.is_none() && !self.creating {
                         let saved = self.restore.take();
                         let reopen = saved
                             .filter(|id| self.conversations.iter().any(|c| c.id == *id))
                             .or_else(|| self.conversations.first().map(|c| c.id.clone()));
                         match reopen {
                             Some(id) => self.open(id),
-                            None => self.cmd(Command::NewScratch),
+                            None => self.new_scratch(),
                         }
                     }
+                }
+                ServerEvent::Created {
+                    conversation_id, ..
+                } => {
+                    self.creating = false;
+                    self.stash_draft();
+                    self.draft = text_editor::Content::new();
+                    self.current = Some(conversation_id);
+                    self.sync_overrides();
+                    self.items.clear();
+                    self.assistant_idx = None;
+                    self.error = None;
+                    self.focus_composer = true;
                 }
                 ServerEvent::History {
                     conversation_id,
@@ -559,7 +569,13 @@ mod app {
                     }
                 }
                 ServerEvent::Quota(_) => {}
-                ServerEvent::Error { detail } => {
+                ServerEvent::Error {
+                    conversation_id,
+                    detail,
+                } => {
+                    if conversation_id.is_some() && conversation_id != self.current {
+                        return;
+                    }
                     self.error = Some(detail);
                     self.streaming = false;
                     self.approvals.clear();
@@ -1186,6 +1202,7 @@ mod app {
                 window: ui.window,
                 drafts: ui.drafts,
                 restore: ui.conversation,
+                creating: false,
             };
             (app, Task::none())
         }
@@ -1255,7 +1272,7 @@ mod app {
                 }
                 Message::New => {
                     self.page = Page::Chat;
-                    self.cmd(Command::NewScratch);
+                    self.new_scratch();
                 }
                 Message::SetPage(page) => {
                     self.page = page;

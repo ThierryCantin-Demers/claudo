@@ -22,7 +22,7 @@ async fn main() {
         .await
         .unwrap();
     write
-        .send(Message::Text(json(&Command::NewScratch).into()))
+        .send(Message::Text(json(&Command::NewScratch { request: 0 }).into()))
         .await
         .unwrap();
 
@@ -35,12 +35,17 @@ async fn main() {
         };
         match ev {
             ServerEvent::Status(s) => println!("Status: ready={}", s.ready()),
-            ServerEvent::Conversations { list, current } => {
-                println!("Conversations: {} item(s), current={current:?}", list.len());
-                if let (Some(id), false) = (current, sent) {
+            ServerEvent::Conversations { list } => {
+                println!("Conversations: {} item(s)", list.len())
+            }
+            ServerEvent::Created {
+                conversation_id, ..
+            } => {
+                println!("Created: {conversation_id}");
+                if !sent {
                     sent = true;
                     let cmd = Command::SendMessage {
-                        conversation_id: id,
+                        conversation_id,
                         text: "Reply with a short greeting.".to_string(),
                         profile: Profile::Safe,
                         model: String::new(),
@@ -57,7 +62,7 @@ async fn main() {
                 println!("completed (is_error={is_error})");
                 break;
             }
-            ServerEvent::Error { detail } => {
+            ServerEvent::Error { detail, .. } => {
                 println!("error: {detail}");
                 break;
             }

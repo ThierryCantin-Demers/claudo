@@ -263,9 +263,13 @@ pub enum Command {
         id: ConversationId,
         overrides: Overrides,
     },
-    NewScratch,
+    /// `request` is echoed in the `Created` that answers it, so the client knows where it goes.
+    NewScratch {
+        request: u64,
+    },
     NewAttached {
         path: String,
+        request: u64,
     },
     SendMessage {
         conversation_id: ConversationId,
@@ -292,11 +296,14 @@ pub enum Command {
 pub enum ServerEvent {
     Status(SystemStatus),
     Settings(Settings),
-    /// Full conversation list. `current` is set only when the backend just
-    /// created/selected one (e.g. after `NewScratch`).
+    /// Full conversation list.
     Conversations {
         list: Vec<ConversationInfo>,
-        current: Option<ConversationId>,
+    },
+    /// Answers `NewScratch` or `NewAttached`, after the list that includes it.
+    Created {
+        conversation_id: ConversationId,
+        request: u64,
     },
     /// Reconstructed history for a conversation the client opened.
     History {
@@ -340,6 +347,9 @@ pub enum ServerEvent {
     },
     Quota(Quota),
     Error {
+        /// The conversation it concerns, or `None` for the connection or the app.
+        #[serde(default)]
+        conversation_id: Option<ConversationId>,
         detail: String,
     },
 }

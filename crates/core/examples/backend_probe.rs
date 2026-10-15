@@ -18,8 +18,8 @@ fn main() {
     let backend = Backend::new(tx);
 
     backend.handle(Command::GetStatus);
-    backend.handle(Command::NewScratch);
-    let conversation = drain(&mut rx); // Status, Conversations{current}, History
+    backend.handle(Command::NewScratch { request: 0 });
+    let conversation = drain(&mut rx); // Status, Conversations, History, Created
 
     let id = conversation.expect("NewScratch should select a conversation");
     println!("new conversation: {id}\nsending a message…\n");
@@ -53,7 +53,7 @@ fn main() {
                     );
                     return;
                 }
-                ServerEvent::Error { detail } => {
+                ServerEvent::Error { detail, .. } => {
                     println!("error: {detail}");
                     return;
                 }
@@ -69,17 +69,20 @@ fn main() {
 }
 
 /// Drain currently-queued events, printing each, and return the conversation id
-/// the backend selected (from a `Conversations { current: Some(..) }`).
+/// the backend created.
 fn drain(rx: &mut UnboundedReceiver<ServerEvent>) -> Option<String> {
     let mut selected = None;
     while let Ok(ev) = rx.try_recv() {
         match &ev {
             ServerEvent::Status(s) => println!("Status: ready={}", s.ready()),
-            ServerEvent::Conversations { list, current } => {
-                println!("Conversations: {} item(s), current={current:?}", list.len());
-                if let Some(c) = current {
-                    selected = Some(c.clone());
-                }
+            ServerEvent::Conversations { list } => {
+                println!("Conversations: {} item(s)", list.len())
+            }
+            ServerEvent::Created {
+                conversation_id, ..
+            } => {
+                println!("Created: {conversation_id}");
+                selected = Some(conversation_id.clone());
             }
             ServerEvent::History { items, .. } => println!("History: {} item(s)", items.len()),
             other => println!("{other:?}"),

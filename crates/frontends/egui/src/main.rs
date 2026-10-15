@@ -245,24 +245,27 @@ impl ClaudoApp {
 
                 ServerEvent::Settings(s) => self.settings = s,
 
-                ServerEvent::Conversations { list, current } => {
+                ServerEvent::Conversations { list } => {
                     self.conversations = list;
-                    if let Some(id) = current {
-                        // Backend just created/selected this one.
-                        self.current = Some(id);
-                        self.sync_overrides();
-                        self.items.clear();
-                        self.assistant_idx = None;
-                        self.error = None;
-                    } else if self.current.is_none() {
+                    if self.current.is_none() {
                         match self.conversations.first() {
                             Some(first) => {
                                 let id = first.id.clone();
                                 self.open(id);
                             }
-                            None => self.transport.send(Command::NewScratch),
+                            None => self.transport.send(Command::NewScratch { request: 0 }),
                         }
                     }
+                }
+
+                ServerEvent::Created {
+                    conversation_id, ..
+                } => {
+                    self.current = Some(conversation_id);
+                    self.sync_overrides();
+                    self.items.clear();
+                    self.assistant_idx = None;
+                    self.error = None;
                 }
 
                 ServerEvent::History {
@@ -356,7 +359,13 @@ impl ClaudoApp {
 
                 ServerEvent::Quota(_) => {}
 
-                ServerEvent::Error { detail } => {
+                ServerEvent::Error {
+                    conversation_id,
+                    detail,
+                } => {
+                    if conversation_id.is_some() && conversation_id != self.current {
+                        continue;
+                    }
                     self.error = Some(detail);
                     self.approvals.clear();
                     self.streaming = false;
@@ -407,13 +416,14 @@ impl eframe::App for ClaudoApp {
 
         match action {
             Action::Open(id) => self.open(id),
-            Action::NewScratch => self.transport.send(Command::NewScratch),
+            Action::NewScratch => self.transport.send(Command::NewScratch { request: 0 }),
             Action::PickFolder =>
             {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     self.transport.send(Command::NewAttached {
                         path: folder.display().to_string(),
+                        request: 0,
                     });
                 }
             }
