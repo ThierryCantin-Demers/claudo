@@ -1102,7 +1102,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claudo-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "claudo-protocol",
  "serde",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "claudo-cosmic"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "claudo-protocol",
  "claudo-transport",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "claudo-daemon"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "claudo-core",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "claudo-egui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "claudo-protocol",
  "claudo-transport",
@@ -1156,14 +1156,14 @@ dependencies = [
 
 [[package]]
 name = "claudo-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "claudo-transport"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "claudo-core",
  "claudo-protocol",
@@ -8437,7 +8437,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
 ]
