@@ -1,7 +1,9 @@
 [alias]
-cosmic = "run -p claudo-cosmic --features cosmic --release"
+cosmic = "run -p claudo-cosmic --features cosmic"
+cosmic-release = "run -p claudo-cosmic --features cosmic --release"
+cosmic-hot = "hot -p claudo-cosmic --features hot"
+cosmic-release-hot = "hot -p claudo-cosmic --features hot --release"
 egui = "run -p claudo-egui --release"
 daemon = "run -p claudo-daemon"
 probe = "run -p claudo-core --example"
 lint = "clippy --workspace --all-targets --features claudo-cosmic/cosmic"
-cosmic-hot = "hot -p claudo-cosmic --features hot"

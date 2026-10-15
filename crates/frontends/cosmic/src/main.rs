@@ -122,8 +122,6 @@ mod app {
         /// Text scale. libcosmic exposes no runtime window scale factor, so zoom
         /// is applied to the conversation text rather than the whole window.
         zoom: f32,
-        /// Ctrl held, tracked separately because scroll events carry no modifiers.
-        ctrl: bool,
         error: Option<String>,
         page: Page,
     }
@@ -142,14 +140,10 @@ mod app {
         Frame,
         /// Animation frame for the activity indicator.
         Pulse,
-        /// Ctrl pressed/released.
-        Ctrl(bool),
         /// Multiply the text scale (Ctrl+scroll, Ctrl+`+`/`-`).
         Zoom(f32),
         /// Reset text scale (Ctrl+0).
         ZoomReset,
-        /// Wheel movement; zooms only while Ctrl is held.
-        Scroll(f32),
         Edit(text_editor::Action),
         Send,
         Stop,
@@ -533,9 +527,10 @@ mod app {
                         .size(size)
                         .wrapping(text::Wrapping::None)
                         .width(Length::Fill);
+                    let selected = self.page == Page::Chat && self.is_current(&c.id);
                     widget::button::custom(title)
-                        .class(cosmic::theme::Button::ListItem(radius))
-                        .selected(self.page == Page::Chat && self.is_current(&c.id))
+                        .class(conversation_style(radius, selected))
+                        .selected(selected)
                         .on_press(Message::Open(c.id.clone()))
                         .padding([6, 10])
                         .width(Length::Fill)
@@ -901,6 +896,23 @@ mod app {
         widget::Column::with_children(rows).spacing(4).into()
     }
 
+    /// libcosmic's list item, with the title taking the accent color on hover. `Custom`
+    /// closures are not told whether the button is selected, so it is captured here.
+    fn conversation_style(radius: [f32; 4], selected: bool) -> cosmic::theme::Button {
+        use cosmic::widget::button::Catalog;
+        let list = move || cosmic::theme::Button::ListItem(radius);
+        cosmic::theme::Button::Custom {
+            active: Box::new(move |focused, theme| theme.active(focused, selected, &list())),
+            disabled: Box::new(move |theme| theme.disabled(&list())),
+            hovered: Box::new(move |focused, theme| {
+                let mut style = theme.hovered(focused, selected, &list());
+                style.text_color = Some(theme.cosmic().accent_text_color().into());
+                style
+            }),
+            pressed: Box::new(move |focused, theme| theme.pressed(focused, selected, &list())),
+        }
+    }
+
     /// Three dots pulsing in turn.
     fn pulse_dots<'a>(pulse: f32, size: f32) -> Element<'a, Message> {
         let accent: Color = cosmic::theme::active().cosmic().accent_text_color().into();
@@ -1048,7 +1060,6 @@ mod app {
                 reveal: 0.0,
                 pulse: 0.0,
                 zoom: 1.0,
-                ctrl: false,
                 error: None,
                 page: Page::Chat,
             };
@@ -1081,17 +1092,10 @@ mod app {
                 }
                 Message::Frame => self.advance_reveal(1.0 / 60.0),
                 Message::Pulse => self.pulse += PULSE_TICK.as_secs_f32(),
-                Message::Ctrl(down) => self.ctrl = down,
                 Message::Zoom(factor) => {
                     self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
                 }
                 Message::ZoomReset => self.zoom = 1.0,
-                Message::Scroll(dy) => {
-                    if self.ctrl && dy != 0.0 {
-                        let factor = if dy > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                        self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
-                    }
-                }
                 Message::Edit(action) => self.draft.perform(action),
                 Message::Send => self.send(),
                 Message::Stop => {
@@ -1273,15 +1277,22 @@ mod app {
         }
     }
 
-    /// Ctrl+scroll and Ctrl+`+`/`-`/`0`. Scroll events carry no modifier state,
-    /// so Ctrl is tracked from `ModifiersChanged`.
+    /// Ctrl+scroll and Ctrl+`+`/`-`/`0`. Scroll events carry no modifier state, so
+    /// Ctrl is tracked here; a plain scroll yields no message, as each one rebuilds the view.
     fn zoom_events() -> Subscription<Message> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         use cosmic::iced::Event;
         use cosmic::iced::keyboard::{Event as Key, Key as K};
         use cosmic::iced::mouse::{Event as Mouse, ScrollDelta};
 
+        static CTRL: AtomicBool = AtomicBool::new(false);
+
         cosmic::iced::event::listen_with(|event, _status, _id| match event {
-            Event::Keyboard(Key::ModifiersChanged(m)) => Some(Message::Ctrl(m.control())),
+            Event::Keyboard(Key::ModifiersChanged(m)) => {
+                CTRL.store(m.control(), Ordering::Relaxed);
+                None
+            }
             Event::Keyboard(Key::KeyPressed { key, modifiers, .. }) if modifiers.control() => {
                 match key.as_ref() {
                     K::Character("+") | K::Character("=") => Some(Message::Zoom(1.1)),
@@ -1290,11 +1301,11 @@ mod app {
                     _ => None,
                 }
             }
-            Event::Mouse(Mouse::WheelScrolled { delta }) => {
+            Event::Mouse(Mouse::WheelScrolled { delta }) if CTRL.load(Ordering::Relaxed) => {
                 let dy = match delta {
                     ScrollDelta::Lines { y, .. } | ScrollDelta::Pixels { y, .. } => y,
                 };
-                Some(Message::Scroll(dy))
+                (dy != 0.0).then(|| Message::Zoom(if dy > 0.0 { 1.1 } else { 1.0 / 1.1 }))
             }
             _ => None,
         })

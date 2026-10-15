@@ -15,7 +15,7 @@ claude auth login
 ### COSMIC
 
 ```bash
-cargo cosmic
+cargo cosmic-release
 ```
 
 That is `cargo run -p claudo-cosmic --features cosmic --release`. Without
@@ -86,8 +86,12 @@ cargo probe live_probe      # probes hit the real CLI and cost tokens
 
 ```bash
 cargo install cargo-hot --version 0.1.1 --locked   # once
-cargo cosmic-hot
+cargo cosmic-hot              # dev build
+cargo cosmic-release-hot      # release build
 ```
+
+`cargo cosmic` is the plain dev build. In a release build the optimizer inlines small
+functions into their callers, so a patch to one of those may not show until a restart.
 
 Saving a file in `crates/frontends/cosmic/src/` patches the running window in about two
 seconds, keeping its state. Changing a type (a new `Message` variant or field) or another
