@@ -226,8 +226,8 @@ pub enum Decision {
     AllowAlways,
 }
 
-/// Per-conversation overrides. Each `None` field falls back to the global
-/// `Settings` value; `Some` wins for that conversation only.
+/// A conversation's own model, thinking and permissions, copied from `Settings` when it is
+/// created, so changing the defaults leaves it as it is. A `None` field follows `Settings`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Overrides {
     #[serde(default)]
@@ -263,8 +263,8 @@ pub struct ConversationInfo {
     pub context: ContextUsage,
 }
 
-/// Persisted global preferences applied to every turn. These are the concrete
-/// defaults the app runs with, so the user isn't guessing what "Default" means.
+/// The model, thinking and permissions new conversations start with. These are concrete
+/// values, so the user isn't guessing what "Default" means.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// `--model` value; empty = the CLI's own configured model.

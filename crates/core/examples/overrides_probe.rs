@@ -1,8 +1,9 @@
 //! Smoke test: per-conversation overrides and titles persist and ride along in
-//! ConversationInfo. Usage: cargo run -p claudo-core --example overrides_probe
+//! ConversationInfo, and a conversation keeps the defaults it was created with when they
+//! change. Usage: cargo run -p claudo-core --example overrides_probe
 
 use claudo_core::backend::Backend;
-use claudo_protocol::{Command, Effort, Overrides, Profile, ServerEvent};
+use claudo_protocol::{Command, Effort, Overrides, Profile, ServerEvent, Settings};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 fn main() {
@@ -14,8 +15,27 @@ fn main() {
     let (tx, mut rx) = unbounded_channel::<ServerEvent>();
     let backend = Backend::new(tx);
 
+    backend.handle(Command::UpdateSettings {
+        settings: Settings {
+            model: "opus".to_string(),
+            effort: Effort::Low,
+            profile: Profile::Safe,
+        },
+    });
     backend.handle(Command::NewScratch { request: 0 });
     let id = new_id(&mut rx).expect("a new conversation id");
+    backend.handle(Command::UpdateSettings {
+        settings: Settings {
+            model: "haiku".to_string(),
+            effort: Effort::Max,
+            profile: Profile::FullAuto,
+        },
+    });
+    backend.handle(Command::ListConversations);
+    print_overrides(
+        &mut rx,
+        "created with opus/Low/Safe, then the defaults changed",
+    );
 
     backend.handle(Command::SetOverrides {
         id: id.clone(),

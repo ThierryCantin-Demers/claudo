@@ -407,6 +407,14 @@ fn snapshots() {
     render_alone(&mut h.renderer, window, "windows-second");
 
     let mut app = two_tiles();
+    app.conversations[0].overrides = Overrides {
+        model: Some("haiku".to_string()),
+        effort: Some(claudo_protocol::Effort::High),
+        profile: None,
+    };
+    Harness::new(app).snapshot("custom-settings");
+
+    let mut app = two_tiles();
     let main = app.main_window();
     let x = app.tile_room(main).0 + 560.0;
     let _ = app.update(Message::In(main, Box::new(Message::DropHover(x))));

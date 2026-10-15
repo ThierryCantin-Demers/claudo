@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use claudo_protocol::{Background, ContextUsage, Item, Overrides, TaskStatus};
+use claudo_protocol::{Background, ContextUsage, Item, Overrides, Settings, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -70,7 +70,14 @@ pub struct ConversationMeta {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
     pub conversations: Vec<ConversationMeta>,
+    /// Which one-time migrations the file has had; see `STORE_VERSION`.
+    #[serde(default)]
+    pub version: u32,
 }
+
+/// 1: conversations that followed the defaults keep them as they were, now that the
+/// defaults apply to new conversations only.
+const STORE_VERSION: u32 = 1;
 
 impl Store {
     fn path() -> PathBuf {
@@ -78,16 +85,32 @@ impl Store {
     }
 
     pub fn load() -> Self {
-        let mut store: Self = match fs::read_to_string(Self::path()) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Self::default(),
+        // An unreadable file is left alone rather than migrated over.
+        let (mut store, readable): (Self, bool) = match fs::read_to_string(Self::path()) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(store) => (store, true),
+                Err(_) => (Self::default(), false),
+            },
+            Err(_) => (Self::default(), true),
         };
         for c in &mut store.conversations {
             if let Some(model) = &mut c.overrides.model {
                 crate::settings::follow_latest(model);
             }
         }
+        if readable && store.version < STORE_VERSION {
+            store.keep_defaults(&crate::settings::load());
+            store.version = STORE_VERSION;
+            store.save();
+        }
         store
+    }
+
+    /// Give every conversation the defaults it follows today as its own.
+    fn keep_defaults(&mut self, settings: &Settings) {
+        for c in &mut self.conversations {
+            fill(&mut c.overrides, settings);
+        }
     }
 
     pub fn save(&self) {
@@ -130,6 +153,8 @@ impl Store {
 
     fn push_new(&mut self, id: String, cwd: PathBuf, attached: bool, title: String) {
         let now = now_secs();
+        let mut overrides = Overrides::default();
+        fill(&mut overrides, &crate::settings::load());
         self.conversations.push(ConversationMeta {
             id,
             title,
@@ -139,7 +164,7 @@ impl Store {
             archived: false,
             always_allowed: Vec::new(),
             session_id: None,
-            overrides: Overrides::default(),
+            overrides,
             context: ContextUsage::default(),
             created: now,
             updated: now,
@@ -362,6 +387,15 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
     (items, ai_title)
 }
 
+/// The defaults, wherever a conversation has no value of its own.
+fn fill(overrides: &mut Overrides, settings: &Settings) {
+    overrides
+        .model
+        .get_or_insert_with(|| settings.model.clone());
+    overrides.effort.get_or_insert(settings.effort);
+    overrides.profile.get_or_insert(settings.profile);
+}
+
 fn call_mut<'a>(items: &'a mut [Item], call_id: &str) -> Option<&'a mut claudo_protocol::ToolCall> {
     items.iter_mut().rev().find_map(|item| match item {
         Item::Tool(call) if call.call_id == call_id => Some(call),
@@ -393,5 +427,56 @@ fn tool_result_text(v: Option<&Value>) -> String {
             .join("\n"),
         Some(other) => other.to_string(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use claudo_protocol::{Effort, Profile};
+
+    #[test]
+    fn conversations_keep_the_defaults_they_followed() {
+        let conversation = |overrides| ConversationMeta {
+            id: "c".to_string(),
+            title: String::new(),
+            cwd: PathBuf::new(),
+            attached: false,
+            renamed: false,
+            archived: false,
+            always_allowed: Vec::new(),
+            session_id: None,
+            overrides,
+            context: ContextUsage::default(),
+            created: 0,
+            updated: 0,
+        };
+        let mut store = Store {
+            conversations: vec![
+                conversation(Overrides::default()),
+                conversation(Overrides {
+                    model: Some("haiku".to_string()),
+                    ..Overrides::default()
+                }),
+            ],
+            version: 0,
+        };
+        let settings = Settings {
+            model: "opus".to_string(),
+            effort: Effort::High,
+            profile: Profile::FullAuto,
+        };
+        store.keep_defaults(&settings);
+        let [following, own] = &store.conversations[..] else {
+            unreachable!()
+        };
+        assert_eq!(following.overrides.model.as_deref(), Some("opus"));
+        assert_eq!(following.overrides.effort, Some(Effort::High));
+        assert_eq!(
+            own.overrides.model.as_deref(),
+            Some("haiku"),
+            "its own choice stays"
+        );
+        assert_eq!(own.overrides.profile, Some(Profile::FullAuto));
     }
 }

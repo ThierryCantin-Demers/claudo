@@ -1721,8 +1721,9 @@ mod app {
                     .class(dim())
                     .into(),
                 widget::text(
-                    "Every conversation uses these until you change its model, thinking or \
-                     permissions from its message box.",
+                    "New conversations start with these. Changing them leaves the conversations \
+                     you have as they are; a ★ in a message box marks a choice that differs \
+                     from these.",
                 )
                 .class(dim())
                 .into(),
@@ -2296,6 +2297,7 @@ mod app {
         ) -> Element<'a, Message> {
             let size = 14.0 * self.zoom;
             let (model, effort, profile) = self.effective(id);
+            let (model_value, effort_value, profile_value) = (model.clone(), effort, profile);
             let placeholder = if view.items.is_empty() {
                 "Message Claude"
             } else {
@@ -2357,15 +2359,31 @@ mod app {
             let small = |dropdown: widget::Dropdown<'a, &'static str, Message, Message>| {
                 dropdown.text_size(13.0 * self.zoom).padding([4, 8])
             };
-            let controls = widget::Row::with_children(vec![
-                small(profile).into(),
-                small(effort).into(),
-                widget::space::horizontal().into(),
-                model.text_size(13.0 * self.zoom).padding([4, 8]).into(),
-                send.into(),
-            ])
-            .spacing(if compact { 2 } else { 6 })
-            .align_y(Alignment::Center);
+            // A conversation keeps its own choices, so a star tells which differ from what a
+            // new chat would get.
+            let defaults = &self.settings;
+            let mut controls: Vec<Element<Message>> = vec![small(profile).into()];
+            controls.extend(
+                (profile_value != defaults.profile).then(|| custom_mark(defaults.profile.label())),
+            );
+            controls.push(small(effort).into());
+            controls.extend(
+                (effort_value != defaults.effort).then(|| custom_mark(defaults.effort.label())),
+            );
+            controls.push(widget::space::horizontal().into());
+            controls.push(model.text_size(13.0 * self.zoom).padding([4, 8]).into());
+            controls.extend((model_value != defaults.model).then(|| {
+                let (labels, default) = self.model_menu(&defaults.model);
+                custom_mark(
+                    default
+                        .and_then(|i| labels.get(i).cloned())
+                        .unwrap_or_else(|| model_name(&defaults.model)),
+                )
+            }));
+            controls.push(send.into());
+            let controls = widget::Row::with_children(controls)
+                .spacing(if compact { 2 } else { 6 })
+                .align_y(Alignment::Center);
 
             let boxed = widget::container(
                 widget::Column::with_children(vec![editor.into(), controls.into()])
@@ -2496,6 +2514,26 @@ mod app {
                 }
             }))
             .into()
+    }
+
+    /// Beside a message box control whose choice is not the default new chats start with.
+    fn custom_mark<'a>(default: impl Into<String>) -> Element<'a, Message> {
+        widget::tooltip(
+            widget::icon::from_name("starred-symbolic")
+                .size(14)
+                .icon()
+                .class(cosmic::theme::Svg::custom(|theme| {
+                    cosmic::iced::widget::svg::Style {
+                        color: Some(theme.cosmic().accent_text_color().into()),
+                    }
+                })),
+            widget::text(format!(
+                "This conversation's own choice; new chats start with {}",
+                default.into()
+            )),
+            widget::tooltip::Position::Top,
+        )
+        .into()
     }
 
     /// Where a tile dragged from another window would land.
