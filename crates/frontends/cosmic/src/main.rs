@@ -159,6 +159,10 @@ mod app {
         error: Option<String>,
         /// Made for a message another agent sent, so it holds only that turn so far.
         partial: bool,
+        /// How many prompts back the draft was recalled from; 0 when it is the user's own.
+        recalled: usize,
+        /// The user's own draft while a recalled prompt replaces it.
+        stash: String,
     }
 
     impl ConversationView {
@@ -172,7 +176,48 @@ mod app {
                 reveal: 0.0,
                 error: None,
                 partial: false,
+                recalled: 0,
+                stash: String::new(),
             }
+        }
+
+        /// The prompts sent here, newest first, each repeat once.
+        fn prompts(&self) -> Vec<&str> {
+            let mut prompts: Vec<&str> = self
+                .items
+                .iter()
+                .rev()
+                .filter_map(|entry| match entry {
+                    Entry::User(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            prompts.dedup();
+            prompts
+        }
+
+        /// Replace the draft with the prompt before or after the one shown, back to the
+        /// user's own draft past the newest.
+        fn recall(&mut self, older: bool) {
+            let back = if older {
+                self.recalled + 1
+            } else {
+                self.recalled.saturating_sub(1)
+            };
+            if back == self.recalled || back > self.prompts().len() {
+                return;
+            }
+            if self.recalled == 0 {
+                self.stash = self.draft.text();
+            }
+            let text = match back {
+                0 => std::mem::take(&mut self.stash),
+                _ => self.prompts()[back - 1].to_string(),
+            };
+            self.recalled = back;
+            self.draft = text_editor::Content::with_text(&text);
+            self.draft
+                .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
         }
 
         /// True while a turn runs and no text is appearing, so something must show it is alive.
@@ -538,6 +583,11 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        /// Up or Down at the message box's edge: an earlier or later prompt.
+        Recall {
+            conversation: ConversationId,
+            older: bool,
+        },
         /// A press in a transcript's text, starting a selection there.
         SelectStart(ConversationId, Mark),
         /// The cursor dragged the selection's end here.
@@ -1031,6 +1081,7 @@ mod app {
             view.items.push(Entry::User(text.clone()));
             view.streaming = true;
             view.draft = text_editor::Content::new();
+            view.recalled = 0;
             self.cmd(Command::SendMessage {
                 conversation_id: id.clone(),
                 text,
@@ -1713,7 +1764,7 @@ mod app {
                 .id(composer_id(id))
                 .placeholder(placeholder)
                 .on_action(move |action| Message::Edit(id.clone(), action))
-                .key_binding(move |press| send_on_enter(press, id, &view.draft))
+                .key_binding(move |press| composer_keys(press, id, view))
                 .size(size)
                 .padding(0)
                 .min_height(if compact { size * 1.3 } else { size * 2.6 })
@@ -2492,12 +2543,14 @@ mod app {
         widget::Id::new(format!("composer-{conversation}"))
     }
 
-    /// Enter sends; Shift+Enter and everything else keep the editor's own bindings.
-    fn send_on_enter(
+    /// Enter sends, and Up and Down past the first or last line recall prompts; Shift+Enter
+    /// and everything else keep the editor's own bindings.
+    fn composer_keys(
         press: text_editor::KeyPress,
         conversation: &ConversationId,
-        draft: &text_editor::Content,
+        view: &ConversationView,
     ) -> Option<text_editor::Binding<Message>> {
+        let draft = &view.draft;
         use keyboard::key::Named;
         use text_editor::{Binding, Motion};
         let enter = matches!(press.key, keyboard::Key::Named(Named::Enter));
@@ -2513,6 +2566,29 @@ mod app {
         }
         if enter && focused && !modifiers.shift() {
             return Some(Binding::Custom(Message::Send(conversation.clone())));
+        }
+        let line = draft.cursor().position.line;
+        let older = match press.key {
+            keyboard::Key::Named(Named::ArrowUp)
+                if line == 0 && view.recalled < view.prompts().len() =>
+            {
+                Some(true)
+            }
+            keyboard::Key::Named(Named::ArrowDown)
+                if line + 1 == draft.line_count() && view.recalled > 0 =>
+            {
+                Some(false)
+            }
+            _ => None,
+        };
+        if let Some(older) = older
+            && focused
+            && modifiers.is_empty()
+        {
+            return Some(Binding::Custom(Message::Recall {
+                conversation: conversation.clone(),
+                older,
+            }));
         }
         // iced's editor deletes one character whatever the modifiers; with Ctrl it is a word,
         // or the selection when there is one.
@@ -2655,12 +2731,24 @@ mod app {
                         self.focus(&id);
                     }
                     if let Some(view) = self.views.get_mut(&id) {
+                        // An edited recall is the user's own draft now, kept when recalling again.
+                        if matches!(action, text_editor::Action::Edit(_)) {
+                            view.recalled = 0;
+                        }
                         view.draft.perform(action);
                     }
                 }
                 Message::Send(id) => {
                     self.focus(&id);
                     self.send(id);
+                }
+                Message::Recall {
+                    conversation,
+                    older,
+                } => {
+                    if let Some(view) = self.views.get_mut(&conversation) {
+                        view.recall(older);
+                    }
                 }
                 Message::Stop(conversation_id) => self.cmd(Command::Stop { conversation_id }),
                 Message::Link(url) => {

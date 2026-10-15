@@ -513,6 +513,49 @@ fn ctrl_backspace_and_delete_remove_whole_words() {
 }
 
 #[test]
+fn up_and_down_recall_sent_prompts() {
+    use keyboard::key::{Code, Named};
+    let mut app = two_tiles();
+    let view = app.views.get_mut(ALPHA).expect("Alpha");
+    view.items.push(Entry::User("try again".to_string()));
+    view.items.push(Entry::User("try again".to_string()));
+    view.draft = text_editor::Content::with_text("half\ntyped");
+    view.draft
+        .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+    let mut h = Harness::new(app);
+    h.focus(composer_id(ALPHA));
+    let none = keyboard::Modifiers::empty();
+    let up = || key(Named::ArrowUp, Code::ArrowUp, none);
+    let down = || key(Named::ArrowDown, Code::ArrowDown, none);
+    let draft = |h: &Harness| h.app.views[ALPHA].draft.text();
+
+    h.send(vec![up()]);
+    assert_eq!(draft(&h), "half\ntyped", "Up first moves within the draft");
+    h.send(vec![up()]);
+    assert_eq!(draft(&h), "try again");
+    h.send(vec![up()]);
+    assert_eq!(draft(&h), "Alpha question 29", "a repeat is recalled once");
+    h.send(vec![down()]);
+    assert_eq!(draft(&h), "try again");
+    h.send(vec![down()]);
+    assert_eq!(
+        draft(&h),
+        "half\ntyped",
+        "past the newest is the user's draft"
+    );
+    h.send(vec![down()]);
+    assert_eq!(draft(&h), "half\ntyped");
+
+    h.send(vec![up()]);
+    h.send(vec![up()]);
+    h.send(vec![key(Named::Enter, Code::Enter, none)]);
+    let view = &h.app.views[ALPHA];
+    assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "try again"));
+    assert_eq!(view.draft.text(), "");
+    assert_eq!(view.recalled, 0);
+}
+
+#[test]
 fn deleting_asks_first_then_drops_the_conversation_everywhere() {
     let mut h = Harness::new(two_tiles());
     let _ = h.app.update(Message::AskDelete(BRAVO.to_string()));
