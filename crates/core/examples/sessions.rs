@@ -51,6 +51,12 @@ fn main() {
             Item::User(t) => println!("  USER: {}", clip(t)),
             Item::Incoming { from, text } => println!("  FROM {from}: {}", clip(text)),
             Item::Notice(text) => println!("  NOTICE {}", clip(text)),
+            Item::Compacted(c) => println!(
+                "  COMPACTED {} -> {} tokens: {}",
+                c.before,
+                c.after,
+                clip(&c.summary)
+            ),
             Item::Thinking(t) => println!("  THINKING: {}", clip(t)),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
             Item::Tool(tc) => println!(

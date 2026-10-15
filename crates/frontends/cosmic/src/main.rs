@@ -24,8 +24,8 @@ fn main() -> cosmic::iced::Result {
 #[cfg(feature = "cosmic")]
 mod app {
     use claudo_protocol::{
-        Command, ConversationId, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides,
-        Profile, Quota, ServerEvent, Settings, SystemStatus, ToolCall,
+        CliCommand, Command, Compaction, ConversationId, ConversationInfo, Decision, Effort, Item,
+        ModelOption, Overrides, Profile, Quota, ServerEvent, Settings, SystemStatus, ToolCall,
     };
     use claudo_transport::{Commands, spawn_backend};
 
@@ -85,6 +85,10 @@ mod app {
         },
         /// Why a turn Claude Code began by itself started.
         Notice(String),
+        Compacted {
+            compaction: Compaction,
+            open: bool,
+        },
         Thinking {
             text: String,
             open: bool,
@@ -138,6 +142,10 @@ mod app {
                 Item::User(text) => Entry::User(text),
                 Item::Incoming { from, text } => Entry::Incoming { from, text },
                 Item::Notice(text) => Entry::Notice(text),
+                Item::Compacted(compaction) => Entry::Compacted {
+                    compaction,
+                    open: false,
+                },
                 Item::Assistant(text) => Entry::Reply(Box::new(Reply::complete(text))),
                 Item::Thinking(text) => Entry::Thinking { text, open: false },
                 Item::Tool(call) => Entry::Tool { call, open: false },
@@ -175,6 +183,12 @@ mod app {
         commands_open: std::collections::HashSet<usize>,
         /// The Commands panel shows only this conversation's title.
         commands_collapsed: bool,
+        /// The conversation is being summarized.
+        compacting: bool,
+        /// The highlighted command in the `/` menu.
+        menu: usize,
+        /// Escape closed the `/` menu for this command.
+        menu_closed: bool,
     }
 
     impl ConversationView {
@@ -192,6 +206,9 @@ mod app {
                 stash: String::new(),
                 commands_open: Default::default(),
                 commands_collapsed: false,
+                compacting: false,
+                menu: 0,
+                menu_closed: false,
             }
         }
 
@@ -246,6 +263,9 @@ mod app {
             }
             if !self.approvals.is_empty() {
                 return Some("Waiting for your approval".to_string());
+            }
+            if self.compacting {
+                return Some("Compacting the conversation".to_string());
             }
             match self.items.last() {
                 Some(Entry::Thinking { .. }) => None,
@@ -395,8 +415,28 @@ mod app {
                     call,
                     scope,
                 }),
+                ServerEvent::Compacting { .. } => self.compacting = true,
+                ServerEvent::Compacted { compaction, .. } => {
+                    self.compacting = false;
+                    self.finish_reply();
+                    self.items.push(Entry::Compacted {
+                        compaction,
+                        open: false,
+                    });
+                }
+                ServerEvent::CompactSummary { text, .. } => {
+                    if let Some(Entry::Compacted { compaction, .. }) = self
+                        .items
+                        .iter_mut()
+                        .rev()
+                        .find(|entry| matches!(entry, Entry::Compacted { .. }))
+                    {
+                        compaction.summary = text;
+                    }
+                }
                 ServerEvent::Completed { is_error, .. } => {
                     self.streaming = false;
+                    self.compacting = false;
                     self.approvals.clear();
                     self.finish_reply();
                     if is_error {
@@ -581,6 +621,8 @@ mod app {
         carried_scroll: HashMap<ConversationId, f32>,
         /// Whether the other windows have the blur libcosmic gives the main one.
         blurred: bool,
+        /// The slash commands the CLI offers, for the message box's `/` menu.
+        cli_commands: Vec<CliCommand>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -723,6 +765,18 @@ mod app {
         ToggleCommand(ConversationId, usize),
         /// Fold or unfold a conversation's commands in the Commands panel.
         ToggleCommandGroup(ConversationId),
+        /// Send `/compact` in a conversation.
+        Compact(ConversationId),
+        /// Move the `/` menu's highlight this many rows.
+        MenuStep(ConversationId, i32),
+        /// Put a command from the `/` menu in the draft, the highlighted one when `at` is
+        /// `None`; with `run`, send it if it needs nothing more.
+        MenuPick {
+            conversation: ConversationId,
+            at: Option<usize>,
+            run: bool,
+        },
+        MenuClose(ConversationId),
         /// Up or Down at the message box's edge: an earlier or later prompt.
         Recall {
             conversation: ConversationId,
@@ -1584,21 +1638,39 @@ mod app {
                 .map(move |text| cosmic::Action::App(Message::Copied { text, primary }))
         }
 
+        /// Send the draft, or run it here if it is one of the commands claudo runs itself.
         fn send(&mut self, id: ConversationId) {
-            let (model, effort, profile) = self.effective(&id);
-            let Some(view) = self.views.get_mut(&id) else {
+            let Some(view) = self.views.get(&id) else {
                 return;
             };
             let text = view.draft.text().trim().to_string();
             if text.is_empty() || view.streaming {
                 return;
             }
+            if let Some(view) = self.views.get_mut(&id) {
+                view.draft = text_editor::Content::new();
+                view.recalled = 0;
+                view.menu_closed = false;
+            }
+            if self.local_command(&id, &text) {
+                self.focus_composer = Some(id);
+                return;
+            }
+            self.submit(id, text);
+        }
+
+        fn submit(&mut self, id: ConversationId, text: String) {
+            let (model, effort, profile) = self.effective(&id);
+            let Some(view) = self.views.get_mut(&id) else {
+                return;
+            };
+            if view.streaming {
+                return;
+            }
             view.error = None;
             view.finish_reply();
             view.items.push(Entry::User(text.clone()));
             view.streaming = true;
-            view.draft = text_editor::Content::new();
-            view.recalled = 0;
             self.cmd(Command::SendMessage {
                 conversation_id: id.clone(),
                 text,
@@ -1659,6 +1731,7 @@ mod app {
                 ServerEvent::Status(s) => self.status = Some(s),
                 ServerEvent::Settings(s) => self.settings = s,
                 ServerEvent::Models(models) => self.models = models,
+                ServerEvent::Commands(commands) => self.cli_commands = commands,
                 ServerEvent::Quota(quota) => self.quota = Some(usage::merged(self.quota, quota)),
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
@@ -1702,6 +1775,17 @@ mod app {
                     ..
                 }
                 | ServerEvent::Notice {
+                    ref conversation_id,
+                    ..
+                }
+                | ServerEvent::Compacting {
+                    ref conversation_id,
+                }
+                | ServerEvent::Compacted {
+                    ref conversation_id,
+                    ..
+                }
+                | ServerEvent::CompactSummary {
                     ref conversation_id,
                     ..
                 }
@@ -2345,6 +2429,10 @@ mod app {
                 "Move to new window",
                 Message::OpenWindow(id.clone()),
             ));
+            menu.push(menu_item(
+                "Compact conversation",
+                Message::Compact(id.clone()),
+            ));
             menu.extend(self.other_windows(w).into_iter().map(|(other, name)| {
                 menu_item(
                     format!("Move to {name}"),
@@ -2368,14 +2456,14 @@ mod app {
             if view.items.is_empty() && !view.streaming {
                 let greeting =
                     widget::text::title2("How can I help you today?").size(26.0 * self.zoom);
-                return widget::Column::with_children(vec![
+                let mut column = vec![
                     widget::space::vertical().into(),
                     widget::container(greeting).center_x(Length::Fill).into(),
-                    self.composer(id, view, compact),
-                    widget::space::vertical().into(),
-                ])
-                .spacing(24)
-                .into();
+                ];
+                column.extend(self.command_menu(id, view));
+                column.push(self.composer(id, view, compact));
+                column.push(widget::space::vertical().into());
+                return widget::Column::with_children(column).spacing(24).into();
             }
             let mut column = vec![self.transcript(id, view)];
             column.extend(
@@ -2383,6 +2471,8 @@ mod app {
                     .iter()
                     .map(|approval| self.approval_card(id, approval)),
             );
+            column.extend(self.compact_offer(id, view));
+            column.extend(self.command_menu(id, view));
             column.push(self.composer(id, view, compact));
             widget::Column::with_children(column).spacing(8).into()
         }
@@ -2463,6 +2553,7 @@ mod app {
         ) -> Element<'a, Message> {
             let size = 14.0 * self.zoom;
             let (model, effort, profile) = self.effective(id);
+            let menu_open = !self.command_matches(view).is_empty();
             let placeholder = if view.items.is_empty() {
                 "Message Claude"
             } else {
@@ -2472,7 +2563,7 @@ mod app {
                 .id(composer_id(id))
                 .placeholder(placeholder)
                 .on_action(move |action| Message::Edit(id.clone(), action))
-                .key_binding(move |press| composer_keys(press, id, view))
+                .key_binding(move |press| composer_keys(press, id, view, menu_open))
                 .size(size)
                 .padding(0)
                 .min_height(if compact { size * 1.3 } else { size * 2.6 })
@@ -2603,6 +2694,14 @@ mod app {
                         self.zoom,
                     ),
                     Entry::Notice(text) => notice_row(text, size),
+                    Entry::Compacted { compaction, open } => {
+                        let summary = open.then(|| {
+                            texts
+                                .text(compaction.summary.as_str(), size * 0.95, (idx, 0))
+                                .color(dim_color())
+                        });
+                        compaction::compaction_row(toggle(), compaction, summary, size)
+                    }
                     Entry::Incoming { from, text } => incoming_card(
                         from,
                         texts.text(text.as_str(), size, (idx, 0)),
@@ -3336,6 +3435,7 @@ mod app {
         press: text_editor::KeyPress,
         conversation: &ConversationId,
         view: &ConversationView,
+        menu_open: bool,
     ) -> Option<text_editor::Binding<Message>> {
         let draft = &view.draft;
         use keyboard::key::Named;
@@ -3343,6 +3443,24 @@ mod app {
         let enter = matches!(press.key, keyboard::Key::Named(Named::Enter));
         let focused = matches!(press.status, text_editor::Status::Focused { .. });
         let modifiers = press.modifiers;
+        // The `/` menu takes the keys that move through it, pick from it and close it.
+        if menu_open && focused && !modifiers.shift() {
+            let conversation = conversation.clone();
+            let message = match press.key {
+                keyboard::Key::Named(Named::ArrowUp) => Some(Message::MenuStep(conversation, -1)),
+                keyboard::Key::Named(Named::ArrowDown) => Some(Message::MenuStep(conversation, 1)),
+                keyboard::Key::Named(Named::Tab | Named::Enter) => Some(Message::MenuPick {
+                    conversation,
+                    at: None,
+                    run: enter,
+                }),
+                keyboard::Key::Named(Named::Escape) => Some(Message::MenuClose(conversation)),
+                _ => None,
+            };
+            if let Some(message) = message {
+                return Some(Binding::Custom(message));
+            }
+        }
         let arrow = matches!(
             press.key,
             keyboard::Key::Named(Named::ArrowLeft | Named::ArrowRight)
@@ -3466,6 +3584,7 @@ mod app {
                 minutes: 0,
                 carried_scroll: HashMap::new(),
                 blurred: false,
+                cli_commands: Vec::new(),
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -3553,15 +3672,45 @@ mod app {
                     }
                     if let Some(view) = self.views.get_mut(&id) {
                         // An edited recall is the user's own draft now, kept when recalling again.
-                        if matches!(action, text_editor::Action::Edit(_)) {
+                        let edit = matches!(action, text_editor::Action::Edit(_));
+                        if edit {
                             view.recalled = 0;
                         }
                         view.draft.perform(action);
+                        if edit {
+                            view.menu = 0;
+                            view.menu_closed &= view.draft.text().starts_with('/');
+                        }
                     }
                 }
                 Message::Send(id) => {
                     self.focus(&id);
                     self.send(id);
+                }
+                Message::Compact(id) => {
+                    self.focus(&id);
+                    self.submit(id, "/compact".to_string());
+                }
+                Message::MenuStep(id, step) => {
+                    let count = self
+                        .views
+                        .get(&id)
+                        .map_or(0, |view| self.command_matches(view).len());
+                    if let Some(view) = self.views.get_mut(&id)
+                        && count > 0
+                    {
+                        view.menu = (view.menu as i32 + step).rem_euclid(count as i32) as usize;
+                    }
+                }
+                Message::MenuPick {
+                    conversation,
+                    at,
+                    run,
+                } => self.pick_command(&conversation, at, run),
+                Message::MenuClose(id) => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.menu_closed = true;
+                    }
                 }
                 Message::ShowCommands(show) => {
                     self.layout_mut().commands_open = show;
@@ -3599,7 +3748,11 @@ mod app {
                 #[cfg(feature = "hot")]
                 Message::Hotpatched => {}
                 Message::Toggle(id, idx) => {
-                    if let Some(Entry::Tool { open, .. } | Entry::Thinking { open, .. }) = self
+                    if let Some(
+                        Entry::Tool { open, .. }
+                        | Entry::Thinking { open, .. }
+                        | Entry::Compacted { open, .. },
+                    ) = self
                         .views
                         .get_mut(&id)
                         .and_then(|view| view.items.get_mut(idx))
@@ -4401,7 +4554,9 @@ mod app {
 
     mod carry;
     mod commands;
+    mod compaction;
     mod selectable;
+    mod slash;
     #[cfg(test)]
     mod tests;
     mod tile_drag;
@@ -4458,7 +4613,7 @@ mod app {
                 let (commands, mut events) = spawn_backend();
                 commands.send(Command::GetStatus);
                 commands.send(Command::GetSettings);
-                commands.send(Command::GetModels);
+                commands.send(Command::GetCapabilities);
                 commands.send(Command::GetUsage);
                 commands.send(Command::ListConversations);
                 let _ = output.send(Message::Connected(commands)).await;

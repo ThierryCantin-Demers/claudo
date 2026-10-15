@@ -46,6 +46,9 @@ fn turn(
             EngineEvent::ThinkingDelta { text: t } => println!("  [thinking: {}]", t.trim()),
             EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
             EngineEvent::Quota(_) => {}
+            EngineEvent::Compacting => println!("  [compacting]"),
+            EngineEvent::Compacted(c) => println!("  [compacted {} -> {}]", c.before, c.after),
+            EngineEvent::CompactSummary(_) => {}
             EngineEvent::Background { background, .. } => {
                 println!("  [background: {:?}]", background.status)
             }

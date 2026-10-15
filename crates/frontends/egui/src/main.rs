@@ -98,7 +98,7 @@ impl ClaudoApp {
         let mut transport = connect();
         transport.send(Command::GetStatus);
         transport.send(Command::GetSettings);
-        transport.send(Command::GetModels);
+        transport.send(Command::GetCapabilities);
         transport.send(Command::ListConversations);
         Self {
             transport,
@@ -250,6 +250,17 @@ impl ClaudoApp {
                 ServerEvent::Settings(s) => self.settings = s,
 
                 ServerEvent::Models(models) => self.models = models,
+                ServerEvent::Commands(_)
+                | ServerEvent::Compacting { .. }
+                | ServerEvent::CompactSummary { .. } => {}
+                ServerEvent::Compacted {
+                    conversation_id,
+                    compaction,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.items.push(Item::Compacted(compaction));
+                    }
+                }
 
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
@@ -922,6 +933,12 @@ impl ClaudoApp {
                             Item::Tool(tc) => tool_card(ui, &tc),
                             Item::Notice(text) => {
                                 ui.weak(text);
+                            }
+                            Item::Compacted(c) => {
+                                ui.weak(format!(
+                                    "Conversation compacted: {} → {} tokens",
+                                    c.before, c.after
+                                ));
                             }
                         }
                     }

@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::engine::cli::{backgrounded, incoming, task_notification, tool_call};
+use crate::engine::cli::{
+    backgrounded, command_echo, command_output, compaction, incoming, task_notification, tool_call,
+};
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
 pub fn data_root() -> PathBuf {
@@ -323,10 +325,40 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
             Some("ai-title") => {
                 ai_title = v.get("aiTitle").and_then(Value::as_str).map(str::to_owned);
             }
+            Some("system")
+                if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") =>
+            {
+                items.extend(
+                    compaction(v.get("compactMetadata"), "preTokens", "postTokens")
+                        .map(Item::Compacted),
+                );
+            }
+            // What Claude Code tells the model around a slash command, not the user's words.
+            Some("user") if flag(&v, "isMeta") => {}
+            Some("user") if flag(&v, "isCompactSummary") => {
+                let summary = v.pointer("/message/content").and_then(Value::as_str);
+                if let (Some(Item::Compacted(compacted)), Some(summary)) = (
+                    items
+                        .iter_mut()
+                        .rev()
+                        .find(|i| matches!(i, Item::Compacted(_))),
+                    summary,
+                ) {
+                    compacted.summary = summary.to_string();
+                }
+            }
             Some("user") if let Some((from, text)) = incoming(&v) => {
                 items.push(Item::Incoming { from, text });
             }
             Some("user") => match v.pointer("/message/content") {
+                Some(Value::String(s)) if let Some(command) = command_echo(s) => {
+                    items.push(Item::User(command));
+                }
+                Some(Value::String(s)) if let Some(output) = command_output(s) => {
+                    if !output.is_empty() {
+                        items.push(Item::Assistant(output.to_string()));
+                    }
+                }
                 Some(Value::String(s)) => match task_notification(s) {
                     Some(end) => {
                         if let Some(call) = call_mut(&mut items, &end.call_id) {
@@ -385,6 +417,10 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
     }
 
     (items, ai_title)
+}
+
+fn flag(v: &Value, key: &str) -> bool {
+    v.get(key).and_then(Value::as_bool) == Some(true)
 }
 
 /// The defaults, wherever a conversation has no value of its own.

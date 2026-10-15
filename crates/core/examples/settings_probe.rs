@@ -33,11 +33,19 @@ fn main() {
     backend2.handle(Command::GetSettings);
     show(&mut rx2, "reloaded (new backend)");
 
-    backend2.handle(Command::GetModels);
+    backend2.handle(Command::GetCapabilities);
     if let Some(ServerEvent::Models(models)) = rx2.blocking_recv() {
         for m in models {
             println!("model: {:?} runs {}", m.value, m.label);
         }
+    }
+    if let Some(ServerEvent::Commands(commands)) = rx2.blocking_recv() {
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        println!(
+            "{} commands, compact among them: {}",
+            names.len(),
+            names.contains(&"compact")
+        );
     }
 
     backend2.handle(Command::GetUsage);

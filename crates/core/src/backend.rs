@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Command, ConversationInfo, Decision, ModelOption, ServerEvent};
+use claudo_protocol::{
+    Command, ContextUsage, ConversationInfo, Decision, ModelOption, ServerEvent,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{EngineEvent, SessionConfig};
@@ -57,18 +59,21 @@ impl Backend {
 
             Command::GetSettings => self.emit(ServerEvent::Settings(crate::settings::load())),
 
-            Command::GetModels => {
+            Command::GetCapabilities => {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
-                    let models = crate::engine::cli::models().unwrap_or_else(|_| {
-                        ["Opus", "Fable", "Sonnet", "Haiku"]
-                            .map(|label| ModelOption {
-                                value: label.to_lowercase(),
-                                label: label.to_string(),
-                            })
-                            .to_vec()
-                    });
+                    let (models, commands) =
+                        crate::engine::cli::capabilities().unwrap_or_else(|_| {
+                            let models = ["Opus", "Fable", "Sonnet", "Haiku"]
+                                .map(|label| ModelOption {
+                                    value: label.to_lowercase(),
+                                    label: label.to_string(),
+                                })
+                                .to_vec();
+                            (models, Vec::new())
+                        });
                     let _ = events.send(ServerEvent::Models(models));
+                    let _ = events.send(ServerEvent::Commands(commands));
                 });
             }
 
@@ -293,6 +298,8 @@ struct Forward {
     conversation_id: String,
     /// The session id to resume with, as last reported.
     latest: Option<String>,
+    /// The running turn has streamed text.
+    streamed: bool,
 }
 
 impl Forward {
@@ -307,6 +314,7 @@ impl Forward {
             store,
             conversation_id,
             latest,
+            streamed: false,
         }
     }
 
@@ -334,7 +342,32 @@ impl Forward {
                 from,
                 text,
             }),
-            EngineEvent::Delta { text } => self.emit(ServerEvent::Delta {
+            EngineEvent::Delta { text } => {
+                self.streamed = true;
+                self.emit(ServerEvent::Delta {
+                    conversation_id,
+                    text,
+                });
+            }
+            EngineEvent::Compacting => self.emit(ServerEvent::Compacting { conversation_id }),
+            EngineEvent::Compacted(compaction) => {
+                // The next turn reports the real size; until then, the summary's.
+                {
+                    let mut store = self.store.lock().unwrap();
+                    let window = store.get(&conversation_id).and_then(|c| c.context.window);
+                    let context = ContextUsage {
+                        used: compaction.after,
+                        window,
+                    };
+                    store.set_context(&conversation_id, context);
+                }
+                self.emit(ServerEvent::Compacted {
+                    conversation_id,
+                    compaction,
+                });
+                self.emit(conversations_event(&self.store));
+            }
+            EngineEvent::CompactSummary(text) => self.emit(ServerEvent::CompactSummary {
                 conversation_id,
                 text,
             }),
@@ -383,14 +416,26 @@ impl Forward {
                 session_id,
                 is_error,
                 context,
+                text,
             } => {
                 if session_id.is_some() {
                     self.latest = session_id;
                 }
+                // A local command such as `/context` answers in its result alone.
+                let streamed = std::mem::take(&mut self.streamed);
+                if let Some(text) = text.filter(|_| !streamed) {
+                    self.emit(ServerEvent::Delta {
+                        conversation_id: conversation_id.clone(),
+                        text,
+                    });
+                }
                 {
                     let mut store = self.store.lock().unwrap();
                     store.record_turn(&conversation_id, self.latest.as_deref());
-                    store.set_context(&conversation_id, context);
+                    // A turn without a request, such as a compaction, reports no usage.
+                    if context.used > 0 {
+                        store.set_context(&conversation_id, context);
+                    }
                 }
                 self.emit(ServerEvent::Completed {
                     conversation_id,

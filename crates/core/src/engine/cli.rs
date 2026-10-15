@@ -14,8 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use claudo_protocol::{
-    Background, ContextUsage, Decision, ModelOption, Profile, Quota, QuotaWindow, TaskStatus,
-    ToolCall,
+    Background, CliCommand, Compaction, ContextUsage, Decision, ModelOption, Profile, Quota,
+    QuotaWindow, TaskStatus, ToolCall,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -58,15 +58,18 @@ fn ask(subtype: &str) -> io::Result<Value> {
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
-/// The model families the CLI offers, by the alias that runs each one's newest version,
-/// as its `initialize` response lists them. Pinned older versions and `default` are left out.
-pub fn models() -> io::Result<Vec<ModelOption>> {
+/// The model families and slash commands the CLI offers, as its `initialize` response
+/// lists them. A family is offered by the alias that runs its newest version; pinned
+/// older versions and `default` are left out.
+pub fn capabilities() -> io::Result<(Vec<ModelOption>, Vec<CliCommand>)> {
     let response = ask("initialize")?;
-    let models = response
-        .get("models")
-        .and_then(Value::as_array)
-        .ok_or(io::ErrorKind::InvalidData)?;
-    Ok(models
+    let list = |key: &str| {
+        response
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or(io::ErrorKind::InvalidData)
+    };
+    let models = list("models")?
         .iter()
         .filter_map(|m| {
             let value = m.get("value")?.as_str()?;
@@ -76,7 +79,19 @@ pub fn models() -> io::Result<Vec<ModelOption>> {
                 label: label.to_string(),
             })
         })
-        .collect())
+        .collect();
+    let commands = list("commands")?
+        .iter()
+        .filter_map(|c| {
+            let field = |key| c.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+            Some(CliCommand {
+                name: c.get("name")?.as_str()?.to_string(),
+                description: field("description"),
+                argument_hint: field("argumentHint"),
+            })
+        })
+        .collect();
+    Ok((models, commands))
 }
 
 /// The subscription's usage windows, without waiting for a turn to report them.
@@ -142,13 +157,22 @@ fn cli_mode(profile: Profile) -> &'static str {
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     /// Session initialised; carries the id used to resume later turns.
-    Started { session_id: String },
+    Started {
+        session_id: String,
+    },
     /// A message from someone other than the client, such as another agent, started this turn.
-    Incoming { from: String, text: String },
+    Incoming {
+        from: String,
+        text: String,
+    },
     /// A chunk of assistant text.
-    Delta { text: String },
+    Delta {
+        text: String,
+    },
     /// A chunk of the summary of Claude's reasoning.
-    ThinkingDelta { text: String },
+    ThinkingDelta {
+        text: String,
+    },
     /// Claude invoked a tool; the call has no result yet.
     ToolStarted(ToolCall),
     /// The subscription's usage windows, reported once per turn.
@@ -160,7 +184,9 @@ pub enum EngineEvent {
         scope: String,
     },
     /// A turn the CLI began by itself starts, for this reason.
-    Notice { text: String },
+    Notice {
+        text: String,
+    },
     /// A call running in the background started or ended. Its end can come between turns.
     Background {
         call_id: String,
@@ -177,9 +203,19 @@ pub enum EngineEvent {
         session_id: Option<String>,
         is_error: bool,
         context: ContextUsage,
+        /// The turn's final text; a local command such as `/context` streams none, so
+        /// this is its only output.
+        text: Option<String>,
     },
+    /// The conversation is being summarized to free up context.
+    Compacting,
+    Compacted(Compaction),
+    /// The summary a compaction left in place of the conversation.
+    CompactSummary(String),
     /// The turn could not run (spawn failure, crash, or non-completing exit).
-    Error { detail: String },
+    Error {
+        detail: String,
+    },
 }
 
 /// The flags a `claude` process starts with. They hold for its whole life, so a
@@ -796,6 +832,14 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             .collect(),
 
         // A message starting its turn, echoed by `--replay-user-messages`.
+        // The summary a compaction leaves in place of the conversation.
+        "user" if v.get("isSynthetic").and_then(Value::as_bool) == Some(true) => v
+            .pointer("/message/content")
+            .and_then(Value::as_str)
+            .map(|text| EngineEvent::CompactSummary(text.to_string()))
+            .into_iter()
+            .collect(),
+
         "user" if v.get("isReplay").and_then(Value::as_bool) == Some(true) => incoming(v)
             .map(|(from, text)| EngineEvent::Incoming { from, text })
             .into_iter()
@@ -816,7 +860,18 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             })
             .collect(),
 
-        "system" => background_task(v).into_iter().collect(),
+        "system" => match v.get("subtype").and_then(Value::as_str) {
+            Some("status") if v.get("status").and_then(Value::as_str) == Some("compacting") => {
+                vec![EngineEvent::Compacting]
+            }
+            Some("compact_boundary") => {
+                compaction(v.get("compact_metadata"), "pre_tokens", "post_tokens")
+                    .map(EngineEvent::Compacted)
+                    .into_iter()
+                    .collect()
+            }
+            _ => background_task(v).into_iter().collect(),
+        },
 
         "rate_limit_event" => quota(v).map(EngineEvent::Quota).into_iter().collect(),
 
@@ -833,10 +888,51 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
                     .and_then(Value::as_str)
                     .is_some_and(|reason| reason.starts_with("aborted_")),
             context: context_usage(v),
+            text: v
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned),
         }],
 
         _ => Vec::new(),
     }
+}
+
+/// A compaction's trigger and sizes, from stream-json's `compact_metadata` or the
+/// transcript's `compactMetadata`, which name the sizes differently.
+pub(crate) fn compaction(
+    metadata: Option<&Value>,
+    before: &str,
+    after: &str,
+) -> Option<Compaction> {
+    let metadata = metadata?;
+    let tokens = |key| metadata.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(Compaction {
+        auto: metadata.get("trigger").and_then(Value::as_str) == Some("auto"),
+        before: tokens(before),
+        after: tokens(after),
+        summary: String::new(),
+    })
+}
+
+/// A slash command as the transcript records it, `<command-name>/compact</command-name>`
+/// and its arguments, back to what the user typed.
+pub(crate) fn command_echo(text: &str) -> Option<String> {
+    let name = xml_tag(text, "command-name")?;
+    let args = xml_tag(text, "command-args").unwrap_or("").trim();
+    Some(if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {args}")
+    })
+}
+
+/// What a local command printed, as the transcript records it; `Some("")` for a line that
+/// is one with nothing worth showing, such as compaction's "Compacted".
+pub(crate) fn command_output(text: &str) -> Option<&str> {
+    let output = xml_tag(text, "local-command-stdout")?.trim();
+    Some(if output == "Compacted" { "" } else { output })
 }
 
 /// A background call starting (`task_started`) or ending (`task_notification`).
@@ -1102,6 +1198,7 @@ mod tests {
                     session_id,
                     is_error,
                     context,
+                    ..
                 },
             ] => {
                 assert_eq!(session_id.as_deref(), Some("s"));
@@ -1256,6 +1353,48 @@ mod tests {
         );
         assert_eq!(unix_seconds("2026-10-15T21:30:00Z"), Some(1_792_099_800));
         assert_eq!(unix_seconds("tomorrow"), None);
+    }
+
+    #[test]
+    fn compaction_is_reported_and_read_back() {
+        let status = line(r#"{"type":"system","subtype":"status","status":"compacting"}"#);
+        assert!(matches!(&decode(&status)[..], [EngineEvent::Compacting]));
+        let boundary = line(
+            r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":35344,"post_tokens":1829}}"#,
+        );
+        match &decode(&boundary)[..] {
+            [EngineEvent::Compacted(c)] => {
+                assert!(!c.auto);
+                assert_eq!((c.before, c.after), (35344, 1829));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let summary = line(
+            r#"{"type":"user","isReplay":false,"isSynthetic":true,"message":{"role":"user","content":"This session is being continued..."}}"#,
+        );
+        assert!(matches!(
+            &decode(&summary)[..],
+            [EngineEvent::CompactSummary(_)]
+        ));
+
+        let local = line(r#"{"type":"result","is_error":false,"result":"Context Usage"}"#);
+        assert!(
+            matches!(&decode(&local)[..], [EngineEvent::Completed { text: Some(t), .. }] if t == "Context Usage")
+        );
+
+        assert_eq!(
+            command_echo("<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>keep it short</command-args>").as_deref(),
+            Some("/compact keep it short")
+        );
+        assert_eq!(
+            command_output("<local-command-stdout>Compacted </local-command-stdout>"),
+            Some("")
+        );
+        assert_eq!(
+            command_output("<local-command-stdout>42 tokens</local-command-stdout>"),
+            Some("42 tokens")
+        );
+        assert_eq!(command_output("just text"), None);
     }
 
     #[test]

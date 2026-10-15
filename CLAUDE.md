@@ -100,6 +100,14 @@ Each user line carries a `uuid`, and an `initialize` control request goes first.
 lists the models: claudo offers the family aliases (`opus`, `sonnet`, ...) labelled with
 the version each runs today (`displayName`), so a choice follows new releases.
 
+A slash command is sent as an ordinary message (`/compact keep it short`). A local one
+such as `/context` streams no text: its output is the `result` field, which the backend
+passes on as the reply. The transcript records the command as `<command-name>` and
+`<local-command-stdout>` user lines, `isMeta` caveats and an `isCompactSummary` summary,
+which the loader turns back into what was typed, a reply and a compaction. The
+`initialize` response lists every command (`commands`: `name`, `description`,
+`argumentHint`) for the message box's `/` menu.
+
 A `get_usage` control request answers with `rate_limits.five_hour` and `.seven_day`
 (`utilization` in percent, `resets_at` as RFC 3339) without a turn, so it costs no tokens;
 `cli::usage` asks a short-lived process for it.
@@ -124,6 +132,9 @@ Events consumed from the JSONL stream:
 | `control_request` / `can_use_tool` | a call waits for approval; answered with a `control_response` |
 | `command_lifecycle` | `state` `queued`/`started`/`completed` for the message with `command_uuid` |
 | `user` with `isReplay` | a message starting its turn; one from another agent has `origin.name` and `origin.body` |
+| `system` / `status` with `status: "compacting"` | a compaction is running |
+| `system` / `compact_boundary` | it ended: `compact_metadata` `trigger` (`manual`/`auto`), `pre_tokens`, `post_tokens` |
+| `user` with `isSynthetic` | the compaction's summary, as a string |
 | `system` / `task_started` | a call moved to the background (`is_backgrounded`), by `tool_use_id` |
 | `system` / `task_notification` | a background call ended: `status`, `summary`, `output_file`; may arrive between turns |
 | `rate_limit_event` | `rate_limit_info.unifiedWindows` five-hour and seven-day `utilization` and `resetsAt` |

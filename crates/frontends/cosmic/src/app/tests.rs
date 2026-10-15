@@ -1132,6 +1132,123 @@ fn shift_picks_every_conversation_up_to_the_one_clicked() {
     assert_eq!(app.picked, ["d", BRAVO, "c"]);
 }
 
+fn cli_command(name: &str, hint: &str) -> CliCommand {
+    CliCommand {
+        name: name.to_string(),
+        description: format!("What /{name} does"),
+        argument_hint: hint.to_string(),
+    }
+}
+
+#[test]
+fn the_slash_menu_lists_commands_and_runs_claudos_own() {
+    use keyboard::key::{Code, Named};
+    let mut app = two_tiles();
+    app.cli_commands = vec![
+        cli_command("compact", "<optional custom summarization instructions>"),
+        cli_command("context", ""),
+        cli_command("effort", "<low|medium|high|xhigh|max|auto>"),
+        cli_command("fast", "[on|off]"),
+        cli_command("clear", "[name]"),
+    ];
+    app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("/c");
+    let mut h = Harness::new(app);
+    h.focus(composer_id(ALPHA));
+    let names = |h: &Harness| -> Vec<String> {
+        h.app
+            .command_matches(&h.app.views[ALPHA])
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    };
+    assert_eq!(
+        names(&h),
+        ["compact", "context", "clear"],
+        "starting with it first; /fast is hidden"
+    );
+    h.snapshot("slash-menu");
+
+    let none = keyboard::Modifiers::empty();
+    h.send(vec![key(Named::ArrowDown, Code::ArrowDown, none)]);
+    assert_eq!(h.app.views[ALPHA].menu, 1);
+    h.send(vec![key(Named::Tab, Code::Tab, none)]);
+    assert_eq!(
+        h.app.views[ALPHA].draft.text(),
+        "/context ",
+        "Tab completes the highlighted one"
+    );
+    assert!(
+        names(&h).is_empty(),
+        "the menu closes once the name is complete"
+    );
+
+    // A command claudo runs itself never reaches the CLI.
+    h.app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("/effort high");
+    let _ = h.app.update(Message::Send(ALPHA.to_string()));
+    assert_eq!(
+        h.app.info(ALPHA).unwrap().overrides.effort,
+        Some(claudo_protocol::Effort::High)
+    );
+    assert!(!h.app.views[ALPHA].streaming);
+    assert_eq!(h.app.views[ALPHA].draft.text(), "");
+
+    // Escape closes the menu for that command.
+    h.app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("/co");
+    let _ = h.app.update(Message::MenuClose(ALPHA.to_string()));
+    assert!(names(&h).is_empty());
+}
+
+#[test]
+fn a_long_conversation_offers_to_compact_and_shows_where_it_did() {
+    let mut app = two_tiles();
+    app.conversations[0].context = claudo_protocol::ContextUsage {
+        used: 612_000,
+        window: Some(1_000_000),
+    };
+    let view = &app.views[ALPHA];
+    assert!(app.compact_offer(&ALPHA.to_string(), view).is_some());
+    assert!(
+        app.compact_offer(&BRAVO.to_string(), &app.views[BRAVO])
+            .is_none()
+    );
+    Harness::new(app).snapshot("compact-offer");
+
+    let mut app = two_tiles();
+    let event = |e| Message::Events(vec![e]);
+    let alpha = || ALPHA.to_string();
+    let _ = app.update(event(ServerEvent::Compacting {
+        conversation_id: alpha(),
+    }));
+    app.views.get_mut(ALPHA).unwrap().streaming = true;
+    assert_eq!(
+        app.views[ALPHA].activity().as_deref(),
+        Some("Compacting the conversation")
+    );
+    let _ = app.update(event(ServerEvent::Compacted {
+        conversation_id: alpha(),
+        compaction: Compaction {
+            auto: false,
+            before: 612_000,
+            after: 9_400,
+            summary: String::new(),
+        },
+    }));
+    let _ = app.update(event(ServerEvent::CompactSummary {
+        conversation_id: alpha(),
+        text: "The user and Claude built a COSMIC client.".to_string(),
+    }));
+    let Some(Entry::Compacted { compaction, .. }) = app.views[ALPHA].items.last() else {
+        panic!("a compaction row");
+    };
+    assert_eq!(
+        compaction.summary,
+        "The user and Claude built a COSMIC client."
+    );
+    let idx = app.views[ALPHA].items.len() - 1;
+    let _ = app.update(Message::Toggle(alpha(), idx));
+    Harness::new(app).snapshot("compacted");
+}
+
 #[test]
 fn archiving_puts_a_conversation_away_without_deleting_it() {
     let mut h = Harness::new(two_tiles());

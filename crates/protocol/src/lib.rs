@@ -78,6 +78,30 @@ pub struct ModelOption {
     pub label: String,
 }
 
+/// A slash command the CLI runs when a message starts with it: built in, or one of the
+/// user's skills, commands or plugins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliCommand {
+    /// Without its slash, such as `compact`.
+    pub name: String,
+    pub description: String,
+    /// What it takes after its name, such as `<optional custom summarization instructions>`.
+    #[serde(default)]
+    pub argument_hint: String,
+}
+
+/// The conversation was summarized to free up context, by the user or automatically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Compaction {
+    pub auto: bool,
+    /// Tokens of context before and after.
+    pub before: u64,
+    pub after: u64,
+    /// What the summary that replaced the conversation says.
+    #[serde(default)]
+    pub summary: String,
+}
+
 /// Model used when the user hasn't chosen one. A `--model` value is an alias
 /// (`opus`) or a specific version (`claude-sonnet-5-5`); empty means the CLI's own.
 pub const DEFAULT_MODEL: &str = "opus";
@@ -177,6 +201,7 @@ pub enum Item {
     },
     /// What started a turn Claude Code began by itself, such as a background command ending.
     Notice(String),
+    Compacted(Compaction),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,8 +320,8 @@ impl Default for Settings {
 pub enum Command {
     GetStatus,
     GetSettings,
-    /// Answered by `Models`.
-    GetModels,
+    /// Answered by `Models` and `Commands`.
+    GetCapabilities,
     /// The subscription's usage windows now, answered with `Quota`. Turns report them too.
     GetUsage,
     UpdateSettings {
@@ -359,6 +384,7 @@ pub enum ServerEvent {
     Status(SystemStatus),
     Settings(Settings),
     Models(Vec<ModelOption>),
+    Commands(Vec<CliCommand>),
     /// Full conversation list.
     Conversations {
         list: Vec<ConversationInfo>,
@@ -412,6 +438,19 @@ pub enum ServerEvent {
     },
     /// A turn Claude Code began by itself starts, for this reason.
     Notice {
+        conversation_id: ConversationId,
+        text: String,
+    },
+    /// The conversation is being summarized.
+    Compacting {
+        conversation_id: ConversationId,
+    },
+    Compacted {
+        conversation_id: ConversationId,
+        compaction: Compaction,
+    },
+    /// The summary of the compaction just reported.
+    CompactSummary {
         conversation_id: ConversationId,
         text: String,
     },
