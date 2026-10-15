@@ -1264,7 +1264,7 @@ mod app {
                 container::Style {
                     background: Some(Color::from(cosmic.bg_component_color()).into()),
                     border: Border {
-                        radius: cosmic.corner_radii.radius_l.into(),
+                        radius: cosmic.corner_radii.radius_m.into(),
                         width: 1.0,
                         color: cosmic.accent_color().into(),
                     },
@@ -1298,6 +1298,7 @@ mod app {
                 .key_binding(move |press| send_on_enter(press, id))
                 .size(size)
                 .padding(0)
+                .min_height(size * 2.6)
                 .max_height(240.0 * self.zoom)
                 .class(cosmic::theme::iced::TextEditor::Custom(Box::new(
                     borderless_editor,
@@ -1360,16 +1361,16 @@ mod app {
             };
 
             let boxed = widget::container(
-                widget::Column::with_children(vec![editor.into(), controls]).spacing(10),
+                widget::Column::with_children(vec![editor.into(), controls]).spacing(12),
             )
-            .padding([12, 14])
+            .padding([16, 18])
             .width(Length::Fill)
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
                 container::Style {
                     background: Some(Color::from(cosmic.bg_component_color()).into()),
                     border: Border {
-                        radius: cosmic.corner_radii.radius_l.into(),
+                        radius: cosmic.corner_radii.radius_m.into(),
                         width: 1.0,
                         color: cosmic.bg_divider().into(),
                     },
@@ -1395,7 +1396,7 @@ mod app {
                 let toggle = || Message::Toggle(id.clone(), idx);
                 rows.push(match entry {
                     Entry::User(text) => user_bubble(text, size, self.zoom),
-                    Entry::Incoming { from, text } => incoming_bubble(from, text, size, self.zoom),
+                    Entry::Incoming { from, text } => incoming_card(from, text, size, self.zoom),
                     Entry::Reply(reply) => {
                         markdown::view(reply.markdown.items(), settings).map(Message::Link)
                     }
@@ -1527,7 +1528,7 @@ mod app {
                     background: Some(Color::from(cosmic.bg_component_color()).into()),
                     text_color: Some(cosmic.on_bg_component_color().into()),
                     border: Border {
-                        radius: cosmic.corner_radii.radius_l.into(),
+                        radius: cosmic.corner_radii.radius_m.into(),
                         ..Border::default()
                     },
                     ..container::Style::default()
@@ -1536,15 +1537,16 @@ mod app {
         widget::container(bubble).align_right(Length::Fill).into()
     }
 
-    /// Another agent's message, on Claude's side since the user did not write it.
-    fn incoming_bubble<'a>(
+    /// Another agent's message: an outlined card on Claude's side, so it never passes
+    /// for one the user wrote.
+    fn incoming_card<'a>(
         from: &'a str,
         text: &'a str,
         size: f32,
         zoom: f32,
     ) -> Element<'a, Message> {
         let accent: Color = cosmic::theme::active().cosmic().accent_text_color().into();
-        let bubble = widget::container(
+        let card = widget::container(
             widget::Column::with_children(vec![
                 widget::text(format!("From {from}"))
                     .size(size * 0.85)
@@ -1553,23 +1555,25 @@ mod app {
                     .into(),
                 widget::text(text).size(size).into(),
             ])
-            .spacing(4.0 * zoom),
+            .spacing(6.0 * zoom),
         )
-        .padding([10.0 * zoom, 14.0 * zoom])
+        .padding([12.0 * zoom, 16.0 * zoom])
         .max_width(BUBBLE_WIDTH * zoom)
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             container::Style {
-                background: Some(Color::from(cosmic.bg_component_color()).into()),
-                text_color: Some(cosmic.on_bg_component_color().into()),
                 border: Border {
-                    radius: cosmic.corner_radii.radius_l.into(),
-                    ..Border::default()
+                    radius: cosmic.corner_radii.radius_m.into(),
+                    width: 1.0,
+                    color: Color {
+                        a: 0.5,
+                        ..cosmic.accent_color().into()
+                    },
                 },
                 ..container::Style::default()
             }
         }));
-        widget::container(bubble).align_left(Length::Fill).into()
+        widget::container(card).align_left(Length::Fill).into()
     }
 
     /// A one-line row naming the tool and what it acted on; expands to its input and output.
@@ -1605,6 +1609,7 @@ mod app {
                 .size(size)
                 .class(dim())
                 .wrapping(text::Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
                 .width(Length::Fill)
                 .into(),
             status,
@@ -1734,6 +1739,7 @@ mod app {
                 .size(size)
                 .class(dim())
                 .wrapping(text::Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
                 .width(Length::Fill)
                 .into(),
         ];
