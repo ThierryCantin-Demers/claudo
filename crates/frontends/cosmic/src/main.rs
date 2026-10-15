@@ -966,7 +966,7 @@ mod app {
                 widget::Column::with_children(vec![
                     widget::tooltip(
                         widget::button::text(if self.modifiers.shift() {
-                            "New chat in new tile"
+                            "New tile"
                         } else {
                             "New chat"
                         })
