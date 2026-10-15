@@ -1358,7 +1358,8 @@ fn streaming_frame_cost() {
         overrides: Overrides::default(),
         context: Default::default(),
     });
-    app.views.insert(CHARLIE.to_string(), ConversationView::new(""));
+    app.views
+        .insert(CHARLIE.to_string(), ConversationView::new(""));
     app.layout_mut().tiles.push(Tile::new(CHARLIE.to_string()));
     for view in app.views.values_mut() {
         view.items.clear();
@@ -1380,8 +1381,21 @@ fn streaming_frame_cost() {
     };
     let ids = [ALPHA, BRAVO, CHARLIE];
     let (mut view_t, mut build_t, mut draw_t) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
-    let frames = 600;
+    let frames = std::env::var("FRAMES").map_or(600, |f| f.parse().unwrap());
     for frame in 0..frames {
+        // A reply of about 2.5 KB ends and the next turn starts, as in a conversation.
+        if frame % 80 == 79 {
+            for id in ids {
+                let _ = h.app.update(Message::Events(vec![ServerEvent::Completed {
+                    conversation_id: id.to_string(),
+                    is_error: false,
+                    context: Default::default(),
+                }]));
+                let view = h.app.views.get_mut(id).unwrap();
+                view.items.push(Entry::User("Go on".to_string()));
+                view.streaming = true;
+            }
+        }
         if frame % 8 == 0 {
             let evs = ids
                 .iter()

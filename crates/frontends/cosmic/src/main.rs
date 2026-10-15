@@ -191,6 +191,8 @@ mod app {
         menu: usize,
         /// Escape closed the `/` menu for this command.
         menu_closed: bool,
+        /// Changes when `items` is replaced wholesale, so no entry reuses a key from before.
+        generation: u64,
     }
 
     impl ConversationView {
@@ -212,6 +214,7 @@ mod app {
                 loading: false,
                 menu: 0,
                 menu_closed: false,
+                generation: 0,
             }
         }
 
@@ -357,6 +360,7 @@ mod app {
                 ServerEvent::History { items, .. } => {
                     self.loading = false;
                     self.items = items.into_iter().map(Entry::from).collect();
+                    self.generation += 1;
                     self.assistant_idx = None;
                     self.commands_open.clear();
                 }
@@ -2712,7 +2716,9 @@ mod app {
             let mut rows: Vec<Element<Message>> = Vec::new();
             for (idx, entry) in view.items.iter().enumerate() {
                 let toggle = || Message::Toggle(id.clone(), idx);
-                rows.push(match entry {
+                let last = idx + 1 == view.items.len();
+                let key = frozen::key(view, idx, entry, last && live.is_some(), self.zoom);
+                let row = match entry {
                     Entry::User(text) => user_bubble(
                         texts.text(text.as_str(), size, (idx, 0)).shrink(),
                         self.zoom,
@@ -2743,7 +2749,6 @@ mod app {
                         },
                     ),
                     Entry::Thinking { text, open } => {
-                        let last = idx + 1 == view.items.len();
                         let body = open.then(|| {
                             texts
                                 .text(text.as_str(), size * 0.95, (idx, 0))
@@ -2758,7 +2763,8 @@ mod app {
                         commands::call_status(call, view.streaming, self.pulse, size * 0.85),
                         size,
                     ),
-                });
+                };
+                rows.push(frozen::Frozen::new(key, row).into());
             }
             if let Some(label) = view.activity() {
                 rows.push(activity_row(label, self.pulse, size));
@@ -4579,6 +4585,7 @@ mod app {
     mod carry;
     mod commands;
     mod compaction;
+    mod frozen;
     mod selectable;
     mod slash;
     #[cfg(test)]

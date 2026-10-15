@@ -4,6 +4,7 @@
 
 use std::any::Any;
 use std::cell::Cell;
+use std::sync::Arc;
 
 use claudo_protocol::ConversationId;
 use cosmic::iced::advanced::graphics::text::{Paragraph, cosmic_text};
@@ -71,9 +72,36 @@ impl Selection {
     }
 }
 
+/// A block's text: its own, or a parsed reply's, shared rather than copied every frame.
+pub enum Spans<'a> {
+    Own(Vec<Span<'a, markdown::Uri>>),
+    Shared(Arc<[Span<'static, markdown::Uri>]>),
+}
+
+impl<'a> Spans<'a> {
+    fn as_slice(&self) -> &[Span<'a, markdown::Uri>] {
+        match self {
+            Spans::Own(spans) => spans,
+            Spans::Shared(spans) => spans,
+        }
+    }
+}
+
+impl<'a> From<Vec<Span<'a, markdown::Uri>>> for Spans<'a> {
+    fn from(spans: Vec<Span<'a, markdown::Uri>>) -> Self {
+        Spans::Own(spans)
+    }
+}
+
+impl From<Arc<[Span<'static, markdown::Uri>]>> for Spans<'_> {
+    fn from(spans: Arc<[Span<'static, markdown::Uri>]>) -> Self {
+        Spans::Shared(spans)
+    }
+}
+
 /// A block of rich text in a transcript.
 pub struct Selectable<'a> {
-    spans: Vec<Span<'a, markdown::Uri>>,
+    spans: Spans<'a>,
     size: f32,
     font: Option<Font>,
     color: Option<Color>,
@@ -89,14 +117,14 @@ pub struct Selectable<'a> {
 
 impl<'a> Selectable<'a> {
     pub fn new(
-        spans: Vec<Span<'a, markdown::Uri>>,
+        spans: impl Into<Spans<'a>>,
         size: f32,
         conversation: &'a ConversationId,
         block: (usize, usize),
         selection: Option<&Selection>,
     ) -> Self {
         Self {
-            spans,
+            spans: spans.into(),
             size,
             font: None,
             color: None,
@@ -194,12 +222,11 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         let font = self.font.unwrap_or_else(|| renderer.default_font());
         let size = Pixels(self.size);
         let wrapping = self.wrapping;
-        let spans = &self.spans;
+        let spans = self.spans.as_slice();
         layout::sized(limits, self.width, Length::Shrink, |limits| {
             let bounds = limits.max();
-            let laid =
-                || Paragraph::with_spans(text(spans.as_slice(), bounds, size, font, wrapping));
-            if state.spans != *spans {
+            let laid = || Paragraph::with_spans(text(spans, bounds, size, font, wrapping));
+            if state.spans != spans {
                 state.paragraph = laid();
                 state.spans = spans.iter().cloned().map(Span::to_static).collect();
             } else {
@@ -291,10 +318,12 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         let state = tree.state.downcast_mut::<State>();
         let position = cursor.position_in(layout.bounds());
         let link_at = |state: &State, point: Point| {
-            state
-                .paragraph
-                .hit_span(point)
-                .filter(|&span| self.spans.get(span).is_some_and(|s| s.link.is_some()))
+            state.paragraph.hit_span(point).filter(|&span| {
+                self.spans
+                    .as_slice()
+                    .get(span)
+                    .is_some_and(|s| s.link.is_some())
+            })
         };
         let mark = |offset| Mark {
             block: self.block,
@@ -349,7 +378,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(link) = state.pressed_link.take()
                     && position.and_then(|point| link_at(state, point)) == Some(link)
-                    && let Some(url) = self.spans[link].link.clone()
+                    && let Some(url) = self.spans.as_slice()[link].link.clone()
                 {
                     shell.publish(Message::Link(url));
                 }
@@ -440,7 +469,7 @@ pub struct Viewer<'a> {
 }
 
 impl<'a> Viewer<'a> {
-    fn block(&self, spans: Vec<Span<'a, markdown::Uri>>, size: Pixels) -> Selectable<'a> {
+    fn block(&self, spans: impl Into<Spans<'a>>, size: Pixels) -> Selectable<'a> {
         let index = self.next.get();
         self.next.set(index + 1);
         Selectable::new(
@@ -463,7 +492,7 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
         settings: markdown::Settings,
         text: &markdown::Text,
     ) -> Element<'a, Message> {
-        self.block(text.spans(settings.style).to_vec(), settings.text_size)
+        self.block(text.spans(settings.style), settings.text_size)
             .into()
     }
 
@@ -483,7 +512,7 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
             H5 => settings.h5_size,
             H6 => settings.h6_size,
         };
-        self.block(text.spans(settings.style).to_vec(), size).into()
+        self.block(text.spans(settings.style), size).into()
     }
 
     fn code_block(
@@ -498,7 +527,7 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
             .enumerate()
             .map(|(i, line)| {
                 let line = self
-                    .block(line.spans(settings.style).to_vec(), settings.code_size)
+                    .block(line.spans(settings.style), settings.code_size)
                     .font(settings.style.code_block_font)
                     .line();
                 // The block's first line starts a paragraph; the rest continue it.
