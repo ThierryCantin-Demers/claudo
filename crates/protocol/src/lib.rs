@@ -214,6 +214,9 @@ pub struct ConversationInfo {
     pub id: ConversationId,
     pub title: String,
     pub cwd: String,
+    /// Its working directory is a project folder of the user's, not one claudo made.
+    #[serde(default)]
+    pub attached: bool,
     #[serde(default)]
     pub overrides: Overrides,
     /// Context usage from this conversation's most recent turn.
@@ -265,6 +268,11 @@ pub enum Command {
     SetOverrides {
         id: ConversationId,
         overrides: Overrides,
+    },
+    /// Delete a conversation, its scratch folder and its Claude Code transcript, stopping
+    /// its agent first.
+    Delete {
+        id: ConversationId,
     },
     /// Give a conversation a title of the user's own; its agent takes it as its name.
     Rename {

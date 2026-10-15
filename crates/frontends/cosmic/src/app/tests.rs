@@ -95,17 +95,7 @@ impl Harness {
             );
             renderer.screenshot(size, 1.0, base.background_color)
         });
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/snapshots");
-        std::fs::create_dir_all(&dir).expect("a snapshot directory");
-        let file = std::fs::File::create(dir.join(format!("{name}.png"))).expect("a snapshot file");
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size.width, size.height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder
-            .write_header()
-            .and_then(|mut writer| writer.write_image_data(&rgba))
-            .expect("a written snapshot");
+        write_png(name, size, &rgba);
     }
 
     /// Focuses a widget, as the tasks `update` returns would.
@@ -115,6 +105,28 @@ impl Harness {
             let mut focus = focusable::focus::<()>(id);
             ui.operate(renderer, &mut black_box(&mut focus));
         });
+    }
+
+    /// Renders the app's dialog alone, as libcosmic shows it over the window.
+    fn snapshot_dialog(&mut self, name: &str) {
+        let dialog = self.app.dialog().expect("a dialog");
+        let mut ui = UserInterface::build(dialog, WINDOW, Cache::default(), &mut self.renderer);
+        let theme = cosmic::theme::active();
+        let size = Size::new(WINDOW.width as u32, WINDOW.height as u32);
+        use cosmic::iced::theme::Base;
+        let base = theme.base();
+        ui.draw(
+            &mut self.renderer,
+            &theme,
+            &cosmic::iced::advanced::renderer::Style {
+                text_color: base.text_color,
+                icon_color: base.text_color,
+                scale_factor: 1.0,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        let rgba = self.renderer.screenshot(size, 1.0, base.background_color);
+        write_png(name, size, &rgba);
     }
 
     /// What Ctrl+C would copy.
@@ -162,6 +174,19 @@ impl Harness {
         found.sort_by(|a, b| a.0.total_cmp(&b.0));
         found.into_iter().map(|(_, y)| y).collect()
     }
+}
+
+fn write_png(name: &str, size: Size<u32>, rgba: &[u8]) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/snapshots");
+    std::fs::create_dir_all(&dir).expect("a snapshot directory");
+    let file = std::fs::File::create(dir.join(format!("{name}.png"))).expect("a snapshot file");
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size.width, size.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(rgba))
+        .expect("a written snapshot");
 }
 
 fn ctrl(held: bool) -> Event {
@@ -234,6 +259,7 @@ fn two_tiles() -> ClaudoApp {
             id: id.to_string(),
             title: title.to_string(),
             cwd: "/tmp".to_string(),
+            attached: false,
             overrides: Overrides::default(),
             context: Default::default(),
         });
@@ -467,4 +493,27 @@ fn ctrl_backspace_and_delete_remove_whole_words() {
         keyboard::Modifiers::empty(),
     )]);
     assert_eq!(draft(&h), " brave new ", "nothing before the cursor");
+}
+
+#[test]
+fn deleting_asks_first_then_drops_the_conversation_everywhere() {
+    let mut h = Harness::new(two_tiles());
+    let _ = h.app.update(Message::AskDelete(BRAVO.to_string()));
+    assert!(h.app.dialog().is_some(), "it asks first");
+    h.snapshot_dialog("delete-dialog");
+    let _ = h.app.update(Message::CancelDelete);
+    assert!(h.app.dialog().is_none());
+    assert!(h.app.info(BRAVO).is_some(), "cancelling keeps it");
+
+    let _ = h.app.update(Message::AskDelete(BRAVO.to_string()));
+    let _ = h.app.update(Message::ConfirmDelete);
+    assert!(h.app.info(BRAVO).is_none());
+    assert!(!h.app.views.contains_key(BRAVO));
+    assert_eq!(h.app.layout.tiles.len(), 1, "its tile closed");
+
+    // The last tile takes the next conversation rather than closing.
+    let _ = h.app.update(Message::AskDelete(ALPHA.to_string()));
+    let _ = h.app.update(Message::ConfirmDelete);
+    assert!(h.app.conversations.is_empty());
+    assert!(!h.app.views.contains_key(ALPHA));
 }

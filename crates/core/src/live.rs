@@ -89,6 +89,11 @@ impl LiveSessions {
         Ok(turn)
     }
 
+    /// Take a conversation's process away, so no later turn reaches it.
+    pub fn remove(&self, conversation_id: &str) -> Option<Session> {
+        self.sessions.lock().unwrap().remove(conversation_id)
+    }
+
     /// Rename a conversation's process for the other agents, if it has one.
     pub fn rename(&self, conversation_id: &str, name: &str) {
         if let Some(session) = self.sessions.lock().unwrap().get(conversation_id) {

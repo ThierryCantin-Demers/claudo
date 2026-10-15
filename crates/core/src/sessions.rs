@@ -165,6 +165,13 @@ impl Store {
         self.save();
     }
 
+    pub fn remove(&mut self, id: &str) -> Option<ConversationMeta> {
+        let index = self.conversations.iter().position(|c| c.id == id)?;
+        let removed = self.conversations.remove(index);
+        self.save();
+        Some(removed)
+    }
+
     pub fn rename(&mut self, id: &str, title: String) {
         if let Some(c) = self.get_mut(id) {
             c.title = title;
@@ -201,6 +208,28 @@ fn title_from_prompt(prompt: &str) -> String {
         format!("{truncated}…")
     } else {
         truncated
+    }
+}
+
+/// Remove what a deleted conversation leaves on disk: its Claude Code transcript, and its
+/// scratch folder, which claudo owns. An attached project folder is never touched.
+pub fn delete_files(meta: &ConversationMeta) {
+    if let Some(session_id) = &meta.session_id
+        && let Some(transcript) = find_transcript(session_id)
+    {
+        let _ = fs::remove_file(&transcript);
+        if let Some(project) = transcript.parent() {
+            // The session's own folder holds its subagents' transcripts.
+            let _ = fs::remove_dir_all(project.join(session_id));
+            // A scratch conversation's project holds only its sessions; this fails if not empty.
+            if !meta.attached {
+                let _ = fs::remove_dir(project);
+            }
+        }
+    }
+    let scratch = data_root().join("conversations");
+    if !meta.attached && meta.cwd.starts_with(&scratch) && meta.cwd != scratch {
+        let _ = fs::remove_dir_all(&meta.cwd);
     }
 }
 

@@ -94,6 +94,21 @@ impl Backend {
 
             Command::OpenConversation { id } => self.open(id),
 
+            Command::Delete { id } => {
+                let session = self.live.remove(&id);
+                let (events, store) = (self.events.clone(), self.store.clone());
+                std::thread::spawn(move || {
+                    if let Some(session) = session {
+                        session.shutdown(std::time::Duration::from_secs(10));
+                    }
+                    let removed = store.lock().unwrap().remove(&id);
+                    if let Some(meta) = removed {
+                        crate::sessions::delete_files(&meta);
+                    }
+                    let _ = events.send(conversations_event(&store));
+                });
+            }
+
             Command::Rename { id, title } => {
                 let title = title.trim().to_string();
                 if !title.is_empty() {
@@ -361,6 +376,7 @@ fn conversations_event(store: &Mutex<Store>) -> ServerEvent {
             id: m.id,
             title: m.title,
             cwd: m.cwd.display().to_string(),
+            attached: m.attached,
             overrides: m.overrides,
             context: m.context,
         })

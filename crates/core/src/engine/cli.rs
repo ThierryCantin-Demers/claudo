@@ -9,7 +9,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -137,6 +137,8 @@ struct Shared {
     /// `None` once the session is dropped.
     stdin: Mutex<Option<ChildStdin>>,
     turns: Mutex<Turns>,
+    /// Signalled once the process has exited.
+    exited: Condvar,
     incoming: Option<Incoming>,
     last_activity: Mutex<Instant>,
     /// Inputs of approvals awaiting an answer, keyed by request id; an allow echoes them back.
@@ -230,6 +232,7 @@ impl Session {
         let shared = Arc::new(Shared {
             stdin: Mutex::new(Some(stdin)),
             turns: Mutex::default(),
+            exited: Condvar::new(),
             incoming,
             last_activity: Mutex::new(Instant::now()),
             approvals: Mutex::default(),
@@ -304,6 +307,7 @@ impl Session {
             let err = stderr.join().unwrap_or_default();
             let mut turns = reader.turns.lock().unwrap();
             turns.exited = true;
+            reader.exited.notify_all();
             let detail = if err.trim().is_empty() {
                 match status {
                     Ok(s) => format!("claude exited without completing the turn ({s})"),
@@ -365,6 +369,20 @@ impl Session {
             return Err(e);
         }
         Ok(rx)
+    }
+
+    /// Stop any turn, close stdin and wait up to `timeout` for the process to exit, so
+    /// nothing it writes outlives files the caller removes next.
+    pub fn shutdown(self, timeout: Duration) {
+        if self.is_busy() {
+            let _ = self.interrupt();
+        }
+        self.shared.stdin.lock().unwrap().take();
+        let turns = self.shared.turns.lock().unwrap();
+        let _ = self
+            .shared
+            .exited
+            .wait_timeout_while(turns, timeout, |turns| !turns.exited);
     }
 
     /// Change the name other agents know this one by.

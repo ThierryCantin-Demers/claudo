@@ -435,6 +435,8 @@ mod app {
         /// Text selected in a transcript; one at a time, as in a browser.
         selection: Option<Selection>,
         renaming: Option<Renaming>,
+        /// The conversation the delete confirmation is asking about.
+        deleting: Option<ConversationId>,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
         /// The tiles to reopen, with the focused one, once the conversation list arrives.
@@ -532,6 +534,10 @@ mod app {
         CommitRename,
         /// Escape leaves the title as it was.
         CancelRename,
+        /// Delete in a conversation's sidebar menu; asks first.
+        AskDelete(ConversationId),
+        ConfirmDelete,
+        CancelDelete,
         /// The selected text, for the clipboard; `primary` for the one middle click pastes.
         Copied {
             text: String,
@@ -862,6 +868,62 @@ mod app {
             self.focus_composer = self.focused().cloned();
         }
 
+        /// Drops a deleted conversation everywhere it shows; a window keeps at least one tile,
+        /// so the last one takes another conversation, or a new one.
+        fn forget(&mut self, id: &str) {
+            self.conversations.retain(|c| c.id != id);
+            if self.tile_of(id).is_some() {
+                if self.layout.tiles.len() > 1 {
+                    self.close(id);
+                } else {
+                    match self.conversations.first().map(|c| c.id.clone()) {
+                        Some(next) => self.open(next, Placement::Focused),
+                        None => self.new_conversation(Placement::Focused),
+                    }
+                }
+            }
+            self.views.remove(id);
+            self.drafts.remove(id);
+            if self
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.conversation == id)
+            {
+                self.selection = None;
+            }
+            if self.renaming.as_ref().is_some_and(|r| r.conversation == id) {
+                self.renaming = None;
+            }
+            self.persist();
+        }
+
+        /// The confirmation before deleting, saying what goes and what stays.
+        fn delete_dialog(&self, id: &str) -> Element<'_, Message> {
+            let info = self.info(id);
+            let title = info.map_or("this conversation", |c| c.title.as_str());
+            let mut body = "Its messages are deleted from claudo and from Claude Code's history, \
+                            along with the folder claudo made for it. This cannot be undone."
+                .to_string();
+            if info.is_some_and(|c| c.attached) {
+                body = "Its messages are deleted from claudo and from Claude Code's history. \
+                        Its project folder is not touched. This cannot be undone."
+                    .to_string();
+            }
+            if self.views.get(id).is_some_and(|v| v.streaming) {
+                body.push_str(" Its agent is still working and will be stopped.");
+            }
+            widget::dialog()
+                .title(format!("Delete \u{201c}{title}\u{201d}?"))
+                .body(body)
+                .primary_action(
+                    widget::button::destructive("Delete").on_press(Message::ConfirmDelete),
+                )
+                .secondary_action(
+                    widget::button::standard("Cancel").on_press(Message::CancelDelete),
+                )
+                .into()
+        }
+
         fn rename(&mut self, id: ConversationId, title: String) {
             let Some(info) = self.conversations.iter_mut().find(|c| c.id == id) else {
                 return;
@@ -1183,6 +1245,7 @@ mod app {
                             "Rename",
                             Message::StartRename(c.id.clone(), TitleAt::Sidebar),
                         ),
+                        menu_item("Delete…", Message::AskDelete(c.id.clone())),
                     ];
                     widget::context_menu(item, Some(menu))
                         .on_surface_action(Message::Surface)
@@ -2457,6 +2520,7 @@ mod app {
                 drag: None,
                 selection: None,
                 renaming: None,
+                deleting: None,
                 drafts: ui.drafts,
                 restore: Some((ui.tiles, ui.focused)),
                 focus_composer: None,
@@ -2618,6 +2682,14 @@ mod app {
                     }
                 }
                 Message::CancelRename => self.renaming = None,
+                Message::AskDelete(id) => self.deleting = Some(id),
+                Message::CancelDelete => self.deleting = None,
+                Message::ConfirmDelete => {
+                    if let Some(id) = self.deleting.take() {
+                        self.forget(&id);
+                        self.cmd(Command::Delete { id });
+                    }
+                }
                 Message::Copied { text, primary } => {
                     return if primary {
                         cosmic::iced::clipboard::write_primary(text)
@@ -2859,6 +2931,10 @@ mod app {
                 .collect()
         }
 
+        fn dialog(&self) -> Option<Element<'_, Message>> {
+            self.deleting.as_deref().map(|id| self.delete_dialog(id))
+        }
+
         fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Message> {
             (self.core.main_window_id() == Some(id)).then_some(Message::Quit)
         }
@@ -2941,6 +3017,10 @@ mod app {
                     _ => None,
                 }
             }
+            Event::Keyboard(Key::KeyPressed {
+                key: K::Named(Named::Escape),
+                ..
+            }) => Some(Message::CancelDelete),
             Event::Keyboard(Key::KeyPressed { key, modifiers, .. })
                 if modifiers.alt() && !modifiers.control() =>
             {
