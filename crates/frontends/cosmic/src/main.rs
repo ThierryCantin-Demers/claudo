@@ -301,6 +301,41 @@ mod app {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Tile {
         conversation: ConversationId,
+        /// Its part of the row's width, relative to the other tiles' shares.
+        #[serde(default = "one")]
+        share: f32,
+    }
+
+    impl Tile {
+        fn new(conversation: ConversationId) -> Self {
+            Self {
+                conversation,
+                share: 1.0,
+            }
+        }
+    }
+
+    fn one() -> f32 {
+        1.0
+    }
+
+    /// A drag in progress. Positions are window x coordinates; `origin` is where the
+    /// cursor was at the drag's first move, since the press itself reports none.
+    enum Drag {
+        /// The sidebar's edge; `offset` is the cursor's distance from it.
+        Sidebar { offset: Option<f32> },
+        /// The handle between tile `left` and the next, from their shares at the start.
+        Divider {
+            left: usize,
+            origin: Option<f32>,
+            start: (f32, f32),
+        },
+        /// A tile by its header, with the gap it would drop into once it has moved.
+        Tile {
+            from: usize,
+            origin: Option<f32>,
+            slot: Option<usize>,
+        },
     }
 
     /// Where an opened or created conversation goes.
@@ -331,10 +366,7 @@ mod app {
         zoom: f32,
         page: Page,
         modifiers: keyboard::Modifiers,
-        /// Set while the sidebar's edge is dragged.
-        dragging: bool,
-        /// The cursor's distance from the sidebar's edge, taken from the drag's first move.
-        drag_offset: Option<f32>,
+        drag: Option<Drag>,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
         /// The tiles to reopen, with the focused one, once the conversation list arrives.
@@ -436,8 +468,14 @@ mod app {
         SetPage(Page),
         ToggleSidebar,
         StartSidebarDrag,
-        DragSidebar(f32),
-        EndSidebarDrag,
+        StartResize(usize),
+        StartMove(ConversationId),
+        DragTo(f32),
+        DragEnd,
+        /// Move a tile this many places, negative to the left.
+        Move(ConversationId, i32),
+        MoveFocused(i32),
+        FocusStep(i32),
         Resized(cosmic::iced::window::Id, cosmic::iced::Size),
         /// Opens and closes popups, such as context menus.
         Surface(cosmic::surface::Action),
@@ -529,7 +567,7 @@ mod app {
                     self.release(&left);
                 }
                 _ => {
-                    self.layout.tiles.push(Tile { conversation: id });
+                    self.layout.tiles.push(Tile::new(id));
                     self.layout.focused = self.layout.tiles.len() - 1;
                 }
             }
@@ -571,6 +609,91 @@ mod app {
             if let Some(i) = self.tile_of(id) {
                 self.layout.focused = i;
             }
+        }
+
+        /// Where the tiles start, and the width they share, or `None` once they
+        /// would be narrower than `TILE_MIN` and the row scrolls instead.
+        fn tile_room(&self) -> (f32, Option<f32>) {
+            let start = if self.layout.sidebar_open {
+                self.layout.sidebar_width + HANDLE_WIDTH
+            } else {
+                0.0
+            };
+            let count = self.layout.tiles.len();
+            let room = self.layout.size.map_or(f32::INFINITY, |(w, _)| w)
+                - start
+                - count.saturating_sub(1) as f32 * HANDLE_WIDTH;
+            (start, (room >= count as f32 * TILE_MIN * self.zoom).then_some(room))
+        }
+
+        fn total_share(&self) -> f32 {
+            self.layout.tiles.iter().map(|t| t.share).sum()
+        }
+
+        fn drag_to(&mut self, x: f32) {
+            let (start, room) = self.tile_room();
+            let total = self.total_share();
+            let min = TILE_MIN * self.zoom;
+            match &mut self.drag {
+                Some(Drag::Sidebar { offset }) => {
+                    let layout = &mut self.layout;
+                    let edge = if layout.sidebar_open {
+                        layout.sidebar_width
+                    } else {
+                        0.0
+                    };
+                    let width = x - *offset.get_or_insert(x - edge);
+                    layout.sidebar_open = width >= SIDEBAR_COLLAPSE;
+                    if layout.sidebar_open {
+                        layout.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                    }
+                }
+                Some(Drag::Divider {
+                    left,
+                    origin,
+                    start: (a, b),
+                }) => {
+                    let Some(room) = room.filter(|r| r.is_finite()) else {
+                        return;
+                    };
+                    let per_px = total / room;
+                    let moved = (x - *origin.get_or_insert(x)) * per_px;
+                    let left_share = (*a + moved).min(*a + *b - min * per_px).max(min * per_px);
+                    let tiles = &mut self.layout.tiles;
+                    if *left + 1 < tiles.len() {
+                        tiles[*left].share = left_share;
+                        tiles[*left + 1].share = *a + *b - left_share;
+                    }
+                }
+                Some(Drag::Tile { origin, slot, .. }) => {
+                    let origin = *origin.get_or_insert(x);
+                    if slot.is_none() && (x - origin).abs() < 8.0 {
+                        return;
+                    }
+                    let mut edge = start;
+                    let centers = self.layout.tiles.iter().map(|t| {
+                        let width = room.map_or(min, |room| t.share / total * room);
+                        let center = edge + width / 2.0;
+                        edge += width + HANDLE_WIDTH;
+                        center
+                    });
+                    *slot = Some(centers.filter(|c| *c < x).count());
+                }
+                None => {}
+            }
+        }
+
+        /// Move the tile at `from` to `to`, focusing it there.
+        fn move_tile(&mut self, from: usize, to: usize) {
+            let tiles = &mut self.layout.tiles;
+            if from >= tiles.len() {
+                return;
+            }
+            let to = to.min(tiles.len() - 1);
+            let tile = tiles.remove(from);
+            tiles.insert(to, tile);
+            self.layout.focused = to;
+            self.persist();
         }
 
         fn new_conversation(&mut self, placement: Placement) {
@@ -880,19 +1003,10 @@ mod app {
         fn tiles(&self) -> Element<'_, Message> {
             let count = self.layout.tiles.len();
             let several = count > 1;
-            let sidebar = if self.layout.sidebar_open {
-                self.layout.sidebar_width + HANDLE_WIDTH
-            } else {
-                0.0
-            };
-            let available = self.layout.size.map_or(f32::INFINITY, |(w, _)| w) - sidebar;
-            let min = TILE_MIN * self.zoom;
-            let overflow =
-                count as f32 * min + count.saturating_sub(1) as f32 * HANDLE_WIDTH > available;
-            let width = if overflow {
-                Length::Fixed(min)
-            } else {
-                Length::FillPortion(1)
+            let overflow = self.tile_room().1.is_none();
+            let slot = match self.drag {
+                Some(Drag::Tile { from, slot, .. }) => slot.filter(|s| *s != from && *s != from + 1),
+                _ => None,
             };
 
             let mut row: Vec<Element<Message>> = Vec::new();
@@ -900,16 +1014,28 @@ mod app {
                 let Some(view) = self.views.get(&tile.conversation) else {
                     continue;
                 };
-                if !row.is_empty() {
+                if slot == Some(i) {
+                    row.push(drop_marker());
+                } else if i > 0 && overflow {
+                    row.push(divider());
+                } else if i > 0 {
                     row.push(
-                        widget::container(widget::divider::vertical::default())
-                            .center_x(Length::Fixed(HANDLE_WIDTH))
-                            .height(Length::Fill)
+                        widget::mouse_area(divider())
+                            .on_press(Message::StartResize(i - 1))
+                            .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
                             .into(),
                     );
                 }
+                let width = if overflow {
+                    Length::Fixed(TILE_MIN * self.zoom)
+                } else {
+                    Length::FillPortion((tile.share * 1000.0).round().max(1.0) as u16)
+                };
                 let focused = several && i == self.layout.focused;
                 row.push(self.tile(&tile.conversation, view, several, focused, width));
+            }
+            if slot == Some(count) {
+                row.push(drop_marker());
             }
             let row = widget::Row::with_children(row).height(Length::Fill);
             if overflow {
@@ -963,13 +1089,29 @@ mod app {
                     .on_press(Message::Close(id.clone()))
                     .into(),
             );
-            widget::container(
-                widget::Row::with_children(row)
-                    .spacing(8)
-                    .align_y(Alignment::Center),
+            let header = widget::mouse_area(
+                widget::container(
+                    widget::Row::with_children(row)
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .padding([4, 8, 4, 16]),
             )
-            .padding([4, 8, 4, 16])
-            .into()
+            .on_press(Message::StartMove(id.clone()))
+            .interaction(cosmic::iced::mouse::Interaction::Grab);
+
+            let i = self.tile_of(id).unwrap_or_default();
+            let mut menu = Vec::new();
+            if i > 0 {
+                menu.push(menu_item("Move left", Message::Move(id.clone(), -1)));
+            }
+            if i + 1 < self.layout.tiles.len() {
+                menu.push(menu_item("Move right", Message::Move(id.clone(), 1)));
+            }
+            menu.push(menu_item("Close", Message::Close(id.clone())));
+            widget::context_menu(header, Some(menu))
+                .on_surface_action(Message::Surface)
+                .into()
         }
 
         /// A new conversation centers the composer under a greeting, as Claude Desktop does.
@@ -1211,6 +1353,28 @@ mod app {
                 }
             }))
             .into()
+    }
+
+    fn divider<'a>() -> Element<'a, Message> {
+        widget::container(widget::divider::vertical::default())
+            .center_x(Length::Fixed(HANDLE_WIDTH))
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// Where a dragged tile would land.
+    fn drop_marker<'a>() -> Element<'a, Message> {
+        widget::container(
+            widget::container(widget::space::horizontal().width(Length::Fixed(3.0)))
+                .height(Length::Fill)
+                .class(cosmic::theme::Container::custom(|theme| container::Style {
+                    background: Some(Color::from(theme.cosmic().accent_color()).into()),
+                    ..container::Style::default()
+                })),
+        )
+        .center_x(Length::Fixed(HANDLE_WIDTH))
+        .height(Length::Fill)
+        .into()
     }
 
     fn tile_style(focused: bool) -> cosmic::theme::Container<'static> {
@@ -1528,8 +1692,7 @@ mod app {
                 zoom: ui.zoom,
                 page: ui.page,
                 modifiers: keyboard::Modifiers::empty(),
-                dragging: false,
-                drag_offset: None,
+                drag: None,
                 drafts: ui.drafts,
                 restore: Some((ui.tiles, ui.focused)),
                 focus_composer: None,
@@ -1541,8 +1704,8 @@ mod app {
             let mut subscriptions = vec![named("backend", backend_worker), window_events()];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
-            if self.dragging {
-                subscriptions.push(cosmic::iced::event::listen_with(sidebar_drag_events));
+            if self.drag.is_some() {
+                subscriptions.push(cosmic::iced::event::listen_with(drag_events));
             }
             // Timers run only while something animates; idle stays event-driven.
             if self.revealing() {
@@ -1649,26 +1812,57 @@ mod app {
                     self.layout.sidebar_open = !self.layout.sidebar_open;
                     self.persist();
                 }
-                Message::StartSidebarDrag => {
-                    self.dragging = true;
-                    self.drag_offset = None;
-                }
-                Message::DragSidebar(x) => {
-                    let layout = &mut self.layout;
-                    let edge = if layout.sidebar_open {
-                        layout.sidebar_width
-                    } else {
-                        0.0
-                    };
-                    let width = x - *self.drag_offset.get_or_insert(x - edge);
-                    layout.sidebar_open = width >= SIDEBAR_COLLAPSE;
-                    if layout.sidebar_open {
-                        layout.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                Message::StartSidebarDrag => self.drag = Some(Drag::Sidebar { offset: None }),
+                Message::StartResize(left) => {
+                    let tiles = &self.layout.tiles;
+                    if left + 1 < tiles.len() {
+                        self.drag = Some(Drag::Divider {
+                            left,
+                            origin: None,
+                            start: (tiles[left].share, tiles[left + 1].share),
+                        });
                     }
                 }
-                Message::EndSidebarDrag => {
-                    self.dragging = false;
+                Message::StartMove(id) => {
+                    if let Some(from) = self.tile_of(&id) {
+                        self.layout.focused = from;
+                        self.focus_composer = Some(id);
+                        self.drag = Some(Drag::Tile {
+                            from,
+                            origin: None,
+                            slot: None,
+                        });
+                    }
+                }
+                Message::DragTo(x) => self.drag_to(x),
+                Message::DragEnd => {
+                    if let Some(Drag::Tile {
+                        from,
+                        slot: Some(slot),
+                        ..
+                    }) = self.drag.take()
+                    {
+                        self.move_tile(from, if slot > from { slot - 1 } else { slot });
+                    }
                     self.persist();
+                }
+                Message::Move(id, step) => {
+                    if let Some(i) = self.tile_of(&id) {
+                        self.move_tile(i, i.saturating_add_signed(step as isize));
+                    }
+                }
+                Message::MoveFocused(step) => {
+                    let i = self.layout.focused;
+                    self.move_tile(i, i.saturating_add_signed(step as isize));
+                }
+                Message::FocusStep(step) => {
+                    let last = self.layout.tiles.len().saturating_sub(1);
+                    self.layout.focused = self
+                        .layout
+                        .focused
+                        .saturating_add_signed(step as isize)
+                        .min(last);
+                    self.focus_composer = self.focused().cloned();
                 }
                 // Popups are windows too; only the main one's size is worth restoring.
                 Message::Resized(id, size) => {
@@ -1867,7 +2061,7 @@ mod app {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         use cosmic::iced::Event;
-        use cosmic::iced::keyboard::{Event as Key, Key as K};
+        use cosmic::iced::keyboard::{Event as Key, Key as K, key::Named};
         use cosmic::iced::mouse::{Event as Mouse, ScrollDelta};
 
         static CTRL: AtomicBool = AtomicBool::new(false);
@@ -1885,7 +2079,12 @@ mod app {
                     K::Character("+") | K::Character("=") => Some(Message::Zoom(1.1)),
                     K::Character("-") => Some(Message::Zoom(1.0 / 1.1)),
                     K::Character("0") => Some(Message::ZoomReset),
-                    K::Character("w") => Some(Message::CloseFocused),
+                    K::Character("w" | "W") => Some(Message::CloseFocused),
+                    K::Character("n" | "N") => Some(Message::New),
+                    K::Named(Named::PageUp) if modifiers.shift() => Some(Message::MoveFocused(-1)),
+                    K::Named(Named::PageDown) if modifiers.shift() => Some(Message::MoveFocused(1)),
+                    K::Named(Named::PageUp) => Some(Message::FocusStep(-1)),
+                    K::Named(Named::PageDown) => Some(Message::FocusStep(1)),
                     _ => None,
                 }
             }
@@ -1899,9 +2098,9 @@ mod app {
         })
     }
 
-    /// Cursor moves and the release ending a drag of the sidebar's edge; subscribed only
-    /// during the drag, so ordinary mouse movement produces no messages.
-    fn sidebar_drag_events(
+    /// Cursor moves and the release ending a drag; subscribed only during one, so
+    /// ordinary mouse movement produces no messages.
+    fn drag_events(
         event: cosmic::iced::Event,
         _status: cosmic::iced::event::Status,
         _id: cosmic::iced::window::Id,
@@ -1909,10 +2108,10 @@ mod app {
         use cosmic::iced::mouse::{Button, Event as Mouse};
         match event {
             cosmic::iced::Event::Mouse(Mouse::CursorMoved { position }) => {
-                Some(Message::DragSidebar(position.x))
+                Some(Message::DragTo(position.x))
             }
             cosmic::iced::Event::Mouse(Mouse::ButtonReleased(Button::Left)) => {
-                Some(Message::EndSidebarDrag)
+                Some(Message::DragEnd)
             }
             _ => None,
         }

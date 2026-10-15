@@ -55,8 +55,25 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Context usage for the last turn.
 - A scratch working directory per conversation, or an attached project folder.
 - Zoom with Ctrl+scroll or Ctrl+`+`/`-`/`0`.
+- COSMIC: several agents side by side in tiles (below).
 
 The COSMIC frontend cannot attach a project folder yet.
+
+### Tiles (COSMIC)
+
+| Do | How |
+|---|---|
+| Open a conversation in the focused tile | Click it |
+| Open it in a new tile at the right | Shift+click, or right-click → Open in new tile |
+| New conversation | New chat or Ctrl+N; Shift+click or Ctrl+Shift+N for a new tile |
+| Resize tiles | Drag the line between two tiles |
+| Move a tile | Drag its title, right-click it for Move left/right, or Ctrl+Shift+PageUp/PageDown |
+| Focus the previous or next tile | Ctrl+PageUp/PageDown |
+| Close a tile | Its ✕, or Ctrl+W |
+
+A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
+shows pulsing dots beside each agent still working, and an Approve badge beside one waiting
+for your answer.
 
 ## How it works
 
