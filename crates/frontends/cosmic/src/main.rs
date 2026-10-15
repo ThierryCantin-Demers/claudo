@@ -623,7 +623,10 @@ mod app {
             let room = self.layout.size.map_or(f32::INFINITY, |(w, _)| w)
                 - start
                 - count.saturating_sub(1) as f32 * HANDLE_WIDTH;
-            (start, (room >= count as f32 * TILE_MIN * self.zoom).then_some(room))
+            (
+                start,
+                (room >= count as f32 * TILE_MIN * self.zoom).then_some(room),
+            )
         }
 
         fn total_share(&self) -> f32 {
@@ -949,7 +952,10 @@ mod app {
                     .on_press(Message::Open(c.id.clone()))
                     .padding([6, 10])
                     .width(Length::Fill);
-                    let menu = vec![menu_item("Open in new tile", Message::OpenTile(c.id.clone()))];
+                    let menu = vec![menu_item(
+                        "Open in new tile",
+                        Message::OpenTile(c.id.clone()),
+                    )];
                     widget::context_menu(item, Some(menu))
                         .on_surface_action(Message::Surface)
                         .into()
@@ -959,9 +965,13 @@ mod app {
             widget::container(
                 widget::Column::with_children(vec![
                     widget::tooltip(
-                        widget::button::text("New chat")
-                            .leading_icon(widget::icon::from_name("list-add-symbolic"))
-                            .on_press(Message::New),
+                        widget::button::text(if self.modifiers.shift() {
+                            "New chat in new tile"
+                        } else {
+                            "New chat"
+                        })
+                        .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                        .on_press(Message::New),
                         widget::text("Shift+click for a new tile"),
                         widget::tooltip::Position::Bottom,
                     )
@@ -1005,7 +1015,9 @@ mod app {
             let several = count > 1;
             let overflow = self.tile_room().1.is_none();
             let slot = match self.drag {
-                Some(Drag::Tile { from, slot, .. }) => slot.filter(|s| *s != from && *s != from + 1),
+                Some(Drag::Tile { from, slot, .. }) => {
+                    slot.filter(|s| *s != from && *s != from + 1)
+                }
                 _ => None,
             };
 
@@ -1439,7 +1451,12 @@ mod app {
     }
 
     /// A one-line row naming the tool and what it acted on; expands to its input and output.
-    fn tool_row(on_toggle: Message, call: &ToolCall, open: bool, size: f32) -> Element<'_, Message> {
+    fn tool_row(
+        on_toggle: Message,
+        call: &ToolCall,
+        open: bool,
+        size: f32,
+    ) -> Element<'_, Message> {
         let small = size * 0.85;
         let chevron = if open {
             "go-down-symbolic"

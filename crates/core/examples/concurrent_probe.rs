@@ -58,7 +58,10 @@ fn main() {
         }
     }
     check(
-        PROMPTS.iter().all(|(request, ..)| ids.contains_key(request)) && ids[&7] != ids[&9],
+        PROMPTS
+            .iter()
+            .all(|(request, ..)| ids.contains_key(request))
+            && ids[&7] != ids[&9],
         "each creation request comes back with its own conversation",
     );
 
@@ -108,7 +111,11 @@ fn main() {
             ServerEvent::Delta {
                 conversation_id,
                 text,
-            } => seen.entry(conversation_id).or_default().text.push_str(&text),
+            } => seen
+                .entry(conversation_id)
+                .or_default()
+                .text
+                .push_str(&text),
             ServerEvent::Completed {
                 conversation_id,
                 is_error,

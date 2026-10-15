@@ -22,7 +22,9 @@ async fn main() {
         .await
         .unwrap();
     write
-        .send(Message::Text(json(&Command::NewScratch { request: 0 }).into()))
+        .send(Message::Text(
+            json(&Command::NewScratch { request: 0 }).into(),
+        ))
         .await
         .unwrap();
 
