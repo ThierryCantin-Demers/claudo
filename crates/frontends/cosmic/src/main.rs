@@ -46,7 +46,7 @@ mod app {
     use cosmic::iced::widget::{container, text};
     use cosmic::iced::window;
     use cosmic::iced::{
-        Alignment, Border, Color, Length, Padding, Point, Subscription, keyboard, stream,
+        Alignment, Border, Color, Length, Padding, Point, Size, Subscription, keyboard, stream,
     };
     use cosmic::widget::{self, markdown, menu, text_editor};
     use cosmic::{Application, Element};
@@ -551,14 +551,15 @@ mod app {
         /// Text selected in a transcript; one at a time, as in a browser.
         selection: Option<Selection>,
         renaming: Option<Renaming>,
-        /// The conversation the delete confirmation is asking about.
-        deleting: Option<ConversationId>,
+        /// The conversation the delete confirmation is asking about, and the window it shows in.
+        deleting: Option<(window::Id, ConversationId)>,
         /// The sidebar lists archived conversations too.
         show_archived: bool,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
-        /// The tiles to reopen, with the focused one, once the conversation list arrives.
-        restore: Option<(Vec<Tile>, usize)>,
+        /// Each window's tiles to reopen, with its focused one, once the conversation list
+        /// arrives.
+        restore: Vec<(window::Id, Vec<Tile>, usize)>,
         /// The conversation whose composer takes focus after this update.
         focus_composer: Option<ConversationId>,
         /// The subscription's usage windows, as last reported.
@@ -589,6 +590,54 @@ mod app {
         show_archived: bool,
         /// Unsent text, per conversation.
         drafts: HashMap<ConversationId, String>,
+        /// The windows besides the main one, in the order they opened.
+        windows: Vec<SavedWindow>,
+    }
+
+    /// A window besides the main one, as it was left.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct SavedWindow {
+        tiles: Vec<Tile>,
+        focused: usize,
+        sidebar_open: bool,
+        sidebar_width: f32,
+        commands_open: bool,
+        commands_width: f32,
+        size: Option<(f32, f32)>,
+    }
+
+    impl Default for SavedWindow {
+        fn default() -> Self {
+            WindowLayout::default().saved()
+        }
+    }
+
+    impl WindowLayout {
+        fn saved(&self) -> SavedWindow {
+            SavedWindow {
+                tiles: self.tiles.clone(),
+                focused: self.focused,
+                sidebar_open: self.sidebar_open,
+                sidebar_width: self.sidebar_width,
+                commands_open: self.commands_open,
+                commands_width: self.commands_width,
+                size: self.size,
+            }
+        }
+
+        /// A saved window's settings, without its tiles: those open once the conversations
+        /// they show are known.
+        fn restored(saved: &SavedWindow) -> Self {
+            Self {
+                sidebar_open: saved.sidebar_open,
+                sidebar_width: saved.sidebar_width,
+                commands_open: saved.commands_open,
+                commands_width: saved.commands_width,
+                size: saved.size,
+                ..Self::default()
+            }
+        }
     }
 
     impl Default for UiState {
@@ -605,6 +654,7 @@ mod app {
                 window: None,
                 show_archived: false,
                 drafts: HashMap::new(),
+                windows: Vec::new(),
             }
         }
     }
@@ -697,6 +747,14 @@ mod app {
         /// A click on a conversation in the sidebar; with Shift it gets a new tile.
         Open(ConversationId),
         OpenTile(ConversationId),
+        /// A conversation in a window of its own, moved there if a tile showed it.
+        OpenWindow(ConversationId),
+        /// The header bar of a window libcosmic does not draw.
+        WindowDrag,
+        WindowMaximize,
+        WindowMinimize,
+        CloseWindow,
+        WindowClosed(window::Id),
         Focus(ConversationId),
         Close(ConversationId),
         CloseFocused,
@@ -861,23 +919,114 @@ mod app {
             }
         }
 
-        /// The last tile stays: a window always shows a conversation.
+        /// Close a conversation's tile. The main window keeps its last one; another window
+        /// closes with it.
         fn close(&mut self, id: &str) {
+            let Some((w, _)) = self.tile_of(id) else {
+                return;
+            };
+            if w == self.main_window() && self.window(w).tiles.len() == 1 {
+                return;
+            }
+            self.take_out(id);
+            self.focus_composer = self.focused(w).cloned();
+            self.release(id);
+            self.persist();
+        }
+
+        /// Take a conversation's tile out of its window. A window left with none closes, or,
+        /// the main one, shows another conversation, or a new one.
+        fn take_out(&mut self, id: &str) {
             let Some((w, i)) = self.tile_of(id) else {
                 return;
             };
             self.current = w;
             let layout = self.layout_mut();
-            if layout.tiles.len() == 1 {
-                return;
-            }
             layout.tiles.remove(i);
             if layout.focused > i {
                 layout.focused -= 1;
             }
-            layout.focused = layout.focused.min(layout.tiles.len() - 1);
-            self.focus_composer = self.focused(w).cloned();
-            self.release(id);
+            layout.focused = layout.focused.min(layout.tiles.len().saturating_sub(1));
+            if !layout.tiles.is_empty() {
+                return;
+            }
+            if w != self.main_window() {
+                self.windows.remove(&w);
+                self.current = self.main_window();
+                self.tasks.push(window::close(w));
+                return;
+            }
+            let next = self
+                .conversations
+                .iter()
+                .find(|c| c.id != id && !c.archived && self.tile_of(&c.id).is_none())
+                .map(|c| c.id.clone());
+            match next {
+                Some(next) => self.open(next, Placement::Right),
+                None => self.new_conversation(Placement::Right),
+            }
+        }
+
+        /// Open a window with this layout, its tiles still to place.
+        fn open_window(&mut self, layout: WindowLayout) -> window::Id {
+            let size = layout
+                .size
+                .map_or(Size::new(1024.0, 768.0), |(w, h)| Size::new(w, h));
+            // As libcosmic opens the main window, so the compositor treats both alike.
+            let mut settings = window::Settings {
+                size,
+                min_size: Some(Size::new(TILE_MIN, 300.0)),
+                decorations: false,
+                transparent: true,
+                resizable: true,
+                resize_border: 8,
+                exit_on_close_request: true,
+                ..window::Settings::default()
+            };
+            #[cfg(target_os = "linux")]
+            {
+                settings.platform_specific.application_id = Self::APP_ID.to_string();
+            }
+            let (id, opened) = window::open(settings);
+            self.windows.insert(id, layout);
+            self.tasks.push(opened.discard());
+            id
+        }
+
+        /// Show a conversation in a window of its own, taking it from where it was.
+        fn open_in_new_window(&mut self, id: ConversationId) {
+            self.take_out(&id);
+            let current = self.layout();
+            let layout = WindowLayout {
+                sidebar_open: current.sidebar_open,
+                sidebar_width: current.sidebar_width,
+                size: current.size,
+                ..WindowLayout::default()
+            };
+            self.current = self.open_window(layout);
+            self.open(id, Placement::Right);
+        }
+
+        /// A window closed: its conversations' agents keep running. The main window's place
+        /// goes to another, so the app lives on while any window is open.
+        fn window_closed(&mut self, w: window::Id) {
+            if !self.windows.contains_key(&w) {
+                return;
+            }
+            if w == self.main_window() {
+                let Some(next) = self.windows.keys().find(|id| **id != w).copied() else {
+                    self.persist();
+                    std::process::exit(0)
+                };
+                self.core.set_main_window_id(Some(next));
+            }
+            let layout = self.windows.remove(&w).expect("checked above");
+            if self.current == w {
+                self.current = self.main_window();
+            }
+            for tile in layout.tiles {
+                self.release(&tile.conversation);
+            }
             self.persist();
         }
 
@@ -1063,48 +1212,44 @@ mod app {
             self.cmd(Command::NewScratch { request });
         }
 
+        /// Reopen every window's tiles. A window whose conversations are all gone closes;
+        /// the main one shows another instead.
         fn restore_tiles(&mut self) {
-            let Some((tiles, focused)) = self.restore.take() else {
-                return;
-            };
-            self.current = self.main_window();
-            for tile in tiles {
-                if self.info(&tile.conversation).is_some() {
-                    self.open(tile.conversation, Placement::Right);
+            let main = self.main_window();
+            for (w, tiles, focused) in std::mem::take(&mut self.restore) {
+                self.current = w;
+                for tile in tiles {
+                    if self.info(&tile.conversation).is_some() {
+                        self.open(tile.conversation, Placement::Right);
+                    }
                 }
-            }
-            if self.layout().tiles.is_empty() {
-                let first = self.conversations.iter().find(|c| !c.archived);
+                let layout = self.layout_mut();
+                layout.focused = focused.min(layout.tiles.len().saturating_sub(1));
+                if !self.layout().tiles.is_empty() {
+                    continue;
+                }
+                if w != main {
+                    self.windows.remove(&w);
+                    self.tasks.push(window::close(w));
+                    continue;
+                }
+                let first = self
+                    .conversations
+                    .iter()
+                    .find(|c| !c.archived && self.tile_of(&c.id).is_none());
                 match first.map(|c| c.id.clone()) {
                     Some(id) => self.open(id, Placement::Right),
                     None => self.new_conversation(Placement::Right),
                 }
             }
-            let layout = self.layout_mut();
-            layout.focused = focused.min(layout.tiles.len().saturating_sub(1));
-            self.focus_composer = self.focused(self.current).cloned();
+            self.current = main;
+            self.focus_composer = self.focused(main).cloned();
         }
 
-        /// Takes a conversation out of its window. A window keeps at least one tile, so the
-        /// last one takes another conversation, or a new one.
+        /// Takes a conversation out of the windows, as archiving or deleting it does.
         fn untile(&mut self, id: &str) {
-            let Some((w, _)) = self.tile_of(id) else {
-                return;
-            };
-            self.current = w;
-            if self.layout().tiles.len() > 1 {
-                self.close(id);
-                return;
-            }
-            let next = self
-                .conversations
-                .iter()
-                .find(|c| c.id != id && !c.archived && self.tile_of(&c.id).is_none())
-                .map(|c| c.id.clone());
-            match next {
-                Some(next) => self.open(next, Placement::Focused),
-                None => self.new_conversation(Placement::Focused),
-            }
+            self.take_out(id);
+            self.persist();
         }
 
         /// Drops a deleted conversation everywhere it shows.
@@ -1258,6 +1403,18 @@ mod app {
                 window: main.size,
                 show_archived: self.show_archived,
                 drafts,
+                windows: {
+                    let mut others: Vec<_> = self
+                        .windows
+                        .iter()
+                        .filter(|(w, _)| **w != self.main_window())
+                        .collect();
+                    others.sort_by_key(|(w, _)| **w);
+                    others
+                        .into_iter()
+                        .map(|(_, layout)| layout.saved())
+                        .collect()
+                },
             }
             .save();
         }
@@ -1459,7 +1616,7 @@ mod app {
             let (archived, active): (Vec<&ConversationInfo>, Vec<&ConversationInfo>) =
                 self.conversations.iter().partition(|c| c.archived);
             let mut list: Vec<Element<Message>> =
-                active.iter().map(|c| self.conversation_row(c)).collect();
+                active.iter().map(|c| self.conversation_row(w, c)).collect();
             if !archived.is_empty() {
                 let chevron = if self.show_archived {
                     "go-down-symbolic"
@@ -1473,7 +1630,7 @@ mod app {
                         .into(),
                 );
                 if self.show_archived {
-                    list.extend(archived.iter().map(|c| self.conversation_row(c)));
+                    list.extend(archived.iter().map(|c| self.conversation_row(w, c)));
                 }
             }
 
@@ -1518,7 +1675,11 @@ mod app {
         }
 
         /// A conversation in the sidebar, with its right-click menu.
-        fn conversation_row<'a>(&'a self, c: &'a ConversationInfo) -> Element<'a, Message> {
+        fn conversation_row<'a>(
+            &'a self,
+            w: window::Id,
+            c: &'a ConversationInfo,
+        ) -> Element<'a, Message> {
             if self.renaming(&c.id, TitleAt::Sidebar) {
                 return widget::container(self.rename_input(Length::Fill))
                     .padding([2, 4])
@@ -1554,6 +1715,7 @@ mod app {
             let id = || c.id.clone();
             let menu = vec![
                 menu_item("Open in new tile", Message::OpenTile(id())),
+                menu_item("Open in new window", Message::OpenWindow(id())),
                 menu_item("Rename", Message::StartRename(id(), TitleAt::Sidebar)),
                 if c.archived {
                     menu_item("Unarchive", Message::Archive(id(), false))
@@ -1562,7 +1724,9 @@ mod app {
                 },
                 menu_item("Delete…", Message::AskDelete(id())),
             ];
+            // Its popup opens over this window; by default it would over the first one.
             widget::context_menu(item, Some(menu))
+                .window_id(w)
                 .on_surface_action(Message::Surface)
                 .into()
         }
@@ -1812,8 +1976,13 @@ mod app {
             if i + 1 < self.window(w).tiles.len() {
                 menu.push(menu_item("Move right", Message::Move(id.clone(), 1)));
             }
+            menu.push(menu_item(
+                "Move to new window",
+                Message::OpenWindow(id.clone()),
+            ));
             menu.push(menu_item("Close", Message::Close(id.clone())));
             widget::context_menu(header, Some(menu))
+                .window_id(w)
                 .on_surface_action(Message::Surface)
                 .into()
         }
@@ -2857,12 +3026,18 @@ mod app {
                 deleting: None,
                 show_archived: ui.show_archived,
                 drafts: ui.drafts,
-                restore: Some((ui.tiles, ui.focused)),
+                restore: vec![(main, ui.tiles.clone(), ui.focused)],
                 focus_composer: None,
                 quota: None,
                 minutes: 0,
             };
-            (app, Task::none())
+            let mut app = app;
+            for saved in &ui.windows {
+                let w = app.open_window(WindowLayout::restored(saved));
+                app.restore.push((w, saved.tiles.clone(), saved.focused));
+            }
+            let tasks = std::mem::take(&mut app.tasks);
+            (app, Task::batch(tasks))
         }
 
         fn subscription(&self) -> Subscription<Message> {
@@ -3009,6 +3184,12 @@ mod app {
                     self.layout_mut().page = Page::Chat;
                     self.open(id, Placement::Right);
                 }
+                Message::OpenWindow(id) => self.open_in_new_window(id),
+                Message::WindowDrag => return window::drag(self.current),
+                Message::WindowMaximize => return window::toggle_maximize(self.current),
+                Message::WindowMinimize => return window::minimize(self.current, true),
+                Message::CloseWindow => return window::close(self.current),
+                Message::WindowClosed(w) => self.window_closed(w),
                 Message::Focus(id) => {
                     self.selection = None;
                     self.focus(&id);
@@ -3067,7 +3248,7 @@ mod app {
                     }
                 }
                 Message::CancelRename => self.renaming = None,
-                Message::AskDelete(id) => self.deleting = Some(id),
+                Message::AskDelete(id) => self.deleting = Some((self.current, id)),
                 Message::Archive(id, archived) => {
                     if let Some(info) = self.conversations.iter_mut().find(|c| c.id == id) {
                         info.archived = archived;
@@ -3083,7 +3264,7 @@ mod app {
                 }
                 Message::CancelDelete => self.deleting = None,
                 Message::ConfirmDelete => {
-                    if let Some(id) = self.deleting.take() {
+                    if let Some((_, id)) = self.deleting.take() {
                         self.forget(&id);
                         self.cmd(Command::Delete { id });
                     }
@@ -3288,27 +3469,9 @@ mod app {
             ]
         }
 
-        /// With several tiles each names its own conversation, so the window names none.
         fn header_center(&self) -> Vec<Element<'_, Message>> {
             let main = self.main_window();
-            let layout = self.window(main);
-            let title: Option<Element<Message>> = match layout.page {
-                Page::Settings => Some(widget::text::heading("Settings").into()),
-                Page::Chat if layout.tiles.len() == 1 => self.focused(main).map(|id| {
-                    if self.renaming(id, TitleAt::Header) {
-                        self.rename_input(Length::Fixed(360.0))
-                    } else {
-                        let title = self
-                            .info(id)
-                            .map_or("New conversation", |c| c.title.as_str());
-                        widget::container(self.title_button(id, title))
-                            .max_width(480.0)
-                            .into()
-                    }
-                }),
-                Page::Chat => None,
-            };
-            title
+            self.header_center_of(main)
                 .into_iter()
                 .map(|e| e.map(move |message| Message::In(main, Box::new(message))))
                 .collect()
@@ -3322,20 +3485,110 @@ mod app {
                 .collect()
         }
 
+        /// The window with the header bar libcosmic does not draw for it, and its frame.
+        fn view_window(&self, id: window::Id) -> Element<'_, Message> {
+            if !self.windows.contains_key(&id) {
+                return widget::space::horizontal().into();
+            }
+            let layout = self.window(id);
+            let mut header = widget::header_bar()
+                .focused(self.core.focus_chain().contains(&id))
+                .on_drag(Message::WindowDrag)
+                .on_double_click(Message::WindowMaximize)
+                .on_maximize(Message::WindowMaximize)
+                .on_minimize(Message::WindowMinimize)
+                .on_close(Message::CloseWindow)
+                .start(
+                    widget::nav_bar_toggle()
+                        .active(layout.sidebar_open)
+                        .on_toggle(Message::ToggleSidebar),
+                );
+            for element in self.header_center_of(id) {
+                header = header.center(element);
+            }
+            for element in self.header_end_of(id) {
+                header = header.end(element);
+            }
+            let mut content: Element<Message> =
+                widget::Column::with_children(vec![header.into(), self.window_view(id)]).into();
+            if let Some((_, deleting)) = self.deleting.as_ref().filter(|(w, _)| *w == id) {
+                content = widget::popover(content)
+                    .modal(true)
+                    .popup(self.delete_dialog(deleting))
+                    .into();
+            }
+            let framed: Element<Message> = widget::container(content)
+                .padding(1)
+                .class(cosmic::theme::Container::custom(|theme| {
+                    let cosmic = theme.cosmic();
+                    container::Style {
+                        background: Some(
+                            Color::from(cosmic.background(theme.transparent).base).into(),
+                        ),
+                        border: Border {
+                            color: cosmic.bg_divider().into(),
+                            width: 1.0,
+                            radius: cosmic
+                                .radius_s()
+                                .map(|r| if r < 4.0 { r } else { r + 4.0 })
+                                .into(),
+                        },
+                        ..container::Style::default()
+                    }
+                }))
+                .into();
+            framed.map(move |message| Message::In(id, Box::new(message)))
+        }
+
         fn dialog(&self) -> Option<Element<'_, Message>> {
-            self.deleting.as_deref().map(|id| self.delete_dialog(id))
+            let main = self.main_window();
+            let (_, id) = self.deleting.as_ref().filter(|(w, _)| *w == main)?;
+            Some(
+                self.delete_dialog(id)
+                    .map(move |message| Message::In(main, Box::new(message))),
+            )
         }
 
+        /// A window closed, a popup's surface too: only windows with a layout matter.
         fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Message> {
-            (self.core.main_window_id() == Some(id)).then_some(Message::Quit)
+            self.windows
+                .contains_key(&id)
+                .then_some(Message::WindowClosed(id))
         }
 
+        /// The main window's close button: the app ends only with its last window.
         fn on_app_exit(&mut self) -> Option<Message> {
-            Some(Message::Quit)
+            Some(if self.windows.len() > 1 {
+                Message::In(self.main_window(), Box::new(Message::CloseWindow))
+            } else {
+                Message::Quit
+            })
         }
     }
 
     impl ClaudoApp {
+        /// With several tiles each names its own conversation, so the window names none.
+        fn header_center_of(&self, w: window::Id) -> Vec<Element<'_, Message>> {
+            let layout = self.window(w);
+            let title: Option<Element<Message>> = match layout.page {
+                Page::Settings => Some(widget::text::heading("Settings").into()),
+                Page::Chat if layout.tiles.len() == 1 => self.focused(w).map(|id| {
+                    if self.renaming(id, TitleAt::Header) {
+                        self.rename_input(Length::Fixed(360.0))
+                    } else {
+                        let title = self
+                            .info(id)
+                            .map_or("New conversation", |c| c.title.as_str());
+                        widget::container(self.title_button(id, title))
+                            .max_width(480.0)
+                            .into()
+                    }
+                }),
+                Page::Chat => None,
+            };
+            title.into_iter().collect()
+        }
+
         /// A window's content under its header bar: sidebar, tiles or settings, Commands.
         fn window_view(&self, w: window::Id) -> Element<'_, Message> {
             let layout = self.window(w);

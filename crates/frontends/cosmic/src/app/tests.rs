@@ -256,7 +256,7 @@ fn two_tiles() -> ClaudoApp {
             ..AuthStatus::default()
         },
     });
-    app.restore = None;
+    app.restore.clear();
     app.layout_mut().size = Some((WINDOW.width, WINDOW.height));
     for (id, title) in [(ALPHA, "Alpha"), (BRAVO, "Bravo")] {
         app.conversations.push(ConversationInfo {
@@ -379,6 +379,17 @@ fn snapshots() {
         seven_day: Some(window(0.86, 61)),
     });
     Harness::new(app).snapshot("usage");
+
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::OpenWindow(BRAVO.to_string())),
+    ));
+    let (second, _) = app.tile_of(BRAVO).unwrap();
+    let mut h = Harness::new(app);
+    let window = h.app.view_window(second);
+    render_alone(&mut h.renderer, window, "second-window");
 }
 
 #[test]
@@ -721,6 +732,91 @@ fn the_commands_panel_resizes_from_its_edge_and_closes() {
     assert!(
         !h.app.layout_mut().commands_open,
         "dragged nearly shut, it closes"
+    );
+}
+
+#[test]
+fn a_conversation_moves_to_a_window_of_its_own() {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::OpenWindow(BRAVO.to_string())),
+    ));
+    assert_eq!(app.windows.len(), 2);
+    let (second, _) = app.tile_of(BRAVO).expect("Bravo is shown");
+    assert_ne!(second, main, "in the new window");
+    assert_eq!(
+        app.window(main).tiles.len(),
+        1,
+        "and no longer in the first"
+    );
+
+    // Its only tile closing closes it; the agent's view stays while a turn runs.
+    app.views.get_mut(BRAVO).unwrap().streaming = true;
+    let _ = app.update(Message::In(
+        second,
+        Box::new(Message::Close(BRAVO.to_string())),
+    ));
+    assert!(
+        !app.windows.contains_key(&second),
+        "its last tile closed the window"
+    );
+    assert!(
+        app.views.contains_key(BRAVO),
+        "a running agent keeps its view"
+    );
+
+    // Closing the main window hands its place to another.
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::OpenWindow(BRAVO.to_string())),
+    ));
+    let (second, _) = app.tile_of(BRAVO).unwrap();
+    let _ = app.update(Message::WindowClosed(main));
+    assert_eq!(
+        app.main_window(),
+        second,
+        "the other window becomes the main one"
+    );
+    assert!(app.tile_of(ALPHA).is_none() && app.tile_of(BRAVO).is_some());
+}
+
+#[test]
+fn windows_reopen_as_they_were_left() {
+    let _ = two_tiles();
+    let conversations = || {
+        [ALPHA, BRAVO].map(|id| ConversationInfo {
+            id: id.to_string(),
+            title: id.to_string(),
+            cwd: "/tmp".to_string(),
+            attached: false,
+            archived: false,
+            overrides: Overrides::default(),
+            context: Default::default(),
+        })
+    };
+    let saved = |id: &str| SavedWindow {
+        tiles: vec![Tile::new(id.to_string())],
+        ..SavedWindow::default()
+    };
+    let ui = UiState {
+        tiles: vec![Tile::new(ALPHA.to_string())],
+        windows: vec![saved(BRAVO), saved("gone")],
+        ..UiState::default()
+    };
+    let (mut app, _) = ClaudoApp::init(Core::default(), ui);
+    assert_eq!(app.windows.len(), 3, "both saved windows open at launch");
+    app.conversations = conversations().to_vec();
+    app.restore_tiles();
+
+    let main = app.main_window();
+    assert_eq!(app.tile_of(ALPHA).map(|(w, _)| w), Some(main));
+    assert!(app.tile_of(BRAVO).is_some_and(|(w, _)| w != main));
+    assert_eq!(
+        app.windows.len(),
+        2,
+        "the window whose conversation is gone closes"
     );
 }
 

@@ -205,6 +205,13 @@ and between direct siblings libcosmic finds a moved state by name but leaves it 
 index, so the named widget must sit below the reordered parent's direct child. Tiles do
 both through `Intercept`; `src/app/tests.rs` checks a dragged tile keeps its scroll.
 
+**Several windows.** Each window has a `WindowLayout` keyed by its `window::Id`; messages
+from a window's view and keys pressed in it arrive as `Message::In(window, ..)`. libcosmic
+draws its header bar and frame for the main window only, so `view_window` draws them for the
+others, and a context menu opens over the first window unless given `.window_id(w)`. Closing
+the main window hands its role to another with `core.set_main_window_id`, which keeps
+libcosmic from exiting.
+
 **Dev builds optimize dependencies** (`[profile.dev.package."*"] opt-level = 3`) because
 unoptimized text shaping made the cosmic frontend feel like it had a one second delay.
 
