@@ -185,6 +185,8 @@ mod app {
         commands_collapsed: bool,
         /// The conversation is being summarized.
         compacting: bool,
+        /// Its messages are on their way from the backend; until then it is not a new chat.
+        loading: bool,
         /// The highlighted command in the `/` menu.
         menu: usize,
         /// Escape closed the `/` menu for this command.
@@ -207,6 +209,7 @@ mod app {
                 commands_open: Default::default(),
                 commands_collapsed: false,
                 compacting: false,
+                loading: false,
                 menu: 0,
                 menu_closed: false,
             }
@@ -352,6 +355,7 @@ mod app {
         fn apply(&mut self, ev: ServerEvent) {
             match ev {
                 ServerEvent::History { items, .. } => {
+                    self.loading = false;
                     self.items = items.into_iter().map(Entry::from).collect();
                     self.assistant_idx = None;
                     self.commands_open.clear();
@@ -971,7 +975,9 @@ mod app {
         fn open(&mut self, id: ConversationId, placement: Placement) {
             if !self.views.contains_key(&id) {
                 let draft = self.drafts.remove(&id).unwrap_or_default();
-                self.views.insert(id.clone(), ConversationView::new(&draft));
+                let mut view = ConversationView::new(&draft);
+                view.loading = true;
+                self.views.insert(id.clone(), view);
                 self.cmd(Command::OpenConversation { id: id.clone() });
             }
             self.place(id, placement);
@@ -2471,7 +2477,7 @@ mod app {
                     ..Padding::ZERO
                 })
                 .into();
-            if view.items.is_empty() && !view.streaming {
+            if view.items.is_empty() && !view.streaming && !view.loading {
                 let greeting =
                     widget::text::title2("How can I help you today?").size(26.0 * self.zoom);
                 return widget::Column::with_children(vec![

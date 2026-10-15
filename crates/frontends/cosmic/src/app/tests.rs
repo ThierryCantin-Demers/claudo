@@ -1157,6 +1157,29 @@ fn cli_command(name: &str, hint: &str) -> CliCommand {
 }
 
 #[test]
+fn a_conversation_being_loaded_is_not_shown_as_a_new_chat() {
+    let mut app = two_tiles();
+    let charlie = "ccccc333-0000-4000-8000-000000000000";
+    app.conversations.push(ConversationInfo {
+        id: charlie.to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let _ = app.update(Message::Open(charlie.to_string()));
+    assert!(app.views[charlie].loading, "its messages are on their way");
+    let _ = app.update(Message::Events(vec![ServerEvent::History {
+        conversation_id: charlie.to_string(),
+        items: vec![Item::User("hi".to_string())],
+    }]));
+    assert!(!app.views[charlie].loading);
+    assert_eq!(app.views[charlie].items.len(), 1);
+}
+
+#[test]
 fn the_message_box_keeps_focus_while_typing() {
     for words in ["hello there", "/compact now"] {
         let mut app = two_tiles();
