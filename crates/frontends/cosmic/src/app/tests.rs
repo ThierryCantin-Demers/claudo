@@ -110,23 +110,22 @@ impl Harness {
     /// Renders the app's dialog alone, as libcosmic shows it over the window.
     fn snapshot_dialog(&mut self, name: &str) {
         let dialog = self.app.dialog().expect("a dialog");
-        let mut ui = UserInterface::build(dialog, WINDOW, Cache::default(), &mut self.renderer);
-        let theme = cosmic::theme::active();
-        let size = Size::new(WINDOW.width as u32, WINDOW.height as u32);
-        use cosmic::iced::theme::Base;
-        let base = theme.base();
-        ui.draw(
-            &mut self.renderer,
-            &theme,
-            &cosmic::iced::advanced::renderer::Style {
-                text_color: base.text_color,
-                icon_color: base.text_color,
-                scale_factor: 1.0,
-            },
-            mouse::Cursor::Unavailable,
+        render_alone(&mut self.renderer, dialog, name);
+    }
+
+    /// Renders the context drawer alone, as libcosmic shows it at the window's right.
+    fn snapshot_drawer(&mut self, name: &str) {
+        let drawer = self.app.context_drawer().expect("a drawer");
+        let drawer = cosmic::widget::ContextDrawer::new_inner(
+            drawer.title,
+            drawer.actions,
+            drawer.header,
+            drawer.footer,
+            drawer.content,
+            drawer.on_close,
+            480.0,
         );
-        let rgba = self.renderer.screenshot(size, 1.0, base.background_color);
-        write_png(name, size, &rgba);
+        render_alone(&mut self.renderer, drawer, name);
     }
 
     /// What Ctrl+C would copy.
@@ -174,6 +173,26 @@ impl Harness {
         found.sort_by(|a, b| a.0.total_cmp(&b.0));
         found.into_iter().map(|(_, y)| y).collect()
     }
+}
+
+fn render_alone(renderer: &mut cosmic::Renderer, element: Element<'_, Message>, name: &str) {
+    use cosmic::iced::theme::Base;
+    let mut ui = UserInterface::build(element, WINDOW, Cache::default(), renderer);
+    let theme = cosmic::theme::active();
+    let size = Size::new(WINDOW.width as u32, WINDOW.height as u32);
+    let base = theme.base();
+    ui.draw(
+        renderer,
+        &theme,
+        &cosmic::iced::advanced::renderer::Style {
+            text_color: base.text_color,
+            icon_color: base.text_color,
+            scale_factor: 1.0,
+        },
+        mouse::Cursor::Unavailable,
+    );
+    let rgba = renderer.screenshot(size, 1.0, base.background_color);
+    write_png(name, size, &rgba);
 }
 
 fn write_png(name: &str, size: Size<u32>, rgba: &[u8]) {
@@ -339,13 +358,25 @@ fn snapshots() {
             call_id: "t1".to_string(),
             name: "Bash".to_string(),
             summary: command.to_string(),
+            description: String::new(),
+            command: Some(command.to_string()),
             input: String::new(),
             result: None,
             is_error: false,
+            background: None,
         },
         scope: "gh issue create".to_string(),
     });
     Harness::new(app).snapshot("approval");
+
+    let mut app = with_commands();
+    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    let _ = app.update(Message::ShowCommands(true));
+    let idx = app.views[ALPHA].commands().nth(2).unwrap().0;
+    let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
+    let mut h = Harness::new(app);
+    h.snapshot_drawer("commands");
+    h.snapshot("commands-window");
 }
 
 #[test]
@@ -553,6 +584,64 @@ fn up_and_down_recall_sent_prompts() {
     assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "try again"));
     assert_eq!(view.draft.text(), "");
     assert_eq!(view.recalled, 0);
+}
+
+fn bash(id: &str, command: &str, description: &str) -> ToolCall {
+    ToolCall {
+        call_id: id.to_string(),
+        name: "Bash".to_string(),
+        summary: command.lines().next().unwrap_or_default().to_string(),
+        description: description.to_string(),
+        command: Some(command.to_string()),
+        input: String::new(),
+        result: None,
+        is_error: false,
+        background: None,
+    }
+}
+
+/// Alpha, mid-turn, with a command running in the foreground and one in the background,
+/// and two that ended.
+fn with_commands() -> ClaudoApp {
+    use claudo_protocol::{Background, TaskStatus};
+    let mut app = two_tiles();
+    let view = app.views.get_mut(ALPHA).expect("Alpha");
+    let mut built = bash("t1", "cargo build --release", "Build the release binary");
+    built.result = Some("   Compiling claudo v0.0.0\n    Finished `release` profile".to_string());
+    let mut failed = bash("t2", "cargo test -p claudo-core", "Run the core tests");
+    failed.result = Some("test result: FAILED. 9 passed; 1 failed".to_string());
+    failed.is_error = true;
+    let mut server = bash("t3", "cargo xtask daemon", "Serve the web client");
+    server.result = Some("Command running in background with ID: b1.".to_string());
+    server.background = Some(Background {
+        status: TaskStatus::Running,
+        output: None,
+    });
+    let running = bash("t4", "rg -n \"fn main\" crates", "Find the entry points");
+    for call in [built, failed, server, running] {
+        view.items.push(Entry::Tool { call, open: false });
+    }
+    view.streaming = true;
+    app
+}
+
+#[test]
+fn the_commands_drawer_lists_running_commands_first() {
+    let mut app = with_commands();
+    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    let view = &app.views[ALPHA];
+    assert_eq!(view.running_commands(), 2);
+    let order: Vec<&str> = view.commands().map(|(_, c)| c.call_id.as_str()).collect();
+    assert_eq!(order, ["t4", "t3", "t2", "t1"]);
+
+    let _ = app.update(Message::ShowCommands(true));
+    assert!(app.context_drawer().is_some());
+    let idx = app.views[ALPHA].commands().next().unwrap().0;
+    let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
+    assert!(app.views[ALPHA].commands_open.contains(&idx));
+
+    let _ = app.update(Message::ShowCommands(false));
+    assert!(!app.core.window.show_context);
 }
 
 #[test]

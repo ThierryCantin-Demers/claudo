@@ -120,6 +120,8 @@ Events consumed from the JSONL stream:
 | `control_request` / `can_use_tool` | a call waits for approval; answered with a `control_response` |
 | `command_lifecycle` | `state` `queued`/`started`/`completed` for the message with `command_uuid` |
 | `user` with `isReplay` | a message starting its turn; one from another agent has `origin.name` and `origin.body` |
+| `system` / `task_started` | a call moved to the background (`is_backgrounded`), by `tool_use_id` |
+| `system` / `task_notification` | a background call ended: `status`, `summary`, `output_file`; may arrive between turns |
 | `rate_limit_event` | `rate_limit_info.unifiedWindows` five-hour and seven-day `utilization` and `resetsAt` |
 | `result` | turn complete; `usage` and `modelUsage[*].contextWindow` for context display |
 
@@ -212,6 +214,10 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
   turns itself, for another agent's message, and queues the client's messages behind
   them; those turns go to the `incoming` callback given at spawn, which the backend
   forwards like any other, starting with `Incoming`.
+- **A background command's end starts a turn of its own.** The CLI tells the model in
+  a turn that echoes no message, so the engine opens it with a `Notice` carrying the
+  CLI's summary. The transcript keeps that message as a `<task-notification>` prompt
+  (`origin.kind: "task-notification"`), which the loader turns back into the notice.
 - **Agents are named after their conversation's title.** That is the name other
   sessions see in `ListAgents` and message with `SendMessage`. The `initialize` request
   makes the process visible at once instead of after its first turn, and a title

@@ -298,6 +298,17 @@ impl ClaudoApp {
                     }
                 }
 
+                ServerEvent::Notice {
+                    conversation_id,
+                    text,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.assistant_idx = None;
+                        self.streaming = true;
+                        self.items.push(Item::Notice(text));
+                    }
+                }
+
                 ServerEvent::Delta {
                     conversation_id,
                     text,
@@ -331,6 +342,21 @@ impl ClaudoApp {
                     }
                 }
 
+                ServerEvent::Background {
+                    conversation_id,
+                    call_id,
+                    background,
+                } => {
+                    if self.is_current(&conversation_id)
+                        && let Some(Item::Tool(tc)) = self
+                            .items
+                            .iter_mut()
+                            .rev()
+                            .find(|it| matches!(it, Item::Tool(t) if t.call_id == call_id))
+                    {
+                        tc.background = Some(background);
+                    }
+                }
                 ServerEvent::ToolResult {
                     conversation_id,
                     call_id,
@@ -894,6 +920,9 @@ impl ClaudoApp {
                                     });
                             }
                             Item::Tool(tc) => tool_card(ui, &tc),
+                            Item::Notice(text) => {
+                                ui.weak(text);
+                            }
                         }
                     }
                     if let Some(err) = &self.error {

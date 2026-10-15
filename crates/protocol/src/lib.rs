@@ -175,6 +175,8 @@ pub enum Item {
         from: String,
         text: String,
     },
+    /// What started a turn Claude Code began by itself, such as a background command ending.
+    Notice(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,10 +186,36 @@ pub struct ToolCall {
     /// One line naming what the call acts on (a command, a path, a pattern), or empty.
     #[serde(default)]
     pub summary: String,
+    /// What the call says it does, when its tool asks for that (Bash does).
+    #[serde(default)]
+    pub description: String,
+    /// The whole shell command, for a tool that runs one.
+    #[serde(default)]
+    pub command: Option<String>,
     /// The tool's input as pretty-printed JSON.
     pub input: String,
     pub result: Option<String>,
     pub is_error: bool,
+    /// Set when the call runs in the background: its result only says it started.
+    #[serde(default)]
+    pub background: Option<Background>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Background {
+    pub status: TaskStatus,
+    /// What it printed, once it ended.
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+    /// No end was recorded: it ended with the process that ran it.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +407,17 @@ pub enum ServerEvent {
         call: ToolCall,
         /// What `Decision::AllowAlways` stops asking about, such as `gh issue create`.
         scope: String,
+    },
+    /// A turn Claude Code began by itself starts, for this reason.
+    Notice {
+        conversation_id: ConversationId,
+        text: String,
+    },
+    /// A background call started or ended, possibly between turns.
+    Background {
+        conversation_id: ConversationId,
+        call_id: CallId,
+        background: Background,
     },
     Completed {
         conversation_id: ConversationId,

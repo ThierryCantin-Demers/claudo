@@ -78,6 +78,8 @@ mod app {
             from: String,
             text: String,
         },
+        /// Why a turn Claude Code began by itself started.
+        Notice(String),
         Thinking {
             text: String,
             open: bool,
@@ -130,6 +132,7 @@ mod app {
             match item {
                 Item::User(text) => Entry::User(text),
                 Item::Incoming { from, text } => Entry::Incoming { from, text },
+                Item::Notice(text) => Entry::Notice(text),
                 Item::Assistant(text) => Entry::Reply(Box::new(Reply::complete(text))),
                 Item::Thinking(text) => Entry::Thinking { text, open: false },
                 Item::Tool(call) => Entry::Tool { call, open: false },
@@ -163,6 +166,8 @@ mod app {
         recalled: usize,
         /// The user's own draft while a recalled prompt replaces it.
         stash: String,
+        /// Items whose row in the Commands drawer is expanded.
+        commands_open: std::collections::HashSet<usize>,
     }
 
     impl ConversationView {
@@ -178,6 +183,7 @@ mod app {
                 partial: false,
                 recalled: 0,
                 stash: String::new(),
+                commands_open: Default::default(),
             }
         }
 
@@ -320,12 +326,30 @@ mod app {
                 ServerEvent::History { items, .. } => {
                     self.items = items.into_iter().map(Entry::from).collect();
                     self.assistant_idx = None;
+                    self.commands_open.clear();
+                }
+                ServerEvent::Background {
+                    call_id,
+                    background,
+                    ..
+                } => {
+                    if let Some(Entry::Tool { call, .. }) = self.items.iter_mut().rev().find(
+                        |entry| matches!(entry, Entry::Tool { call, .. } if call.call_id == call_id),
+                    ) {
+                        call.background = Some(background);
+                    }
                 }
                 ServerEvent::Incoming { from, text, .. } => {
                     self.finish_reply();
                     self.error = None;
                     self.streaming = true;
                     self.items.push(Entry::Incoming { from, text });
+                }
+                ServerEvent::Notice { text, .. } => {
+                    self.finish_reply();
+                    self.error = None;
+                    self.streaming = true;
+                    self.items.push(Entry::Notice(text));
                 }
                 ServerEvent::Delta { text, .. } => self.push_assistant(&text),
                 ServerEvent::ThinkingDelta { text, .. } => {
@@ -583,6 +607,10 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        /// Open or close the Commands drawer.
+        ShowCommands(bool),
+        /// Expand or collapse a command in the Commands drawer.
+        ToggleCommand(ConversationId, usize),
         /// Up or Down at the message box's edge: an earlier or later prompt.
         Recall {
             conversation: ConversationId,
@@ -1165,6 +1193,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Notice {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Delta {
                     ref conversation_id,
                     ..
@@ -1185,6 +1217,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Background {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Completed {
                     ref conversation_id,
                     ..
@@ -1200,7 +1236,11 @@ mod app {
                     );
                     // A turn in a conversation no tile shows still gets a view, which
                     // the sidebar marks as working.
-                    if matches!(ev, ServerEvent::Incoming { .. }) && !self.views.contains_key(&id) {
+                    if matches!(
+                        ev,
+                        ServerEvent::Incoming { .. } | ServerEvent::Notice { .. }
+                    ) && !self.views.contains_key(&id)
+                    {
                         let draft = self.drafts.remove(&id).unwrap_or_default();
                         let mut view = ConversationView::new(&draft);
                         view.partial = true;
@@ -1874,6 +1914,7 @@ mod app {
                         texts.text(text.as_str(), size, (idx, 0)).shrink(),
                         self.zoom,
                     ),
+                    Entry::Notice(text) => notice_row(text, size),
                     Entry::Incoming { from, text } => incoming_card(
                         from,
                         texts.text(text.as_str(), size, (idx, 0)),
@@ -1899,9 +1940,13 @@ mod app {
                         });
                         thinking_row(toggle(), text, body, live.filter(|_| last), size)
                     }
-                    Entry::Tool { call, open } => {
-                        tool_row(toggle(), call, open.then_some((texts, idx)), size)
-                    }
+                    Entry::Tool { call, open } => tool_row(
+                        toggle(),
+                        call,
+                        open.then_some((texts, idx)),
+                        commands::call_status(call, view.streaming, self.pulse, size * 0.85),
+                        size,
+                    ),
                 });
             }
             if let Some(label) = view.activity() {
@@ -2268,6 +2313,18 @@ mod app {
 
     /// Another agent's message: an outlined card on Claude's side, so it never passes
     /// for one the user wrote.
+    fn notice_row(text: &str, size: f32) -> Element<'_, Message> {
+        widget::Row::with_children(vec![
+            widget::icon::from_name("utilities-terminal-symbolic")
+                .size(14)
+                .into(),
+            widget::text(text).size(size * 0.85).class(dim()).into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
     fn incoming_card<'a>(
         from: &'a str,
         text: Selectable<'a>,
@@ -2311,6 +2368,7 @@ mod app {
         on_toggle: Message,
         call: &'a ToolCall,
         open: Option<(Texts<'a>, usize)>,
+        status: Element<'a, Message>,
         size: f32,
     ) -> Element<'a, Message> {
         let small = size * 0.85;
@@ -2318,16 +2376,6 @@ mod app {
             "go-down-symbolic"
         } else {
             "go-next-symbolic"
-        };
-        let status: Element<Message> = match (&call.result, call.is_error) {
-            (None, _) => widget::text("running").size(small).class(dim()).into(),
-            (Some(_), true) => widget::text("error")
-                .size(small)
-                .class(destructive())
-                .into(),
-            (Some(_), false) => widget::icon::from_name("object-select-symbolic")
-                .size(16)
-                .into(),
         };
         let header = widget::Row::with_children(vec![
             widget::icon::from_name(chevron).size(16).into(),
@@ -2357,6 +2405,15 @@ mod app {
         let mut details = vec![tool_text(texts, (idx, 0), "Input", &call.input, small)];
         if let Some(result) = &call.result {
             details.push(tool_text(texts, (idx, 1), "Output", result, small));
+        }
+        if let Some(output) = call.background.as_ref().and_then(|b| b.output.as_deref()) {
+            details.push(tool_text(
+                texts,
+                (idx, 2),
+                "Output when it ended",
+                output,
+                small,
+            ));
         }
         let details = widget::container(widget::Column::with_children(details).spacing(10))
             .padding(12)
@@ -2742,6 +2799,14 @@ mod app {
                     self.focus(&id);
                     self.send(id);
                 }
+                Message::ShowCommands(show) => self.core.window.show_context = show,
+                Message::ToggleCommand(id, idx) => {
+                    if let Some(view) = self.views.get_mut(&id)
+                        && !view.commands_open.remove(&idx)
+                    {
+                        view.commands_open.insert(idx);
+                    }
+                }
                 Message::Recall {
                     conversation,
                     older,
@@ -3090,14 +3155,26 @@ mod app {
         }
 
         fn header_end(&self) -> Vec<Element<'_, Message>> {
-            if self.page != Page::Chat || self.layout.tiles.len() != 1 {
+            if self.page != Page::Chat {
                 return Vec::new();
             }
-            self.focused_info()
+            let context = self
+                .focused_info()
+                .filter(|_| self.layout.tiles.len() == 1)
                 .and_then(|c| context_label(&c.context))
-                .map(|label| widget::text(label).size(12.0).class(dim()).into())
+                .map(|label| widget::text(label).size(12.0).class(dim()).into());
+            context
                 .into_iter()
+                .chain([self.commands_button()])
                 .collect()
+        }
+
+        fn context_drawer(
+            &self,
+        ) -> Option<cosmic::app::context_drawer::ContextDrawer<'_, Message>> {
+            (self.page == Page::Chat)
+                .then(|| self.commands_drawer())
+                .flatten()
         }
 
         fn dialog(&self) -> Option<Element<'_, Message>> {
@@ -3247,6 +3324,7 @@ mod app {
         .then_some(Message::DragEnd)
     }
 
+    mod commands;
     mod selectable;
     #[cfg(test)]
     mod tests;

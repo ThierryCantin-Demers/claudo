@@ -9,12 +9,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use claudo_protocol::{ContextUsage, Item, Overrides};
+use claudo_protocol::{Background, ContextUsage, Item, Overrides, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::engine::cli::{incoming, tool_call};
+use crate::engine::cli::{backgrounded, incoming, task_notification, tool_call};
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
 pub fn data_root() -> PathBuf {
@@ -302,7 +302,15 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                 items.push(Item::Incoming { from, text });
             }
             Some("user") => match v.pointer("/message/content") {
-                Some(Value::String(s)) => items.push(Item::User(s.clone())),
+                Some(Value::String(s)) => match task_notification(s) {
+                    Some(end) => {
+                        if let Some(call) = call_mut(&mut items, &end.call_id) {
+                            call.background = Some(end.background);
+                        }
+                        items.push(Item::Notice(end.summary));
+                    }
+                    None => items.push(Item::User(s.clone())),
+                },
                 Some(Value::Array(arr)) => {
                     for b in arr {
                         match b.get("type").and_then(Value::as_str) {
@@ -354,12 +362,21 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
     (items, ai_title)
 }
 
+fn call_mut<'a>(items: &'a mut [Item], call_id: &str) -> Option<&'a mut claudo_protocol::ToolCall> {
+    items.iter_mut().rev().find_map(|item| match item {
+        Item::Tool(call) if call.call_id == call_id => Some(call),
+        _ => None,
+    })
+}
+
 fn attach_result(items: &mut [Item], call_id: &str, result: String, is_error: bool) {
-    if let Some(Item::Tool(tc)) = items
-        .iter_mut()
-        .rev()
-        .find(|it| matches!(it, Item::Tool(t) if t.call_id == call_id))
-    {
+    if let Some(tc) = call_mut(items, call_id) {
+        if backgrounded(&result) {
+            tc.background = Some(Background {
+                status: TaskStatus::Unknown,
+                output: None,
+            });
+        }
         tc.result = Some(result);
         tc.is_error = is_error;
     }

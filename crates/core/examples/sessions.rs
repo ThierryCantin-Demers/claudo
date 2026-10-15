@@ -50,6 +50,7 @@ fn main() {
         match it {
             Item::User(t) => println!("  USER: {}", clip(t)),
             Item::Incoming { from, text } => println!("  FROM {from}: {}", clip(text)),
+            Item::Notice(text) => println!("  NOTICE {}", clip(text)),
             Item::Thinking(t) => println!("  THINKING: {}", clip(t)),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
             Item::Tool(tc) => println!(

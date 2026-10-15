@@ -348,6 +348,18 @@ impl Forward {
                 conversation_id,
                 call,
             }),
+            EngineEvent::Notice { text } => self.emit(ServerEvent::Notice {
+                conversation_id,
+                text,
+            }),
+            EngineEvent::Background {
+                call_id,
+                background,
+            } => self.emit(ServerEvent::Background {
+                conversation_id,
+                call_id,
+                background,
+            }),
             EngineEvent::ToolResult {
                 call_id,
                 content,

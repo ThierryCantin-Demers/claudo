@@ -13,7 +13,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use claudo_protocol::{ContextUsage, Decision, ModelOption, Profile, Quota, QuotaWindow, ToolCall};
+use claudo_protocol::{
+    Background, ContextUsage, Decision, ModelOption, Profile, Quota, QuotaWindow, TaskStatus,
+    ToolCall,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -97,6 +100,13 @@ pub enum EngineEvent {
         call: ToolCall,
         scope: String,
     },
+    /// A turn the CLI began by itself starts, for this reason.
+    Notice { text: String },
+    /// A call running in the background started or ended. Its end can come between turns.
+    Background {
+        call_id: String,
+        background: Background,
+    },
     /// A tool returned. In `Safe`/`AcceptEdits` a denial arrives here as an error.
     ToolResult {
         call_id: String,
@@ -165,6 +175,9 @@ struct Turns {
     /// Where the running turn's events go; `None` between turns.
     running: Option<Route>,
     exited: bool,
+    /// The CLI reports which message each turn is for, so a turn starting without one is
+    /// its own, not the next queued message's.
+    reports_ids: bool,
 }
 
 enum Route {
@@ -261,15 +274,22 @@ impl Session {
         let reader = shared.clone();
         let bypass = config.profile == Profile::FullAuto;
         thread::spawn(move || {
+            // The CLI starts a turn of its own for background commands that ended, and
+            // echoes no message for it, so it opens with these.
+            let mut notices: Vec<String> = Vec::new();
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 reader.touch();
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
                 if let Some(message) = started_message(&v) {
-                    reader.turns.lock().unwrap().start(message);
+                    let mut turns = reader.turns.lock().unwrap();
+                    turns.reports_ids = true;
+                    turns.start(message);
+                    notices.clear();
                     continue;
                 }
+                notices.extend(ended_notice(&v));
                 if v.get("type").and_then(Value::as_str) == Some("control_cancel_request") {
                     if let Some(id) = v.get("request_id").and_then(Value::as_str) {
                         reader.approvals.lock().unwrap().remove(id);
@@ -296,7 +316,7 @@ impl Session {
                             );
                             vec![EngineEvent::ApprovalNeeded {
                                 request_id,
-                                call,
+                                call: *call,
                                 scope,
                             }]
                         }
@@ -318,8 +338,22 @@ impl Session {
                         && (incoming || matches!(ev, EngineEvent::Started { .. }))
                     {
                         // A CLI that reports no message ids: turns run in the order sent.
-                        let next = turns.queued.front().map(|(id, _)| id.clone());
-                        turns.start(next.as_deref().filter(|_| !incoming));
+                        let next = turns
+                            .queued
+                            .front()
+                            .map(|(id, _)| id.clone())
+                            .filter(|_| !turns.reports_ids && !incoming);
+                        turns.start(next.as_deref());
+                        if !incoming
+                            && matches!(turns.running, Some(Route::Incoming))
+                            && !notices.is_empty()
+                        {
+                            let notice = EngineEvent::Notice {
+                                text: notices.join("\n"),
+                            };
+                            reader.route(&turns, notice);
+                        }
+                        notices.clear();
                     }
                     reader.route(&turns, ev);
                     if completed {
@@ -500,7 +534,11 @@ impl Shared {
                     incoming(ev);
                 }
             }
-            None => {}
+            None => {
+                if let (EngineEvent::Background { .. }, Some(incoming)) = (&ev, &self.incoming) {
+                    incoming(ev);
+                }
+            }
         }
     }
 
@@ -517,7 +555,7 @@ impl Shared {
 enum Prompt {
     Ask {
         request_id: String,
-        call: ToolCall,
+        call: Box<ToolCall>,
         input: Value,
         /// What allowing it always covers: the rule it matched, or the call itself when
         /// something besides a rule may also have asked.
@@ -565,13 +603,16 @@ fn permission_prompt(v: &Value, bypass: bool) -> Option<Prompt> {
         call_id: field("tool_use_id").unwrap_or("").to_string(),
         name: tool,
         summary: summarize(&input),
+        description: String::new(),
+        command: None,
         input: serde_json::to_string_pretty(&input).unwrap_or_default(),
         result: None,
         is_error: false,
+        background: None,
     };
     Some(Prompt::Ask {
         request_id,
-        call,
+        call: Box::new(call),
         input,
         scope,
     })
@@ -606,9 +647,19 @@ fn started_message(v: &Value) -> Option<Option<&str>> {
 
 /// Who sent a message the client did not, and what it says, from its stream-json
 /// echo or its transcript line. The client's own messages carry no `origin`.
+/// The CLI's one line about a background command that ended.
+fn ended_notice(v: &Value) -> Option<String> {
+    (v.get("subtype")?.as_str()? == "task_notification")
+        .then(|| v.get("summary")?.as_str().map(str::to_owned))
+        .flatten()
+}
+
 pub(crate) fn incoming(v: &Value) -> Option<(String, String)> {
     let origin = v.get("origin")?;
     let field = |key| origin.get(key).and_then(Value::as_str);
+    if field("kind") == Some("task-notification") {
+        return None;
+    }
     let from = field("name").or(field("kind")).unwrap_or("another session");
     let text = match (field("body"), v.pointer("/message/content")) {
         (Some(body), _) => body.to_string(),
@@ -706,6 +757,8 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             })
             .collect(),
 
+        "system" => background_task(v).into_iter().collect(),
+
         "rate_limit_event" => quota(v).map(EngineEvent::Quota).into_iter().collect(),
 
         "result" => vec![EngineEvent::Completed {
@@ -727,19 +780,99 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
     }
 }
 
+/// A background call starting (`task_started`) or ending (`task_notification`).
+fn background_task(v: &Value) -> Option<EngineEvent> {
+    let field = |key| v.get(key).and_then(Value::as_str);
+    let background = match field("subtype")? {
+        "task_started" if v.get("is_backgrounded").and_then(Value::as_bool) == Some(true) => {
+            Background {
+                status: TaskStatus::Running,
+                output: None,
+            }
+        }
+        "task_notification" => ended(field("status")?, field("output_file")),
+        _ => return None,
+    };
+    Some(EngineEvent::Background {
+        call_id: field("tool_use_id")?.to_string(),
+        background,
+    })
+}
+
+/// A background task's end, from the message the CLI gives the model when one ends, which
+/// the transcript keeps as a user prompt.
+pub(crate) struct TaskEnd {
+    pub call_id: String,
+    pub background: Background,
+    pub summary: String,
+}
+
+pub(crate) fn task_notification(text: &str) -> Option<TaskEnd> {
+    if !text.trim_start().starts_with("<task-notification>") {
+        return None;
+    }
+    Some(TaskEnd {
+        call_id: xml_tag(text, "tool-use-id")?.to_string(),
+        background: ended(xml_tag(text, "status")?, xml_tag(text, "output-file")),
+        summary: xml_tag(text, "summary")
+            .unwrap_or("A background command ended")
+            .to_string(),
+    })
+}
+
+fn xml_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let start = text.find(&format!("<{name}>"))? + name.len() + 2;
+    let end = start + text[start..].find(&format!("</{name}>"))?;
+    Some(&text[start..end])
+}
+
+/// Whether a tool result is the one a call moved to the background gets.
+pub(crate) fn backgrounded(result: &str) -> bool {
+    result.starts_with("Command running in background with ID:")
+}
+
+const TASK_OUTPUT_BYTES: u64 = 64 * 1024;
+
+fn ended(status: &str, output_file: Option<&str>) -> Background {
+    Background {
+        status: match status {
+            "completed" => TaskStatus::Completed,
+            "killed" | "stopped" => TaskStatus::Stopped,
+            _ => TaskStatus::Failed,
+        },
+        output: output_file.and_then(task_output),
+    }
+}
+
+/// The end of a task's output file; the CLI's temporary files may be gone already.
+fn task_output(path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TASK_OUTPUT_BYTES)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// A `tool_use` block, from stream-json or a transcript, before its result arrives.
 pub(crate) fn tool_call(block: &Value) -> ToolCall {
     let field = |key| block.get(key).and_then(Value::as_str);
     let input = block.get("input");
+    let input_field = |key| input.and_then(|i| i.get(key)).and_then(Value::as_str);
     ToolCall {
         call_id: field("id").unwrap_or("").to_string(),
         name: field("name").unwrap_or("tool").to_string(),
         summary: input.map(summarize).unwrap_or_default(),
+        description: input_field("description").unwrap_or("").to_string(),
+        command: input_field("command").map(str::to_owned),
         input: input
             .map(|i| serde_json::to_string_pretty(i).unwrap_or_default())
             .unwrap_or_default(),
         result: None,
         is_error: false,
+        background: None,
     }
 }
 
@@ -1012,6 +1145,44 @@ mod tests {
         assert!(ask_rule_in("cd /x\ngh issue create | cat").is_some());
         assert!(ask_rule_in("cd /x && gh issue list").is_none());
         assert!(ask_rule_in("gh issue created").is_none());
+    }
+
+    #[test]
+    fn background_tasks_start_and_end() {
+        let started = line(
+            r#"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"t1","is_backgrounded":true,"task_type":"local_bash"}"#,
+        );
+        match &decode(&started)[..] {
+            [
+                EngineEvent::Background {
+                    call_id,
+                    background,
+                },
+            ] => {
+                assert_eq!(call_id, "t1");
+                assert_eq!(background.status, TaskStatus::Running);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let ended = line(
+            r#"{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"t1","status":"failed","output_file":"/nonexistent/b1.output"}"#,
+        );
+        match &decode(&ended)[..] {
+            [EngineEvent::Background { background, .. }] => {
+                assert_eq!(background.status, TaskStatus::Failed);
+                assert_eq!(background.output, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let end = task_notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/nonexistent</output-file>\n<status>completed</status>\n<summary>It ended</summary>\n</task-notification>",
+        )
+        .unwrap();
+        assert_eq!(end.call_id, "t1");
+        assert_eq!(end.background.status, TaskStatus::Completed);
+        assert_eq!(end.summary, "It ended");
+        assert!(task_notification("please read <task-notification> docs").is_none());
     }
 
     #[test]

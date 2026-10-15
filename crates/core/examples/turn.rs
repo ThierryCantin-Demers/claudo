@@ -46,7 +46,11 @@ fn turn(
             EngineEvent::ThinkingDelta { text: t } => println!("  [thinking: {}]", t.trim()),
             EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
             EngineEvent::Quota(_) => {}
+            EngineEvent::Background { background, .. } => {
+                println!("  [background: {:?}]", background.status)
+            }
             EngineEvent::Incoming { from, text } => println!("  [from {from}: {text}]"),
+            EngineEvent::Notice { text } => println!("  [{text}]"),
             EngineEvent::ApprovalNeeded { call, .. } => {
                 println!("  [needs approval: {}]", call.summary)
             }
