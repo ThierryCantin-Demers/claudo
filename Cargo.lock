@@ -1032,6 +1032,7 @@ dependencies = [
  "iced_core",
  "iced_debug",
  "libcosmic",
+ "png 0.17.16",
  "serde",
 ]
 

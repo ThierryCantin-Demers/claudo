@@ -38,6 +38,8 @@ mod app {
 
     use cosmic::iced::advanced::subscription::{EventStream, Hasher, Recipe, from_recipe};
     use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit};
+    use cosmic::iced::advanced::widget::{Operation, Tree, tree};
+    use cosmic::iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
     use cosmic::iced::futures::stream::BoxStream;
     use cosmic::iced::futures::{SinkExt, Stream, StreamExt};
     use cosmic::iced::widget::{container, text};
@@ -513,8 +515,6 @@ mod app {
         StartSidebarDrag,
         StartResize(usize),
         StartMove(ConversationId),
-        /// A left press with Ctrl held, at this window x coordinate.
-        CtrlPress(f32),
         DragTo(f32),
         /// The cursor in the tile row while a tile is dragged.
         DragTile(Point),
@@ -764,26 +764,13 @@ mod app {
                 .collect()
         }
 
-        /// The tile under window x coordinate `x`.
-        fn tile_at(&self, x: f32) -> Option<usize> {
-            let (start, room) = self.tile_room();
-            let total = self.total_share();
-            let mut edge = start;
-            self.layout
-                .tiles
-                .iter()
-                .position(|t| {
-                    edge +=
-                        room.map_or(self.tile_min(), |room| t.share / total * room) + HANDLE_WIDTH;
-                    x < edge
-                })
-                .filter(|_| x >= start)
-        }
-
         fn start_move(&mut self, from: usize) {
             let Some(id) = self.layout.tiles.get(from).map(|t| t.conversation.clone()) else {
                 return;
             };
+            if self.page != Page::Chat || self.layout.tiles.len() < 2 {
+                return;
+            }
             self.layout.focused = from;
             self.focus_composer = Some(id);
             self.drag = Some(Drag::Tile {
@@ -1313,10 +1300,16 @@ mod app {
             } else {
                 body
             };
-            // The id is on the row's direct child, so the tile's scroll and editor state
-            // move with it when tiles reorder.
-            widget::container(widget::mouse_area(content).on_press(Message::Focus(id.clone())))
-                .id(widget::Id::new(format!("tile-{id}")))
+            // Named for the conversation, so the tile's scroll and editor state move with
+            // it when tiles reorder.
+            let content = CtrlPress {
+                id: widget::Id::new(format!("tile-{id}")),
+                content: widget::mouse_area(content)
+                    .on_press(Message::Focus(id.clone()))
+                    .into(),
+                on_press: Message::StartMove(id.clone()),
+            };
+            widget::container(content)
                 .width(width)
                 .height(Length::Fill)
                 .class(tile_style(tile.focused, tile.lifted))
@@ -1635,6 +1628,195 @@ mod app {
             .center_x(Length::Fixed(HANDLE_WIDTH))
             .height(Length::Fill)
             .into()
+    }
+
+    /// Takes left presses made with Ctrl before its content sees them, so Ctrl+dragging
+    /// over a button or the message box moves the tile instead of pressing them. It also
+    /// carries the tile's id: libcosmic matches a widget's state to it by the id it
+    /// reports, and a container reports its content's, not its own.
+    struct CtrlPress<'a> {
+        id: widget::Id,
+        content: Element<'a, Message>,
+        on_press: Message,
+    }
+
+    #[derive(Default)]
+    struct CtrlState {
+        ctrl: bool,
+    }
+
+    impl Widget<Message, cosmic::Theme, cosmic::Renderer> for CtrlPress<'_> {
+        fn tag(&self) -> tree::Tag {
+            tree::Tag::of::<CtrlState>()
+        }
+
+        fn state(&self) -> tree::State {
+            tree::State::new(CtrlState::default())
+        }
+
+        fn children(&self) -> Vec<Tree> {
+            vec![Tree::new(&self.content)]
+        }
+
+        fn diff(&mut self, tree: &mut Tree) {
+            tree.diff_children(std::slice::from_mut(&mut self.content));
+        }
+
+        fn id(&self) -> Option<widget::Id> {
+            Some(self.id.clone())
+        }
+
+        fn set_id(&mut self, id: widget::Id) {
+            self.id = id;
+        }
+
+        fn size(&self) -> cosmic::iced::Size<Length> {
+            self.content.as_widget().size()
+        }
+
+        fn layout(
+            &mut self,
+            tree: &mut Tree,
+            renderer: &cosmic::Renderer,
+            limits: &layout::Limits,
+        ) -> layout::Node {
+            self.content
+                .as_widget_mut()
+                .layout(&mut tree.children[0], renderer, limits)
+        }
+
+        fn operate(
+            &mut self,
+            tree: &mut Tree,
+            layout: Layout<'_>,
+            renderer: &cosmic::Renderer,
+            operation: &mut dyn Operation,
+        ) {
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                operation,
+            );
+        }
+
+        fn update(
+            &mut self,
+            tree: &mut Tree,
+            event: &cosmic::iced::Event,
+            layout: Layout<'_>,
+            cursor: cosmic::iced::mouse::Cursor,
+            renderer: &cosmic::Renderer,
+            clipboard: &mut dyn Clipboard,
+            shell: &mut Shell<'_, Message>,
+            viewport: &cosmic::iced::Rectangle,
+        ) {
+            use cosmic::iced::Event;
+            use cosmic::iced::mouse::{Button, Event as Mouse};
+            let state = tree.state.downcast_mut::<CtrlState>();
+            match event {
+                Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                    state.ctrl = modifiers.control();
+                }
+                Event::Mouse(Mouse::ButtonPressed(Button::Left))
+                    if state.ctrl && cursor.is_over(layout.bounds()) =>
+                {
+                    shell.publish(self.on_press.clone());
+                    shell.capture_event();
+                    return;
+                }
+                _ => {}
+            }
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
+
+        fn mouse_interaction(
+            &self,
+            tree: &Tree,
+            layout: Layout<'_>,
+            cursor: cosmic::iced::mouse::Cursor,
+            viewport: &cosmic::iced::Rectangle,
+            renderer: &cosmic::Renderer,
+        ) -> cosmic::iced::mouse::Interaction {
+            if tree.state.downcast_ref::<CtrlState>().ctrl && cursor.is_over(layout.bounds()) {
+                return cosmic::iced::mouse::Interaction::Grab;
+            }
+            self.content.as_widget().mouse_interaction(
+                &tree.children[0],
+                layout,
+                cursor,
+                viewport,
+                renderer,
+            )
+        }
+
+        fn draw(
+            &self,
+            tree: &Tree,
+            renderer: &mut cosmic::Renderer,
+            theme: &cosmic::Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: cosmic::iced::mouse::Cursor,
+            viewport: &cosmic::iced::Rectangle,
+        ) {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            );
+        }
+
+        fn overlay<'b>(
+            &'b mut self,
+            tree: &'b mut Tree,
+            layout: Layout<'b>,
+            renderer: &cosmic::Renderer,
+            viewport: &cosmic::iced::Rectangle,
+            translation: cosmic::iced::Vector,
+        ) -> Option<overlay::Element<'b, Message, cosmic::Theme, cosmic::Renderer>> {
+            self.content.as_widget_mut().overlay(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                viewport,
+                translation,
+            )
+        }
+
+        fn drag_destinations(
+            &self,
+            tree: &Tree,
+            layout: Layout<'_>,
+            renderer: &cosmic::Renderer,
+            rectangles: &mut cosmic::iced::advanced::clipboard::DndDestinationRectangles,
+        ) {
+            self.content.as_widget().drag_destinations(
+                &tree.children[0],
+                layout,
+                renderer,
+                rectangles,
+            );
+        }
+    }
+
+    impl<'a> From<CtrlPress<'a>> for Element<'a, Message> {
+        fn from(press: CtrlPress<'a>) -> Self {
+            Element::new(press)
+        }
     }
 
     fn tile_style(focused: bool, lifted: bool) -> cosmic::theme::Container<'static> {
@@ -2164,14 +2346,6 @@ mod app {
                         self.start_move(from);
                     }
                 }
-                Message::CtrlPress(x) => {
-                    if self.page == Page::Chat
-                        && self.layout.tiles.len() > 1
-                        && let Some(from) = self.tile_at(x)
-                    {
-                        self.start_move(from);
-                    }
-                }
                 Message::DragTo(x) => self.drag_to(x),
                 Message::DragTile(point) => self.drag_tile(point),
                 Message::DragEnd => {
@@ -2408,15 +2582,13 @@ mod app {
     /// modifier state, so Ctrl is tracked here; a plain scroll yields no message, as each
     /// one rebuilds the view.
     fn window_events() -> Subscription<Message> {
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         use cosmic::iced::Event;
         use cosmic::iced::keyboard::{Event as Key, Key as K, key::Named};
         use cosmic::iced::mouse::{Event as Mouse, ScrollDelta};
 
         static CTRL: AtomicBool = AtomicBool::new(false);
-        // Presses carry no position, so a Ctrl+press is placed by the last move.
-        static CURSOR_X: AtomicU32 = AtomicU32::new(0);
 
         cosmic::iced::event::listen_with(|event, _status, id| match event {
             Event::Keyboard(Key::ModifiersChanged(m)) => {
@@ -2449,17 +2621,6 @@ mod app {
                 } else {
                     Message::FocusStep(step)
                 })
-            }
-            Event::Mouse(Mouse::CursorMoved { position }) => {
-                CURSOR_X.store(position.x.to_bits(), Ordering::Relaxed);
-                None
-            }
-            Event::Mouse(Mouse::ButtonPressed(cosmic::iced::mouse::Button::Left))
-                if CTRL.load(Ordering::Relaxed) =>
-            {
-                Some(Message::CtrlPress(f32::from_bits(
-                    CURSOR_X.load(Ordering::Relaxed),
-                )))
             }
             Event::Mouse(Mouse::WheelScrolled { delta }) if CTRL.load(Ordering::Relaxed) => {
                 let dy = match delta {
@@ -2503,6 +2664,9 @@ mod app {
         )
         .then_some(Message::DragEnd)
     }
+
+    #[cfg(test)]
+    mod tests;
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its
     /// function's address, which a hot patch changes, so the backend would restart.
