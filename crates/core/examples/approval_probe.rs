@@ -1,5 +1,5 @@
 //! Manual probe for approvals: issue and PR creation waits for an answer under every
-//! profile, while other calls Safe mode would prompt for are still refused.
+//! profile, alone or after a `cd`, while other calls Safe mode would prompt for are still refused.
 //! `gh pr create --help` stands in for a real PR: it matches the rule but creates nothing.
 //! Usage: cargo run -p claudo-core --example approval_probe
 
@@ -72,6 +72,19 @@ fn main() {
     check(
         denied.errors.iter().any(|e| e.contains("denied")),
         "a denied call does not run",
+    );
+
+    let compound = format!(
+        "Run exactly this command with the Bash tool, verbatim: cd {} && gh issue create --help. Then reply done.",
+        std::env::temp_dir().display()
+    );
+    let compound = turn(&backend, &mut rx, &id, Profile::FullAuto, &compound, false);
+    check(
+        compound
+            .approvals
+            .iter()
+            .any(|s| s.contains("&& gh issue create")),
+        "issue creation after a cd asks for approval in Full auto",
     );
 
     std::process::exit(i32::from(failed));

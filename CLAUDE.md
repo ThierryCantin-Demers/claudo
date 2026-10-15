@@ -139,7 +139,8 @@ new session.
 then sends `{"type":"control_request","request":{"subtype":"can_use_tool",...}}` for every
 call that would prompt and waits for a `control_response`. Ask rules hold in every mode,
 `bypassPermissions` included. Only requests with `decision_reason_type: "rule"` reach the user
-as `ApprovalRequested`; the rest are denied with the message the CLI used before, so Safe mode
+as `ApprovalRequested`, and `"subcommandResults"` ones, which the CLI sends for a compound
+command like `cd x && gh issue create`, when a part of the command matches a rule; the rest are denied with the message the CLI used before, so Safe mode
 behaves as it always did. Without `--permission-prompt-tool stdio` the CLI denies on its own
 and sends nothing; no `initialize` handshake is needed.
 

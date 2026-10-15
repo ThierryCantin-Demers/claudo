@@ -507,7 +507,15 @@ fn permission_prompt(v: &Value) -> Option<Prompt> {
     }
     let field = |key| request.get(key).and_then(Value::as_str);
     let tool = field("tool_name").unwrap_or("tool").to_string();
-    if field("decision_reason_type") != Some("rule") {
+    let asked = match field("decision_reason_type") {
+        Some("rule") => true,
+        Some("subcommandResults") => request
+            .pointer("/input/command")
+            .and_then(Value::as_str)
+            .is_some_and(runs_ask_rule),
+        _ => false,
+    };
+    if !asked {
         return Some(Prompt::Refuse { request_id, tool });
     }
     let input = request.get("input").cloned().unwrap_or(Value::Null);
@@ -524,6 +532,23 @@ fn permission_prompt(v: &Value) -> Option<Prompt> {
         call,
         input,
     })
+}
+
+/// The CLI reports a compound command as `subcommandResults`, without naming the part
+/// that prompted, so find one matching a `Bash(...)` ask rule.
+fn runs_ask_rule(command: &str) -> bool {
+    command
+        .split(['&', '|', ';', '\n', '(', ')', '{', '}', '`'])
+        .any(|part| {
+            let words: Vec<&str> = part
+                .split_whitespace()
+                .skip_while(|word| word.contains('='))
+                .collect();
+            ASK_RULES
+                .iter()
+                .filter_map(|rule| rule.strip_prefix("Bash(")?.strip_suffix(":*)"))
+                .any(|prefix| words.starts_with(&prefix.split_whitespace().collect::<Vec<_>>()))
+        })
 }
 
 /// The message id of a `command_lifecycle` line reporting a message's turn starting.
@@ -907,6 +932,30 @@ mod tests {
         );
         assert!(permission_prompt(&other).is_none());
         assert!(permission_prompt(&line(r#"{"type":"result"}"#)).is_none());
+    }
+
+    #[test]
+    fn compound_commands_ask_when_a_part_matches_a_rule() {
+        let request = |command: &str| {
+            line(&format!(
+                r#"{{"type":"control_request","request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":{}}},"decision_reason_type":"subcommandResults"}}}}"#,
+                Value::from(command)
+            ))
+        };
+        assert!(matches!(
+            permission_prompt(&request("cd /x && gh issue create --help")),
+            Some(Prompt::Ask { .. })
+        ));
+        assert!(matches!(
+            permission_prompt(&request("cd /x && ls")),
+            Some(Prompt::Refuse { .. })
+        ));
+
+        assert!(runs_ask_rule("git push; GH_REPO=a/b gh pr create --fill"));
+        assert!(runs_ask_rule("echo $(gh  issue create -t x)"));
+        assert!(runs_ask_rule("cd /x\ngh issue create | cat"));
+        assert!(!runs_ask_rule("cd /x && gh issue list"));
+        assert!(!runs_ask_rule("gh issue created"));
     }
 
     #[test]
