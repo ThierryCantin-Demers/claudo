@@ -15,11 +15,12 @@ claude auth login
 ### COSMIC
 
 ```bash
-cargo cosmic-release
+cargo xtask install
 ```
 
-That is `cargo run -p claudo-cosmic --features cosmic --release`. Without
-`--features cosmic` the binary only prints a message and exits.
+That installs `claudo-cosmic` into `~/.cargo/bin` with a Claudo entry and icon in the app
+launcher; `cargo xtask uninstall` removes all three. To run it from the checkout instead:
+`cargo cosmic-release`.
 
 ### egui (Linux, macOS, Windows)
 
@@ -39,7 +40,7 @@ cargo install wasm-bindgen-cli --version 0.2.126   # must match Cargo.lock
 Then build the bundle and serve it:
 
 ```bash
-./scripts/build-web.sh
+cargo xtask web
 cargo daemon
 ```
 
@@ -97,13 +98,15 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 ## Development
 
 ```bash
+cargo xtask --help          # every command
 cargo build --workspace     # everything except COSMIC
 cargo lint                  # clippy on everything, COSMIC included
-cargo test -p claudo-core    # stream-json parser tests, no CLI needed
+cargo xtask test            # every test, COSMIC's headless UI tests included
 cargo probe live_probe      # probes hit the real CLI and cost tokens
 ```
 
-`cargo probe` alone lists the probes. The aliases live in `.cargo/config.toml`.
+`cargo probe` alone lists the probes. The commands live in `xtask/`; the short aliases in
+`.cargo/config.toml` call it.
 
 ### Live reload (COSMIC)
 

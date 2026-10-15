@@ -26,11 +26,12 @@ Do not break these without discussing it first.
 ## Commands
 
 ```bash
+cargo xtask --help                           # every project command (xtask/)
 cargo build --workspace                      # everything EXCEPT libcosmic
 cargo clippy --workspace --examples          # keep clean
 cargo run -p claudo-egui --release           # native app
 
-./scripts/build-web.sh                       # wasm bundle -> crates/frontends/egui/dist
+cargo xtask web                              # wasm bundle -> crates/frontends/egui/dist
 cargo run -p claudo-daemon                   # serves bundle + WebSocket, prints token URL
 
 cargo run -p claudo-cosmic --features cosmic --release   # COSMIC frontend
