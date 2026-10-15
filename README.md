@@ -79,6 +79,7 @@ The COSMIC frontend cannot attach a project folder yet.
 | Rename a conversation | Click its title, or right-click it in the sidebar → Rename; Enter keeps it, Escape cancels |
 | Archive a conversation | Right-click it in the sidebar → Archive; it moves under Archived at the end of the list, kept whole. Unarchive, or a new message in it, brings it back |
 | Delete a conversation | Right-click it in the sidebar → Delete…, then confirm |
+| Delete or archive several at once | Ctrl+click them in the sidebar (or right-click → Select), Shift+click to pick a run of them, then Delete… or Archive at the top of the sidebar; Escape lets go |
 | Reuse an earlier message | Up in the message box (on its first line); Down goes back toward your draft |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar

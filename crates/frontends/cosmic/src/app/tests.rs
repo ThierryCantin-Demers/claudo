@@ -1065,6 +1065,74 @@ fn deleting_asks_first_then_drops_the_conversation_everywhere() {
 }
 
 #[test]
+fn several_conversations_are_picked_and_deleted_at_once() {
+    let mut app = two_tiles();
+    let charlie = "ccccc333-0000-4000-8000-000000000000";
+    app.conversations.push(ConversationInfo {
+        id: charlie.to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let mut h = Harness::new(app);
+
+    // Ctrl+click starts picking; then a plain click picks too, and a second one lets go.
+    let _ = h.app.update(Message::Modifiers(keyboard::Modifiers::CTRL));
+    let _ = h.app.update(Message::Open(BRAVO.to_string()));
+    let _ = h
+        .app
+        .update(Message::Modifiers(keyboard::Modifiers::empty()));
+    let _ = h.app.update(Message::Open(charlie.to_string()));
+    let _ = h.app.update(Message::Open(ALPHA.to_string()));
+    let _ = h.app.update(Message::Open(ALPHA.to_string()));
+    assert_eq!(h.app.picked, [BRAVO, charlie]);
+    assert!(h.app.tile_of(charlie).is_none(), "picking opens nothing");
+    h.snapshot("picked");
+
+    let _ = h.app.update(Message::AskDeletePicked);
+    h.snapshot_dialog("delete-picked");
+    let _ = h.app.update(Message::CancelDelete);
+    assert_eq!(
+        h.app.picked.len(),
+        2,
+        "cancelling the dialog keeps them picked"
+    );
+    let _ = h.app.update(Message::CancelDelete);
+    assert!(h.app.picked.is_empty(), "a second Escape lets go of them");
+
+    let _ = h.app.update(Message::Pick(BRAVO.to_string()));
+    let _ = h.app.update(Message::Pick(charlie.to_string()));
+    let _ = h.app.update(Message::AskDeletePicked);
+    let _ = h.app.update(Message::ConfirmDelete);
+    let left: Vec<&str> = h.app.conversations.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(left, [ALPHA]);
+    assert!(h.app.picked.is_empty());
+}
+
+#[test]
+fn shift_picks_every_conversation_up_to_the_one_clicked() {
+    let mut app = two_tiles();
+    for (id, title) in [("c", "Charlie"), ("d", "Delta")] {
+        app.conversations.push(ConversationInfo {
+            id: id.to_string(),
+            title: title.to_string(),
+            cwd: "/tmp".to_string(),
+            attached: false,
+            archived: false,
+            overrides: Overrides::default(),
+            context: Default::default(),
+        });
+    }
+    let _ = app.update(Message::Pick("d".to_string()));
+    let _ = app.update(Message::Modifiers(keyboard::Modifiers::SHIFT));
+    let _ = app.update(Message::Open(BRAVO.to_string()));
+    assert_eq!(app.picked, ["d", BRAVO, "c"]);
+}
+
+#[test]
 fn archiving_puts_a_conversation_away_without_deleting_it() {
     let mut h = Harness::new(two_tiles());
     let _ = h.app.update(Message::Archive(BRAVO.to_string(), true));

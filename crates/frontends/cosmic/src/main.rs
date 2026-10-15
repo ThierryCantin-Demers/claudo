@@ -559,8 +559,10 @@ mod app {
         /// Text selected in a transcript; one at a time, as in a browser.
         selection: Option<Selection>,
         renaming: Option<Renaming>,
-        /// The conversation the delete confirmation is asking about, and the window it shows in.
-        deleting: Option<(window::Id, ConversationId)>,
+        /// The conversations the delete confirmation is asking about, and the window it shows in.
+        deleting: Option<(window::Id, Vec<ConversationId>)>,
+        /// Conversations picked in the sidebar, to delete or archive together.
+        picked: Vec<ConversationId>,
         /// The sidebar lists archived conversations too.
         show_archived: bool,
         /// Unsent text of conversations that have no view.
@@ -746,6 +748,11 @@ mod app {
         ToggleArchived,
         /// Delete in a conversation's sidebar menu; asks first.
         AskDelete(ConversationId),
+        /// Add a conversation to the picked ones, or take it out.
+        Pick(ConversationId),
+        ClearPicked,
+        ArchivePicked(bool),
+        AskDeletePicked,
         ConfirmDelete,
         CancelDelete,
         /// The selected text, for the clipboard; `primary` for the one middle click pastes.
@@ -1404,9 +1411,38 @@ mod app {
             self.persist();
         }
 
+        /// Pick every conversation in the sidebar from the last one picked to `id`.
+        fn pick_to(&mut self, id: &str) {
+            let order: Vec<&ConversationId> = self
+                .conversations
+                .iter()
+                .filter(|c| !c.archived)
+                .chain(
+                    self.conversations
+                        .iter()
+                        .filter(|c| c.archived && self.show_archived),
+                )
+                .map(|c| &c.id)
+                .collect();
+            let at = |id: &str| order.iter().position(|c| *c == id);
+            let (Some(from), Some(to)) = (self.picked.last().and_then(|p| at(p)), at(id)) else {
+                return;
+            };
+            let range: Vec<ConversationId> = order[from.min(to)..=from.max(to)]
+                .iter()
+                .map(|c| (*c).clone())
+                .collect();
+            for id in range {
+                if !self.picked.contains(&id) {
+                    self.picked.push(id);
+                }
+            }
+        }
+
         /// Drops a deleted conversation everywhere it shows.
         fn forget(&mut self, id: &str) {
             self.conversations.retain(|c| c.id != id);
+            self.picked.retain(|p| p != id);
             self.untile(id);
             self.views.remove(id);
             self.drafts.remove(id);
@@ -1424,22 +1460,61 @@ mod app {
         }
 
         /// The confirmation before deleting, saying what goes and what stays.
-        fn delete_dialog(&self, id: &str) -> Element<'_, Message> {
-            let info = self.info(id);
-            let title = info.map_or("this conversation", |c| c.title.as_str());
-            let mut body = "Its messages are deleted from claudo and from Claude Code's history, \
-                            along with the folder claudo made for it. This cannot be undone."
-                .to_string();
-            if info.is_some_and(|c| c.attached) {
-                body = "Its messages are deleted from claudo and from Claude Code's history. \
-                        Its project folder is not touched. This cannot be undone."
-                    .to_string();
-            }
-            if self.views.get(id).is_some_and(|v| v.streaming) {
-                body.push_str(" Its agent is still working and will be stopped.");
+        fn delete_dialog(&self, ids: &[ConversationId]) -> Element<'_, Message> {
+            let infos: Vec<&ConversationInfo> = ids.iter().filter_map(|id| self.info(id)).collect();
+            let running = ids
+                .iter()
+                .filter(|id| self.views.get(*id).is_some_and(|v| v.streaming))
+                .count();
+            let attached = infos.iter().any(|c| c.attached);
+            let (title, mut body) = match &infos[..] {
+                [one] => (
+                    format!("Delete \u{201c}{}\u{201d}?", one.title),
+                    if one.attached {
+                        "Its messages are deleted from claudo and from Claude Code's history. \
+                         Its project folder is not touched. This cannot be undone."
+                    } else {
+                        "Its messages are deleted from claudo and from Claude Code's history, \
+                         along with the folder claudo made for it. This cannot be undone."
+                    }
+                    .to_string(),
+                ),
+                _ => {
+                    let mut names: Vec<&str> =
+                        infos.iter().take(5).map(|c| c.title.as_str()).collect();
+                    let more = infos.len().saturating_sub(names.len());
+                    let last = if more > 0 { None } else { names.pop() };
+                    let mut list = names.join(", ");
+                    match (last, more) {
+                        (Some(last), _) if !list.is_empty() => list = format!("{list} and {last}"),
+                        (Some(last), _) => list = last.to_string(),
+                        (None, 0) => {}
+                        (None, more) => list = format!("{list} and {more} more"),
+                    }
+                    (
+                        format!("Delete {} conversations?", infos.len()),
+                        format!(
+                            "{list}. Their messages are deleted from claudo and from Claude \
+                             Code's history, along with the folders claudo made for them{}. This \
+                             cannot be undone.",
+                            if attached {
+                                "; attached project folders are not touched"
+                            } else {
+                                ""
+                            }
+                        ),
+                    )
+                }
+            };
+            match running {
+                0 => {}
+                1 if infos.len() == 1 => {
+                    body.push_str(" Its agent is still working and will be stopped.")
+                }
+                _ => body.push_str(" Agents still working will be stopped."),
             }
             widget::dialog()
-                .title(format!("Delete \u{201c}{title}\u{201d}?"))
+                .title(title)
                 .body(body)
                 .primary_action(
                     widget::button::destructive("Delete").on_press(Message::ConfirmDelete),
@@ -1790,29 +1865,11 @@ mod app {
             widget::container(
                 widget::Column::with_children(
                     vec![
-                        widget::context_menu(
-                            widget::tooltip(
-                                widget::button::text(if self.modifiers.shift() {
-                                    "New tile"
-                                } else {
-                                    "New chat"
-                                })
-                                .leading_icon(widget::icon::from_name("list-add-symbolic"))
-                                .on_press(Message::New),
-                                widget::text("Shift+click for a new tile, right-click for more"),
-                                widget::tooltip::Position::Bottom,
-                            ),
-                            Some(vec![
-                                menu_item(
-                                    "New chat in new tile",
-                                    Message::NewChat(Placement::Right),
-                                ),
-                                menu_item("New chat in new window", Message::NewWindow),
-                            ]),
-                        )
-                        .window_id(w)
-                        .on_surface_action(Message::Surface)
-                        .into(),
+                        if self.picked.is_empty() {
+                            self.new_chat_button(w)
+                        } else {
+                            self.picked_bar()
+                        },
                         widget::text("Recents")
                             .size(12.0 * self.zoom)
                             .class(dim())
@@ -1835,6 +1892,69 @@ mod app {
             .clip(true)
             .height(Length::Fill)
             .padding(8)
+            .into()
+        }
+
+        /// "New chat", with Shift for a new tile and a menu for the rest.
+        fn new_chat_button(&self, w: window::Id) -> Element<'_, Message> {
+            widget::context_menu(
+                widget::tooltip(
+                    widget::button::text(if self.modifiers.shift() {
+                        "New tile"
+                    } else {
+                        "New chat"
+                    })
+                    .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                    .on_press(Message::New),
+                    widget::text("Shift+click for a new tile, right-click for more"),
+                    widget::tooltip::Position::Bottom,
+                ),
+                Some(vec![
+                    menu_item("New chat in new tile", Message::NewChat(Placement::Right)),
+                    menu_item("New chat in new window", Message::NewWindow),
+                ]),
+            )
+            .window_id(w)
+            .on_surface_action(Message::Surface)
+            .into()
+        }
+
+        /// In place of "New chat" while conversations are picked: what to do with them.
+        fn picked_bar(&self) -> Element<'_, Message> {
+            let count = self.picked.len();
+            let all_archived = self
+                .picked
+                .iter()
+                .all(|id| self.info(id).is_some_and(|c| c.archived));
+            widget::Column::with_children(vec![
+                widget::Row::with_children(vec![
+                    widget::text(format!("{count} selected"))
+                        .font(cosmic::font::semibold())
+                        .into(),
+                    widget::space::horizontal().into(),
+                    widget::tooltip(
+                        widget::button::icon(widget::icon::from_name("window-close-symbolic"))
+                            .on_press(Message::ClearPicked),
+                        widget::text("Cancel (Escape)"),
+                        widget::tooltip::Position::Bottom,
+                    )
+                    .into(),
+                ])
+                .align_y(Alignment::Center)
+                .into(),
+                widget::Row::with_children(vec![
+                    widget::button::standard(if all_archived { "Unarchive" } else { "Archive" })
+                        .on_press(Message::ArchivePicked(!all_archived))
+                        .into(),
+                    widget::button::destructive("Delete…")
+                        .on_press(Message::AskDeletePicked)
+                        .into(),
+                ])
+                .spacing(6)
+                .into(),
+            ])
+            .spacing(6)
+            .padding([0, 4])
             .into()
         }
 
@@ -1874,7 +1994,20 @@ mod app {
             if let Some(badge) = self.views.get(&c.id).and_then(|v| self.badge(v, size)) {
                 row.push(badge);
             }
-            let shown = tiled.is_some_and(|(at, _)| at == w && self.window(at).page == Page::Chat);
+            let picked = self.picked.contains(&c.id);
+            if picked {
+                row.push(
+                    widget::icon::from_name("object-select-symbolic")
+                        .size(16)
+                        .into(),
+                );
+            }
+            // While picking, the highlight shows what is picked rather than what is open.
+            let shown = if self.picked.is_empty() {
+                tiled.is_some_and(|(at, _)| at == w && self.window(at).page == Page::Chat)
+            } else {
+                picked
+            };
             let item = widget::button::custom(
                 widget::Row::with_children(row)
                     .spacing(8)
@@ -1887,6 +2020,10 @@ mod app {
             .width(Length::Fill);
             let id = || c.id.clone();
             let mut menu = vec![
+                menu_item(
+                    if picked { "Unselect" } else { "Select" },
+                    Message::Pick(id()),
+                ),
                 menu_item("Open in new tile", Message::OpenTile(id())),
                 menu_item("Open in new window", Message::OpenWindow(id())),
             ];
@@ -3320,6 +3457,7 @@ mod app {
                 selection: None,
                 renaming: None,
                 deleting: None,
+                picked: Vec::new(),
                 show_archived: ui.show_archived,
                 drafts: ui.drafts,
                 restore: vec![(main, ui.tiles.clone(), ui.focused)],
@@ -3467,6 +3605,15 @@ mod app {
                         .and_then(|view| view.items.get_mut(idx))
                     {
                         *open = !*open;
+                    }
+                }
+                // While conversations are picked, or with Ctrl, a click picks one more, and
+                // Shift picks every one up to it.
+                Message::Open(id) if self.modifiers.control() || !self.picked.is_empty() => {
+                    if self.modifiers.shift() {
+                        self.pick_to(&id);
+                    } else {
+                        return self.update(Message::Pick(id));
                     }
                 }
                 Message::Open(id) => {
@@ -3623,7 +3770,29 @@ mod app {
                     }
                 }
                 Message::CancelRename => self.renaming = None,
-                Message::AskDelete(id) => self.deleting = Some((self.current, id)),
+                Message::AskDelete(id) => self.deleting = Some((self.current, vec![id])),
+                Message::AskDeletePicked => {
+                    self.deleting = Some((self.current, self.picked.clone()));
+                }
+                Message::Pick(id) => {
+                    if let Some(i) = self.picked.iter().position(|p| *p == id) {
+                        self.picked.remove(i);
+                    } else {
+                        self.picked.push(id);
+                    }
+                }
+                Message::ClearPicked => self.picked.clear(),
+                Message::ArchivePicked(archived) => {
+                    for id in std::mem::take(&mut self.picked) {
+                        if let Some(info) = self.conversations.iter_mut().find(|c| c.id == id) {
+                            info.archived = archived;
+                        }
+                        if archived {
+                            self.untile(&id);
+                        }
+                        self.cmd(Command::Archive { id, archived });
+                    }
+                }
                 Message::Archive(id, archived) => {
                     if let Some(info) = self.conversations.iter_mut().find(|c| c.id == id) {
                         info.archived = archived;
@@ -3637,9 +3806,14 @@ mod app {
                     self.show_archived = !self.show_archived;
                     self.persist();
                 }
-                Message::CancelDelete => self.deleting = None,
+                // Escape too: it closes the confirmation, or else lets go of the picked ones.
+                Message::CancelDelete => {
+                    if self.deleting.take().is_none() {
+                        self.picked.clear();
+                    }
+                }
                 Message::ConfirmDelete => {
-                    if let Some((_, id)) = self.deleting.take() {
+                    for id in self.deleting.take().map(|(_, ids)| ids).unwrap_or_default() {
                         self.forget(&id);
                         self.cmd(Command::Delete { id });
                     }
