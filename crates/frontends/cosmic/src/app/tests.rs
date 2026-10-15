@@ -1336,3 +1336,81 @@ fn archiving_puts_a_conversation_away_without_deleting_it() {
     let _ = h.app.update(Message::Archive(BRAVO.to_string(), false));
     assert!(h.app.info(BRAVO).is_some_and(|c| !c.archived));
 }
+
+/// Streams replies into three long transcripts and prints what each frame costs.
+#[test]
+#[ignore = "a profile, not a check; run with --ignored --nocapture"]
+fn streaming_frame_cost() {
+    use cosmic::iced::theme::Base;
+    use std::time::{Duration, Instant};
+
+    const CHARLIE: &str = "ccccc333-0000-4000-8000-000000000000";
+    let reply = "Here is what changed:\n\n- **Parsing** moved into `core`, so the frontend only renders.\n\
+                 - The `reveal` animation runs per word.\n\n```rust\nfn main() {\n    let x = compute(42);\n    \
+                 println!(\"{x}\");\n}\n```\n\nThat keeps the hot path short. ";
+    let mut app = two_tiles();
+    app.conversations.push(ConversationInfo {
+        id: CHARLIE.to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    app.views.insert(CHARLIE.to_string(), ConversationView::new(""));
+    app.layout_mut().tiles.push(Tile::new(CHARLIE.to_string()));
+    for view in app.views.values_mut() {
+        view.items.clear();
+        let turns = std::env::var("TURNS").map_or(40, |t| t.parse().unwrap());
+        for n in 0..turns {
+            view.items.push(Entry::User(format!("Question {n}")));
+            view.items
+                .push(Entry::Reply(Box::new(Reply::complete(reply.repeat(3)))));
+        }
+        view.items.push(Entry::User("Go on".to_string()));
+        view.streaming = true;
+    }
+    let mut h = Harness::new(app);
+    let theme = cosmic::theme::active();
+    let style = cosmic::iced::advanced::renderer::Style {
+        text_color: theme.base().text_color,
+        icon_color: theme.base().text_color,
+        scale_factor: 1.0,
+    };
+    let ids = [ALPHA, BRAVO, CHARLIE];
+    let (mut view_t, mut build_t, mut draw_t) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+    let frames = 600;
+    for frame in 0..frames {
+        if frame % 8 == 0 {
+            let evs = ids
+                .iter()
+                .map(|id| ServerEvent::Delta {
+                    conversation_id: id.to_string(),
+                    text: reply.to_string(),
+                })
+                .collect();
+            let _ = h.app.update(Message::Events(evs));
+        }
+        let _ = h.app.update(Message::Frame);
+        let cache = std::mem::take(&mut h.cache);
+        let t0 = Instant::now();
+        let element = h.app.view();
+        let t1 = Instant::now();
+        let mut ui = UserInterface::build(element, WINDOW, cache, &mut h.renderer);
+        let t2 = Instant::now();
+        ui.draw(&mut h.renderer, &theme, &style, mouse::Cursor::Unavailable);
+        let t3 = Instant::now();
+        h.cache = ui.into_cache();
+        view_t += t1 - t0;
+        build_t += t2 - t1;
+        draw_t += t3 - t2;
+    }
+    let per = |d: Duration| d.as_secs_f64() * 1000.0 / frames as f64;
+    println!(
+        "per frame: view {:.2} ms, build and layout {:.2} ms, draw {:.2} ms",
+        per(view_t),
+        per(build_t),
+        per(draw_t)
+    );
+}
