@@ -124,6 +124,7 @@ mod app {
         zoom: f32,
         error: Option<String>,
         page: Page,
+        sidebar_open: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +161,7 @@ mod app {
             allow: bool,
         },
         SetPage(Page),
+        ToggleSidebar,
         /// The main window is closing.
         Quit,
         New,
@@ -1062,6 +1064,7 @@ mod app {
                 zoom: 1.0,
                 error: None,
                 page: Page::Chat,
+                sidebar_open: true,
             };
             (app, Task::none())
         }
@@ -1126,6 +1129,7 @@ mod app {
                     self.cmd(Command::NewScratch);
                 }
                 Message::SetPage(page) => self.page = page,
+                Message::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
                 Message::Answer { request_id, allow } => {
                     self.approvals.retain(|(id, _)| *id != request_id);
                     if let Some(conversation_id) = self.current.clone() {
@@ -1204,13 +1208,24 @@ mod app {
                 Page::Chat => self.conversation(),
                 Page::Settings => self.settings_page(),
             };
-            widget::Row::with_children(vec![
-                self.sidebar(),
-                widget::divider::vertical::default().into(),
-                main,
-            ])
-            .height(Length::Fill)
-            .into()
+            let mut columns = Vec::new();
+            if self.sidebar_open {
+                columns.push(self.sidebar());
+                columns.push(widget::divider::vertical::default().into());
+            }
+            columns.push(main);
+            widget::Row::with_children(columns)
+                .height(Length::Fill)
+                .into()
+        }
+
+        fn header_start(&self) -> Vec<Element<'_, Message>> {
+            vec![
+                widget::nav_bar_toggle()
+                    .active(self.sidebar_open)
+                    .on_toggle(Message::ToggleSidebar)
+                    .into(),
+            ]
         }
 
         fn header_center(&self) -> Vec<Element<'_, Message>> {
