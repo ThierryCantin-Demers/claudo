@@ -63,17 +63,18 @@ impl ConversationView {
 
 impl ClaudoApp {
     /// Its width and the handle's, when it shows.
-    pub(super) fn commands_room(&self) -> f32 {
-        if self.layout.commands_open && self.page == Page::Chat {
-            self.layout.commands_width + HANDLE_WIDTH
+    pub(super) fn commands_room(&self, w: window::Id) -> f32 {
+        let layout = self.window(w);
+        if layout.commands_open && layout.page == Page::Chat {
+            layout.commands_width + HANDLE_WIDTH
         } else {
             0.0
         }
     }
 
     /// The header bar's button for the panel, with how many commands are running in all.
-    pub(super) fn commands_button(&self) -> Element<'_, Message> {
-        let open = self.layout.commands_open;
+    pub(super) fn commands_button(&self, w: window::Id) -> Element<'_, Message> {
+        let open = self.window(w).commands_open;
         let running: usize = self
             .views
             .values()
@@ -107,11 +108,18 @@ impl ClaudoApp {
         .into()
     }
 
-    /// The conversations the panel lists: the tiles left to right, then any other still
-    /// running a command, since an agent keeps working after its tile closes.
-    pub(super) fn command_groups(&self) -> Vec<(&ConversationId, &ConversationView)> {
-        let mut ids: Vec<&ConversationId> =
-            self.layout.tiles.iter().map(|t| &t.conversation).collect();
+    /// The conversations a window's panel lists: its tiles left to right, then any other
+    /// still running a command, in another window or after its tile closed.
+    pub(super) fn command_groups(
+        &self,
+        w: window::Id,
+    ) -> Vec<(&ConversationId, &ConversationView)> {
+        let mut ids: Vec<&ConversationId> = self
+            .window(w)
+            .tiles
+            .iter()
+            .map(|t| &t.conversation)
+            .collect();
         let mut others: Vec<&ConversationId> = self
             .views
             .iter()
@@ -125,12 +133,12 @@ impl ClaudoApp {
             .collect()
     }
 
-    pub(super) fn commands_panel(&self) -> Option<Element<'_, Message>> {
-        if self.commands_room() == 0.0 {
+    pub(super) fn commands_panel(&self, w: window::Id) -> Option<Element<'_, Message>> {
+        if self.commands_room(w) == 0.0 {
             return None;
         }
         let size = 13.0 * self.zoom;
-        let groups = self.command_groups();
+        let groups = self.command_groups(w);
         let running: usize = groups.iter().map(|(_, v)| v.running_commands()).sum();
         let mut rows: Vec<Element<Message>> = Vec::new();
         for (id, view) in groups {
@@ -163,7 +171,7 @@ impl ClaudoApp {
                 widget::Column::with_children(vec![header.into(), list.into()]).spacing(12),
             )
             .padding([8, 4, 0, 12])
-            .width(Length::Fixed(self.layout.commands_width))
+            .width(Length::Fixed(self.window(w).commands_width))
             .height(Length::Fill)
             .into(),
         )

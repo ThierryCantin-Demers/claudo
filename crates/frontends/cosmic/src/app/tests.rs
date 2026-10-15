@@ -257,7 +257,7 @@ fn two_tiles() -> ClaudoApp {
         },
     });
     app.restore = None;
-    app.layout.size = Some((WINDOW.width, WINDOW.height));
+    app.layout_mut().size = Some((WINDOW.width, WINDOW.height));
     for (id, title) in [(ALPHA, "Alpha"), (BRAVO, "Bravo")] {
         app.conversations.push(ConversationInfo {
             id: id.to_string(),
@@ -279,7 +279,7 @@ fn two_tiles() -> ClaudoApp {
                 )))));
         }
         app.views.insert(id.to_string(), view);
-        app.layout.tiles.push(Tile::new(id.to_string()));
+        app.layout_mut().tiles.push(Tile::new(id.to_string()));
     }
     app
 }
@@ -300,7 +300,10 @@ fn moved_tiles_keep_their_scroll_positions() {
     for x in [600.0, 800.0, 1000.0, bravo_x] {
         h.move_to(x, y);
     }
-    assert!(matches!(h.app.drag, Some(Drag::Tile { at: Some(_), .. })));
+    assert!(matches!(
+        h.app.layout().drag,
+        Some(Drag::Tile { at: Some(_), .. })
+    ));
     assert_eq!(
         h.offsets(),
         [bravo, alpha],
@@ -311,7 +314,8 @@ fn moved_tiles_keep_their_scroll_positions() {
     let _ = h.app.update(Message::DragEnd);
     h.send(vec![ctrl(false)]);
     assert_eq!(
-        h.app.layout.tiles[1].conversation, ALPHA,
+        h.app.layout_mut().tiles[1].conversation,
+        ALPHA,
         "Alpha moved right"
     );
     assert_eq!(
@@ -355,7 +359,7 @@ fn snapshots() {
     Harness::new(app).snapshot("approval");
 
     let mut app = with_commands();
-    app.layout.sidebar_open = false;
+    app.layout_mut().sidebar_open = false;
     let _ = app.update(Message::ShowCommands(true));
     let idx = app.views[ALPHA].commands().nth(2).unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
@@ -638,7 +642,7 @@ fn the_commands_panel_lists_every_agent() {
         open: false,
     });
     let groups = |app: &ClaudoApp| {
-        app.command_groups()
+        app.command_groups(app.main_window())
             .iter()
             .map(|(id, _)| id.as_str().to_string())
             .collect::<Vec<_>>()
@@ -654,7 +658,7 @@ fn the_commands_panel_lists_every_agent() {
     let _ = app.update(Message::ToggleCommandGroup(BRAVO.to_string()));
     assert!(app.views[BRAVO].commands_collapsed);
 
-    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    app.layout_mut().tiles.retain(|t| t.conversation == ALPHA);
     assert_eq!(
         groups(&app),
         [ALPHA, BRAVO],
@@ -669,14 +673,14 @@ fn the_commands_panel_lists_every_agent() {
 #[test]
 fn the_commands_panel_lists_running_commands_first() {
     let mut app = with_commands();
-    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    app.layout_mut().tiles.retain(|t| t.conversation == ALPHA);
     let view = &app.views[ALPHA];
     assert_eq!(view.running_commands(), 2);
     let order: Vec<&str> = view.commands().map(|(_, c)| c.call_id.as_str()).collect();
     assert_eq!(order, ["t4", "t3", "t2", "t1"]);
 
     let _ = app.update(Message::ShowCommands(true));
-    assert!(app.commands_panel().is_some());
+    assert!(app.commands_panel(app.main_window()).is_some());
     let idx = app.views[ALPHA].commands().next().unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
     assert!(app.views[ALPHA].commands_open.contains(&idx));
@@ -685,34 +689,37 @@ fn the_commands_panel_lists_running_commands_first() {
 #[test]
 fn the_commands_panel_resizes_from_its_edge_and_closes() {
     let mut app = with_commands();
-    app.layout.tiles.retain(|t| t.conversation == ALPHA);
-    app.layout.commands_open = true;
+    app.layout_mut().tiles.retain(|t| t.conversation == ALPHA);
+    app.layout_mut().commands_open = true;
     let mut h = Harness::new(app);
     let edge = WINDOW.width - COMMANDS_WIDTH - HANDLE_WIDTH / 2.0;
 
     h.move_to(edge, 400.0);
     h.send(vec![button(true)]);
     assert!(
-        matches!(h.app.drag, Some(Drag::Commands { .. })),
+        matches!(h.app.layout().drag, Some(Drag::Commands { .. })),
         "pressing the edge grabs it"
     );
     let _ = h.app.update(Message::DragTo(edge));
     let _ = h.app.update(Message::DragTo(edge - 100.0));
     let _ = h.app.update(Message::DragEnd);
-    assert_eq!(h.app.layout.commands_width, COMMANDS_WIDTH + 100.0);
+    assert_eq!(h.app.layout_mut().commands_width, COMMANDS_WIDTH + 100.0);
 
     // The close button sits at the panel's top right.
     h.move_to(WINDOW.width - 24.0, 24.0);
     h.send(vec![button(true), button(false)]);
-    assert!(!h.app.layout.commands_open, "the close button closes it");
+    assert!(
+        !h.app.layout_mut().commands_open,
+        "the close button closes it"
+    );
 
-    h.app.layout.commands_open = true;
+    h.app.layout_mut().commands_open = true;
     let _ = h.app.update(Message::StartCommandsDrag);
     let _ = h.app.update(Message::DragTo(edge - 100.0));
     let _ = h.app.update(Message::DragTo(WINDOW.width - 140.0));
     let _ = h.app.update(Message::DragEnd);
     assert!(
-        !h.app.layout.commands_open,
+        !h.app.layout_mut().commands_open,
         "dragged nearly shut, it closes"
     );
 }
@@ -731,7 +738,7 @@ fn deleting_asks_first_then_drops_the_conversation_everywhere() {
     let _ = h.app.update(Message::ConfirmDelete);
     assert!(h.app.info(BRAVO).is_none());
     assert!(!h.app.views.contains_key(BRAVO));
-    assert_eq!(h.app.layout.tiles.len(), 1, "its tile closed");
+    assert_eq!(h.app.layout_mut().tiles.len(), 1, "its tile closed");
 
     // The last tile takes the next conversation rather than closing.
     let _ = h.app.update(Message::AskDelete(ALPHA.to_string()));
@@ -748,7 +755,7 @@ fn archiving_puts_a_conversation_away_without_deleting_it() {
         h.app.info(BRAVO).is_some_and(|c| c.archived),
         "kept, marked"
     );
-    assert_eq!(h.app.layout.tiles.len(), 1, "its tile closed");
+    assert_eq!(h.app.layout_mut().tiles.len(), 1, "its tile closed");
 
     let _ = h.app.update(Message::ToggleArchived);
     h.snapshot("archived");

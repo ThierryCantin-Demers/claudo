@@ -44,6 +44,7 @@ mod app {
     use cosmic::iced::futures::stream::BoxStream;
     use cosmic::iced::futures::{SinkExt, Stream, StreamExt};
     use cosmic::iced::widget::{container, text};
+    use cosmic::iced::window;
     use cosmic::iced::{
         Alignment, Border, Color, Length, Padding, Point, Subscription, keyboard, stream,
     };
@@ -413,11 +414,29 @@ mod app {
     struct WindowLayout {
         tiles: Vec<Tile>,
         focused: usize,
+        page: Page,
         sidebar_open: bool,
         sidebar_width: f32,
         commands_open: bool,
         commands_width: f32,
         size: Option<(f32, f32)>,
+        drag: Option<Drag>,
+    }
+
+    impl Default for WindowLayout {
+        fn default() -> Self {
+            Self {
+                tiles: Vec::new(),
+                focused: 0,
+                page: Page::Chat,
+                sidebar_open: true,
+                sidebar_width: SIDEBAR_WIDTH,
+                commands_open: false,
+                commands_width: COMMANDS_WIDTH,
+                size: None,
+                drag: None,
+            }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,18 +533,21 @@ mod app {
         conversations: Vec<ConversationInfo>,
         /// A conversation appears in at most one tile, so one view each is enough.
         views: HashMap<ConversationId, ConversationView>,
-        layout: WindowLayout,
+        windows: HashMap<window::Id, WindowLayout>,
+        /// The window the message being handled came from; a message from no window, such
+        /// as a backend event or a popup menu's, goes with the last one that sent any.
+        current: window::Id,
+        /// Window tasks an update leaves to return, such as focusing another window.
+        tasks: Vec<Task<Message>>,
         /// Creation requests not yet answered by `Created`, and where each one goes.
-        pending: HashMap<u64, Placement>,
+        pending: HashMap<u64, (window::Id, Placement)>,
         next_request: u64,
         /// Seconds of the activity indicators' animation.
         pulse: f32,
         /// Text scale. libcosmic exposes no runtime window scale factor, so zoom
         /// is applied to the conversation text rather than the whole window.
         zoom: f32,
-        page: Page,
         modifiers: keyboard::Modifiers,
-        drag: Option<Drag>,
         /// Text selected in a transcript; one at a time, as in a browser.
         selection: Option<Selection>,
         renaming: Option<Renaming>,
@@ -609,6 +631,8 @@ mod app {
 
     #[derive(Debug, Clone)]
     pub enum Message {
+        /// A message from a window's view or keyboard, so it acts on that window.
+        In(window::Id, Box<Message>),
         Connected(Commands),
         Events(Vec<ServerEvent>),
         /// Animation frame while text is being revealed.
@@ -721,15 +745,41 @@ mod app {
             self.conversations.iter().find(|c| c.id == id)
         }
 
-        fn tile_of(&self, id: &str) -> Option<usize> {
-            self.layout.tiles.iter().position(|t| t.conversation == id)
+        fn main_window(&self) -> window::Id {
+            self.core.main_window_id().unwrap_or(window::Id::RESERVED)
         }
 
-        fn focused(&self) -> Option<&ConversationId> {
-            self.layout
-                .tiles
-                .get(self.layout.focused)
-                .map(|t| &t.conversation)
+        /// A window's layout; a window closed since falls back to the main one's.
+        fn window(&self, w: window::Id) -> &WindowLayout {
+            self.windows
+                .get(&w)
+                .or_else(|| self.windows.get(&self.main_window()))
+                .expect("the main window has a layout")
+        }
+
+        /// The layout of the window the message being handled came from.
+        fn layout(&self) -> &WindowLayout {
+            self.window(self.current)
+        }
+
+        fn layout_mut(&mut self) -> &mut WindowLayout {
+            if !self.windows.contains_key(&self.current) {
+                self.current = self.main_window();
+            }
+            self.windows.entry(self.current).or_default()
+        }
+
+        /// The window and tile showing a conversation; it is in one tile at most.
+        fn tile_of(&self, id: &str) -> Option<(window::Id, usize)> {
+            self.windows.iter().find_map(|(w, layout)| {
+                let i = layout.tiles.iter().position(|t| t.conversation == id)?;
+                Some((*w, i))
+            })
+        }
+
+        fn focused(&self, w: window::Id) -> Option<&ConversationId> {
+            let layout = self.window(w);
+            layout.tiles.get(layout.focused).map(|t| &t.conversation)
         }
 
         fn save_settings(&self) {
@@ -771,23 +821,29 @@ mod app {
             self.place(id, placement);
         }
 
-        /// Show a conversation that has a view; one already in a tile is focused there.
+        /// Show a conversation that has a view in the current window; one already in a tile
+        /// is focused there, in whichever window.
         fn place(&mut self, id: ConversationId, placement: Placement) {
             self.focus_composer = Some(id.clone());
-            if let Some(i) = self.tile_of(&id) {
-                self.layout.focused = i;
+            if self.tile_of(&id).is_some() {
+                self.focus(&id);
                 return;
             }
-            let focused = self.layout.focused;
-            match placement {
-                Placement::Focused if focused < self.layout.tiles.len() => {
-                    let left = std::mem::replace(&mut self.layout.tiles[focused].conversation, id);
-                    self.release(&left);
-                }
+            let layout = self.layout_mut();
+            let focused = layout.focused;
+            let left = match placement {
+                Placement::Focused if focused < layout.tiles.len() => Some(std::mem::replace(
+                    &mut layout.tiles[focused].conversation,
+                    id,
+                )),
                 _ => {
-                    self.layout.tiles.push(Tile::new(id));
-                    self.layout.focused = self.layout.tiles.len() - 1;
+                    layout.tiles.push(Tile::new(id));
+                    layout.focused = layout.tiles.len() - 1;
+                    None
                 }
+            };
+            if let Some(left) = left {
+                self.release(&left);
             }
             self.persist();
         }
@@ -807,40 +863,49 @@ mod app {
 
         /// The last tile stays: a window always shows a conversation.
         fn close(&mut self, id: &str) {
-            let Some(i) = self.tile_of(id) else {
+            let Some((w, i)) = self.tile_of(id) else {
                 return;
             };
-            if self.layout.tiles.len() == 1 {
+            self.current = w;
+            let layout = self.layout_mut();
+            if layout.tiles.len() == 1 {
                 return;
             }
-            self.layout.tiles.remove(i);
-            if self.layout.focused > i {
-                self.layout.focused -= 1;
+            layout.tiles.remove(i);
+            if layout.focused > i {
+                layout.focused -= 1;
             }
-            self.layout.focused = self.layout.focused.min(self.layout.tiles.len() - 1);
-            self.focus_composer = self.focused().cloned();
+            layout.focused = layout.focused.min(layout.tiles.len() - 1);
+            self.focus_composer = self.focused(w).cloned();
             self.release(id);
             self.persist();
         }
 
+        /// Focus a conversation's tile, and its window if that is another one.
         fn focus(&mut self, id: &str) {
-            if let Some(i) = self.tile_of(id) {
-                self.layout.focused = i;
+            let Some((w, i)) = self.tile_of(id) else {
+                return;
+            };
+            if w != self.current {
+                self.tasks.push(window::gain_focus(w));
+                self.current = w;
             }
+            self.layout_mut().focused = i;
         }
 
         /// Where the tiles start, and the width they share, or `None` once they
         /// would be narrower than `TILE_MIN` and the row scrolls instead.
-        fn tile_room(&self) -> (f32, Option<f32>) {
-            let start = if self.layout.sidebar_open {
-                self.layout.sidebar_width + HANDLE_WIDTH
+        fn tile_room(&self, w: window::Id) -> (f32, Option<f32>) {
+            let layout = self.window(w);
+            let start = if layout.sidebar_open {
+                layout.sidebar_width + HANDLE_WIDTH
             } else {
                 0.0
             };
-            let count = self.layout.tiles.len();
-            let room = self.layout.size.map_or(f32::INFINITY, |(w, _)| w)
+            let count = layout.tiles.len();
+            let room = layout.size.map_or(f32::INFINITY, |(w, _)| w)
                 - start
-                - self.commands_room()
+                - self.commands_room(w)
                 - count.saturating_sub(1) as f32 * HANDLE_WIDTH;
             (
                 start,
@@ -853,17 +918,28 @@ mod app {
             TILE_MIN * self.zoom.max(1.0)
         }
 
-        fn total_share(&self) -> f32 {
-            self.layout.tiles.iter().map(|t| t.share).sum()
+        fn total_share(&self, w: window::Id) -> f32 {
+            self.window(w).tiles.iter().map(|t| t.share).sum()
+        }
+
+        /// The window a drag is happening in; one drag at a time.
+        fn dragging(&self) -> Option<(window::Id, &Drag)> {
+            self.windows
+                .iter()
+                .find_map(|(w, layout)| Some((*w, layout.drag.as_ref()?)))
         }
 
         fn drag_to(&mut self, x: f32) {
-            let room = self.tile_room().1;
-            let total = self.total_share();
+            let Some((w, _)) = self.dragging() else {
+                return;
+            };
+            self.current = w;
+            let room = self.tile_room(w).1;
+            let total = self.total_share(w);
             let min = self.tile_min();
-            match &mut self.drag {
+            let layout = self.layout_mut();
+            match &mut layout.drag {
                 Some(Drag::Sidebar { offset }) => {
-                    let layout = &mut self.layout;
                     let edge = if layout.sidebar_open {
                         layout.sidebar_width
                     } else {
@@ -876,7 +952,6 @@ mod app {
                     }
                 }
                 Some(Drag::Commands { offset }) => {
-                    let layout = &mut self.layout;
                     let Some((window, _)) = layout.size else {
                         return;
                     };
@@ -898,10 +973,11 @@ mod app {
                     let per_px = total / room;
                     let moved = (x - *origin.get_or_insert(x)) * per_px;
                     let left_share = (*a + moved).min(*a + *b - min * per_px).max(min * per_px);
-                    let tiles = &mut self.layout.tiles;
-                    if *left + 1 < tiles.len() {
-                        tiles[*left].share = left_share;
-                        tiles[*left + 1].share = *a + *b - left_share;
+                    let (left, a, b) = (*left, *a, *b);
+                    let tiles = &mut layout.tiles;
+                    if left + 1 < tiles.len() {
+                        tiles[left].share = left_share;
+                        tiles[left + 1].share = a + b - left_share;
                     }
                 }
                 Some(Drag::Tile { .. }) | None => {}
@@ -909,13 +985,13 @@ mod app {
         }
 
         fn drag_tile(&mut self, point: Point) {
-            let Some(Drag::Tile { from, .. }) = self.drag else {
+            let Some(Drag::Tile { from, .. }) = self.layout().drag else {
                 return;
             };
-            let centers = self.centers_without(from);
+            let centers = self.centers_without(self.current, from);
             let Some(Drag::Tile {
                 origin, at, slot, ..
-            }) = &mut self.drag
+            }) = &mut self.layout_mut().drag
             else {
                 return;
             };
@@ -929,13 +1005,13 @@ mod app {
 
         /// The centers, from the tile row's left edge, of every tile but `skip` in a row
         /// without it.
-        fn centers_without(&self, skip: usize) -> Vec<f32> {
-            let (_, room) = self.tile_room();
-            let total = self.total_share() - self.layout.tiles.get(skip).map_or(0.0, |t| t.share);
+        fn centers_without(&self, w: window::Id, skip: usize) -> Vec<f32> {
+            let (_, room) = self.tile_room(w);
+            let tiles = &self.window(w).tiles;
+            let total = self.total_share(w) - tiles.get(skip).map_or(0.0, |t| t.share);
             let room = room.map(|room| room + HANDLE_WIDTH);
             let mut edge = 0.0;
-            self.layout
-                .tiles
+            tiles
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != skip)
@@ -949,39 +1025,41 @@ mod app {
         }
 
         fn start_move(&mut self, from: usize) {
-            let Some(id) = self.layout.tiles.get(from).map(|t| t.conversation.clone()) else {
+            let layout = self.layout_mut();
+            let Some(id) = layout.tiles.get(from).map(|t| t.conversation.clone()) else {
                 return;
             };
-            if self.page != Page::Chat || self.layout.tiles.len() < 2 {
+            if layout.page != Page::Chat || layout.tiles.len() < 2 {
                 return;
             }
-            self.layout.focused = from;
-            self.focus_composer = Some(id);
-            self.drag = Some(Drag::Tile {
+            layout.focused = from;
+            layout.drag = Some(Drag::Tile {
                 from,
                 origin: None,
                 at: None,
                 slot: from,
             });
+            self.focus_composer = Some(id);
         }
 
         /// Move the tile at `from` to `to`, focusing it there.
         fn move_tile(&mut self, from: usize, to: usize) {
-            let tiles = &mut self.layout.tiles;
+            let layout = self.layout_mut();
+            let tiles = &mut layout.tiles;
             if from >= tiles.len() {
                 return;
             }
             let to = to.min(tiles.len() - 1);
             let tile = tiles.remove(from);
             tiles.insert(to, tile);
-            self.layout.focused = to;
+            layout.focused = to;
             self.persist();
         }
 
         fn new_conversation(&mut self, placement: Placement) {
             let request = self.next_request;
             self.next_request += 1;
-            self.pending.insert(request, placement);
+            self.pending.insert(request, (self.current, placement));
             self.cmd(Command::NewScratch { request });
         }
 
@@ -989,36 +1067,39 @@ mod app {
             let Some((tiles, focused)) = self.restore.take() else {
                 return;
             };
+            self.current = self.main_window();
             for tile in tiles {
                 if self.info(&tile.conversation).is_some() {
                     self.open(tile.conversation, Placement::Right);
                 }
             }
-            if self.layout.tiles.is_empty() {
+            if self.layout().tiles.is_empty() {
                 let first = self.conversations.iter().find(|c| !c.archived);
                 match first.map(|c| c.id.clone()) {
                     Some(id) => self.open(id, Placement::Right),
                     None => self.new_conversation(Placement::Right),
                 }
             }
-            self.layout.focused = focused.min(self.layout.tiles.len().saturating_sub(1));
-            self.focus_composer = self.focused().cloned();
+            let layout = self.layout_mut();
+            layout.focused = focused.min(layout.tiles.len().saturating_sub(1));
+            self.focus_composer = self.focused(self.current).cloned();
         }
 
-        /// Takes a conversation out of the window. A window keeps at least one tile, so the
+        /// Takes a conversation out of its window. A window keeps at least one tile, so the
         /// last one takes another conversation, or a new one.
         fn untile(&mut self, id: &str) {
-            if self.tile_of(id).is_none() {
+            let Some((w, _)) = self.tile_of(id) else {
                 return;
-            }
-            if self.layout.tiles.len() > 1 {
+            };
+            self.current = w;
+            if self.layout().tiles.len() > 1 {
                 self.close(id);
                 return;
             }
             let next = self
                 .conversations
                 .iter()
-                .find(|c| c.id != id && !c.archived)
+                .find(|c| c.id != id && !c.archived && self.tile_of(&c.id).is_none())
                 .map(|c| c.id.clone());
             match next {
                 Some(next) => self.open(next, Placement::Focused),
@@ -1164,16 +1245,17 @@ mod app {
                     drafts.insert(id.clone(), text);
                 }
             }
+            let main = self.window(self.main_window());
             UiState {
-                sidebar_open: self.layout.sidebar_open,
-                sidebar_width: self.layout.sidebar_width,
-                commands_open: self.layout.commands_open,
-                commands_width: self.layout.commands_width,
-                page: self.page,
-                tiles: self.layout.tiles.clone(),
-                focused: self.layout.focused,
+                sidebar_open: main.sidebar_open,
+                sidebar_width: main.sidebar_width,
+                commands_open: main.commands_open,
+                commands_width: main.commands_width,
+                page: main.page,
+                tiles: main.tiles.clone(),
+                focused: main.focused,
                 zoom: self.zoom,
-                window: self.layout.size,
+                window: main.size,
                 show_archived: self.show_archived,
                 drafts,
             }
@@ -1202,9 +1284,13 @@ mod app {
                     conversation_id,
                     request,
                 } => {
-                    let placement = self.pending.remove(&request).unwrap_or(Placement::Focused);
+                    let (w, placement) = self
+                        .pending
+                        .remove(&request)
+                        .unwrap_or((self.current, Placement::Focused));
                     self.views
                         .insert(conversation_id.clone(), ConversationView::new(""));
+                    self.current = w;
                     self.place(conversation_id, placement);
                 }
                 ServerEvent::Error {
@@ -1212,7 +1298,7 @@ mod app {
                     detail,
                 } => {
                     if let Some(view) = self
-                        .focused()
+                        .focused(self.current)
                         .cloned()
                         .and_then(|id| self.views.get_mut(&id))
                     {
@@ -1369,7 +1455,7 @@ mod app {
                 .into()
         }
 
-        fn sidebar(&self) -> Element<'_, Message> {
+        fn sidebar(&self, w: window::Id) -> Element<'_, Message> {
             let (archived, active): (Vec<&ConversationInfo>, Vec<&ConversationInfo>) =
                 self.conversations.iter().partition(|c| c.archived);
             let mut list: Vec<Element<Message>> =
@@ -1424,7 +1510,7 @@ mod app {
                 )
                 .spacing(8),
             )
-            .width(Length::Fixed(self.layout.sidebar_width))
+            .width(Length::Fixed(self.window(w).sidebar_width))
             .clip(true)
             .height(Length::Fill)
             .padding(8)
@@ -1452,7 +1538,9 @@ mod app {
             if let Some(badge) = self.views.get(&c.id).and_then(|v| self.badge(v, size)) {
                 row.push(badge);
             }
-            let shown = self.page == Page::Chat && self.tile_of(&c.id).is_some();
+            let shown = self
+                .tile_of(&c.id)
+                .is_some_and(|(w, _)| self.window(w).page == Page::Chat);
             let item = widget::button::custom(
                 widget::Row::with_children(row)
                     .spacing(8)
@@ -1487,18 +1575,15 @@ mod app {
             view.streaming.then(|| pulse_dots(self.pulse, size))
         }
 
-        fn focused_info(&self) -> Option<&ConversationInfo> {
-            self.info(self.focused()?)
-        }
-
         /// The tiles side by side, sharing the width until each reaches `TILE_MIN`.
-        fn tiles(&self) -> Element<'_, Message> {
-            let count = self.layout.tiles.len();
+        fn tiles(&self, w: window::Id) -> Element<'_, Message> {
+            let layout = self.window(w);
+            let count = layout.tiles.len();
             let several = count > 1;
-            let room = self.tile_room().1;
+            let room = self.tile_room(w).1;
             let overflow = room.is_none();
-            let total = self.total_share();
-            let lifted = match self.drag {
+            let total = self.total_share(w);
+            let lifted = match layout.drag {
                 Some(Drag::Tile {
                     from,
                     at: Some(at),
@@ -1535,14 +1620,14 @@ mod app {
                             .into()
                     });
                 }
-                let tile = &self.layout.tiles[i];
+                let tile = &layout.tiles[i];
                 let Some(view) = self.views.get(&tile.conversation) else {
                     continue;
                 };
                 let pixels = room.map_or(self.tile_min(), |room| tile.share / total * room);
                 let tile_view = TileView {
                     several,
-                    focused: several && i == self.layout.focused,
+                    focused: several && i == layout.focused,
                     compact: pixels < COMPACT_TILE,
                     lifted: lifted.is_some_and(|(from, ..)| from == i),
                     pixels,
@@ -1564,10 +1649,10 @@ mod app {
             let card: Element<Message> = match lifted {
                 Some((from, at, _)) => {
                     let pixels = room.map_or(self.tile_min(), |room| {
-                        self.layout.tiles[from].share / total * room
+                        layout.tiles[from].share / total * room
                     });
                     let (w, h) = ((pixels * 0.55).clamp(220.0, 420.0), 180.0 * self.zoom);
-                    widget::container(self.lifted_card(&self.layout.tiles[from].conversation, w, h))
+                    widget::container(self.lifted_card(&layout.tiles[from].conversation, w, h))
                         .padding(Padding {
                             top: (at.y - h / 2.0).max(0.0),
                             left: (at.x - w / 2.0).max(0.0),
@@ -1582,7 +1667,7 @@ mod app {
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
-            if matches!(self.drag, Some(Drag::Tile { .. })) {
+            if matches!(layout.drag, Some(Drag::Tile { .. })) {
                 area = area
                     .on_move(Message::DragTile)
                     .interaction(cosmic::iced::mouse::Interaction::Grabbing);
@@ -1719,12 +1804,12 @@ mod app {
             .on_press(Message::StartMove(id.clone()))
             .interaction(cosmic::iced::mouse::Interaction::Grab);
 
-            let i = self.tile_of(id).unwrap_or_default();
+            let (w, i) = self.tile_of(id).unwrap_or((self.main_window(), 0));
             let mut menu = Vec::new();
             if i > 0 {
                 menu.push(menu_item("Move left", Message::Move(id.clone(), -1)));
             }
-            if i + 1 < self.layout.tiles.len() {
+            if i + 1 < self.window(w).tiles.len() {
                 menu.push(menu_item("Move right", Message::Move(id.clone(), 1)));
             }
             menu.push(menu_item("Close", Message::Close(id.clone())));
@@ -2739,6 +2824,7 @@ mod app {
         }
 
         fn init(core: Core, ui: UiState) -> (Self, Task<Message>) {
+            let main = core.main_window_id().unwrap_or(window::Id::RESERVED);
             let app = ClaudoApp {
                 core,
                 commands: None,
@@ -2747,22 +2833,25 @@ mod app {
                 models: Vec::new(),
                 conversations: Vec::new(),
                 views: HashMap::new(),
-                layout: WindowLayout {
-                    tiles: Vec::new(),
-                    focused: 0,
-                    sidebar_open: ui.sidebar_open,
-                    sidebar_width: ui.sidebar_width,
-                    commands_open: ui.commands_open,
-                    commands_width: ui.commands_width,
-                    size: ui.window,
-                },
+                windows: HashMap::from([(
+                    main,
+                    WindowLayout {
+                        page: ui.page,
+                        sidebar_open: ui.sidebar_open,
+                        sidebar_width: ui.sidebar_width,
+                        commands_open: ui.commands_open,
+                        commands_width: ui.commands_width,
+                        size: ui.window,
+                        ..WindowLayout::default()
+                    },
+                )]),
+                current: main,
+                tasks: Vec::new(),
                 pending: HashMap::new(),
                 next_request: 0,
                 pulse: 0.0,
                 zoom: ui.zoom,
-                page: ui.page,
                 modifiers: keyboard::Modifiers::empty(),
-                drag: None,
                 selection: None,
                 renaming: None,
                 deleting: None,
@@ -2786,11 +2875,12 @@ mod app {
             ];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
-            if matches!(self.drag, Some(Drag::Tile { .. }))
+            let drag = self.dragging().map(|(_, drag)| drag);
+            if matches!(drag, Some(Drag::Tile { .. }))
                 || self.selection.as_ref().is_some_and(|s| s.dragging)
             {
                 subscriptions.push(cosmic::iced::event::listen_with(release_events));
-            } else if self.drag.is_some() {
+            } else if drag.is_some() {
                 subscriptions.push(cosmic::iced::event::listen_with(drag_events));
             }
             // Timers run only while something animates; idle stays event-driven.
@@ -2807,6 +2897,10 @@ mod app {
 
         fn update(&mut self, message: Message) -> Task<Message> {
             match message {
+                Message::In(w, message) => {
+                    self.current = w;
+                    return self.update(*message);
+                }
                 Message::Connected(commands) => self.commands = Some(commands),
                 Message::Minute => {
                     self.minutes += 1;
@@ -2859,10 +2953,12 @@ mod app {
                     self.send(id);
                 }
                 Message::ShowCommands(show) => {
-                    self.layout.commands_open = show;
+                    self.layout_mut().commands_open = show;
                     self.persist();
                 }
-                Message::StartCommandsDrag => self.drag = Some(Drag::Commands { offset: None }),
+                Message::StartCommandsDrag => {
+                    self.layout_mut().drag = Some(Drag::Commands { offset: None });
+                }
                 Message::ToggleCommandGroup(id) => {
                     if let Some(view) = self.views.get_mut(&id) {
                         view.commands_collapsed = !view.commands_collapsed;
@@ -2901,7 +2997,7 @@ mod app {
                     }
                 }
                 Message::Open(id) => {
-                    self.page = Page::Chat;
+                    self.layout_mut().page = Page::Chat;
                     let placement = if self.modifiers.shift() {
                         Placement::Right
                     } else {
@@ -2910,7 +3006,7 @@ mod app {
                     self.open(id, placement);
                 }
                 Message::OpenTile(id) => {
-                    self.page = Page::Chat;
+                    self.layout_mut().page = Page::Chat;
                     self.open(id, Placement::Right);
                 }
                 Message::Focus(id) => {
@@ -3001,14 +3097,14 @@ mod app {
                 }
                 Message::Close(id) => self.close(&id),
                 Message::CloseFocused => {
-                    if self.page == Page::Chat
-                        && let Some(id) = self.focused().cloned()
+                    if self.layout().page == Page::Chat
+                        && let Some(id) = self.focused(self.current).cloned()
                     {
                         self.close(&id);
                     }
                 }
                 Message::New => {
-                    self.page = Page::Chat;
+                    self.layout_mut().page = Page::Chat;
                     let placement = if self.modifiers.shift() {
                         Placement::Right
                     } else {
@@ -3017,26 +3113,30 @@ mod app {
                     self.new_conversation(placement);
                 }
                 Message::SetPage(page) => {
-                    self.page = page;
+                    self.layout_mut().page = page;
                     self.persist();
                 }
                 Message::ToggleSidebar => {
-                    self.layout.sidebar_open = !self.layout.sidebar_open;
+                    let layout = self.layout_mut();
+                    layout.sidebar_open = !layout.sidebar_open;
                     self.persist();
                 }
-                Message::StartSidebarDrag => self.drag = Some(Drag::Sidebar { offset: None }),
+                Message::StartSidebarDrag => {
+                    self.layout_mut().drag = Some(Drag::Sidebar { offset: None });
+                }
                 Message::StartResize(left) => {
-                    let tiles = &self.layout.tiles;
-                    if left + 1 < tiles.len() {
-                        self.drag = Some(Drag::Divider {
+                    let layout = self.layout_mut();
+                    if left + 1 < layout.tiles.len() {
+                        layout.drag = Some(Drag::Divider {
                             left,
                             origin: None,
-                            start: (tiles[left].share, tiles[left + 1].share),
+                            start: (layout.tiles[left].share, layout.tiles[left + 1].share),
                         });
                     }
                 }
                 Message::StartMove(id) => {
-                    if let Some(from) = self.tile_of(&id) {
+                    if let Some((w, from)) = self.tile_of(&id) {
+                        self.current = w;
                         self.start_move(from);
                     }
                 }
@@ -3049,40 +3149,44 @@ mod app {
                     return self.collect_selection(true);
                 }
                 Message::DragEnd => {
+                    if let Some((w, _)) = self.dragging() {
+                        self.current = w;
+                    }
                     if let Some(Drag::Tile {
                         from,
                         at: Some(_),
                         slot,
                         ..
-                    }) = self.drag.take()
+                    }) = self.layout_mut().drag.take()
                     {
                         self.move_tile(from, slot);
-                        self.focus_composer = self.focused().cloned();
+                        self.focus_composer = self.focused(self.current).cloned();
                     }
                     self.persist();
                 }
                 Message::Move(id, step) => {
-                    if let Some(i) = self.tile_of(&id) {
+                    if let Some((w, i)) = self.tile_of(&id) {
+                        self.current = w;
                         self.move_tile(i, i.saturating_add_signed(step as isize));
                     }
                 }
                 Message::MoveFocused(step) => {
-                    let i = self.layout.focused;
+                    let i = self.layout().focused;
                     self.move_tile(i, i.saturating_add_signed(step as isize));
                 }
                 Message::FocusStep(step) => {
-                    let last = self.layout.tiles.len().saturating_sub(1);
-                    self.layout.focused = self
-                        .layout
+                    let layout = self.layout_mut();
+                    let last = layout.tiles.len().saturating_sub(1);
+                    layout.focused = layout
                         .focused
                         .saturating_add_signed(step as isize)
                         .min(last);
-                    self.focus_composer = self.focused().cloned();
+                    self.focus_composer = self.focused(self.current).cloned();
                 }
-                // Popups are windows too; only the main one's size is worth restoring.
+                // Popups are windows too, with no layout of their own.
                 Message::Resized(id, size) => {
-                    if self.core.main_window_id() == Some(id) {
-                        self.layout.size = Some((size.width, size.height));
+                    if let Some(layout) = self.windows.get_mut(&id) {
+                        layout.size = Some((size.width, size.height));
                     }
                 }
                 Message::Surface(action) => {
@@ -3148,10 +3252,11 @@ mod app {
                     }
                 }
             }
+            let mut tasks = std::mem::take(&mut self.tasks);
             if let Some(id) = self.focus_composer.take() {
-                return widget::text_input::focus(composer_id(&id));
+                tasks.push(widget::text_input::focus(composer_id(&id)));
             }
-            Task::none()
+            Task::batch(tasks)
         }
 
         fn view(&self) -> Element<'_, Message> {
@@ -3168,13 +3273,79 @@ mod app {
                 Some(_) => {}
             }
 
-            let main = match self.page {
-                Page::Chat => self.tiles(),
+            let main = self.main_window();
+            self.window_view(main)
+                .map(move |message| Message::In(main, Box::new(message)))
+        }
+
+        fn header_start(&self) -> Vec<Element<'_, Message>> {
+            let main = self.main_window();
+            vec![
+                widget::nav_bar_toggle()
+                    .active(self.window(main).sidebar_open)
+                    .on_toggle(Message::In(main, Box::new(Message::ToggleSidebar)))
+                    .into(),
+            ]
+        }
+
+        /// With several tiles each names its own conversation, so the window names none.
+        fn header_center(&self) -> Vec<Element<'_, Message>> {
+            let main = self.main_window();
+            let layout = self.window(main);
+            let title: Option<Element<Message>> = match layout.page {
+                Page::Settings => Some(widget::text::heading("Settings").into()),
+                Page::Chat if layout.tiles.len() == 1 => self.focused(main).map(|id| {
+                    if self.renaming(id, TitleAt::Header) {
+                        self.rename_input(Length::Fixed(360.0))
+                    } else {
+                        let title = self
+                            .info(id)
+                            .map_or("New conversation", |c| c.title.as_str());
+                        widget::container(self.title_button(id, title))
+                            .max_width(480.0)
+                            .into()
+                    }
+                }),
+                Page::Chat => None,
+            };
+            title
+                .into_iter()
+                .map(|e| e.map(move |message| Message::In(main, Box::new(message))))
+                .collect()
+        }
+
+        fn header_end(&self) -> Vec<Element<'_, Message>> {
+            let main = self.main_window();
+            self.header_end_of(main)
+                .into_iter()
+                .map(|e| e.map(move |message| Message::In(main, Box::new(message))))
+                .collect()
+        }
+
+        fn dialog(&self) -> Option<Element<'_, Message>> {
+            self.deleting.as_deref().map(|id| self.delete_dialog(id))
+        }
+
+        fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Message> {
+            (self.core.main_window_id() == Some(id)).then_some(Message::Quit)
+        }
+
+        fn on_app_exit(&mut self) -> Option<Message> {
+            Some(Message::Quit)
+        }
+    }
+
+    impl ClaudoApp {
+        /// A window's content under its header bar: sidebar, tiles or settings, Commands.
+        fn window_view(&self, w: window::Id) -> Element<'_, Message> {
+            let layout = self.window(w);
+            let main = match layout.page {
+                Page::Chat => self.tiles(w),
                 Page::Settings => self.settings_page(),
             };
             let mut columns = Vec::new();
-            if self.layout.sidebar_open {
-                columns.push(self.sidebar());
+            if layout.sidebar_open {
+                columns.push(self.sidebar(w));
                 columns.push(
                     widget::mouse_area(
                         widget::container(widget::divider::vertical::default())
@@ -3187,7 +3358,7 @@ mod app {
                 );
             }
             columns.push(main);
-            if let Some(panel) = self.commands_panel() {
+            if let Some(panel) = self.commands_panel(w) {
                 columns.push(
                     widget::mouse_area(
                         widget::container(widget::divider::vertical::default())
@@ -3205,61 +3376,23 @@ mod app {
                 .into()
         }
 
-        fn header_start(&self) -> Vec<Element<'_, Message>> {
-            vec![
-                widget::nav_bar_toggle()
-                    .active(self.layout.sidebar_open)
-                    .on_toggle(Message::ToggleSidebar)
-                    .into(),
-            ]
-        }
-
-        /// With several tiles each names its own conversation, so the window names none.
-        fn header_center(&self) -> Vec<Element<'_, Message>> {
-            let title: Option<Element<Message>> = match self.page {
-                Page::Settings => Some(widget::text::heading("Settings").into()),
-                Page::Chat if self.layout.tiles.len() == 1 => self.focused().map(|id| {
-                    if self.renaming(id, TitleAt::Header) {
-                        self.rename_input(Length::Fixed(360.0))
-                    } else {
-                        let title = self
-                            .info(id)
-                            .map_or("New conversation", |c| c.title.as_str());
-                        widget::container(self.title_button(id, title))
-                            .max_width(480.0)
-                            .into()
-                    }
-                }),
-                Page::Chat => None,
-            };
-            title.into_iter().collect()
-        }
-
-        fn header_end(&self) -> Vec<Element<'_, Message>> {
-            if self.page != Page::Chat {
+        /// The header bar's end: the focused conversation's context with one tile, and the
+        /// Commands button.
+        fn header_end_of(&self, w: window::Id) -> Vec<Element<'_, Message>> {
+            let layout = self.window(w);
+            if layout.page != Page::Chat {
                 return Vec::new();
             }
             let context = self
-                .focused_info()
-                .filter(|_| self.layout.tiles.len() == 1)
+                .focused(w)
+                .and_then(|id| self.info(id))
+                .filter(|_| layout.tiles.len() == 1)
                 .and_then(|c| context_label(&c.context))
                 .map(|label| widget::text(label).size(12.0).class(dim()).into());
             context
                 .into_iter()
-                .chain([self.commands_button()])
+                .chain([self.commands_button(w)])
                 .collect()
-        }
-
-        fn dialog(&self) -> Option<Element<'_, Message>> {
-            self.deleting.as_deref().map(|id| self.delete_dialog(id))
-        }
-
-        fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Message> {
-            (self.core.main_window_id() == Some(id)).then_some(Message::Quit)
-        }
-
-        fn on_app_exit(&mut self) -> Option<Message> {
-            Some(Message::Quit)
         }
     }
 
@@ -3309,17 +3442,32 @@ mod app {
     /// modifier state, so Ctrl is tracked here; a plain scroll yields no message, as each
     /// one rebuilds the view.
     fn window_events() -> Subscription<Message> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        static CTRL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        cosmic::iced::event::listen_with(|event, _status, id| {
+            let message = shortcut(event, id, &CTRL)?;
+            Some(match message {
+                Message::Resized(..) | Message::Modifiers(_) | Message::Zoom(_) => message,
+                // Keys arrive in the focused window, so they act on it.
+                message => Message::In(id, Box::new(message)),
+            })
+        })
+    }
+
+    fn shortcut(
+        event: cosmic::iced::Event,
+        id: window::Id,
+        ctrl: &std::sync::atomic::AtomicBool,
+    ) -> Option<Message> {
+        use std::sync::atomic::Ordering;
 
         use cosmic::iced::Event;
         use cosmic::iced::keyboard::{Event as Key, Key as K, key::Named};
         use cosmic::iced::mouse::{Event as Mouse, ScrollDelta};
 
-        static CTRL: AtomicBool = AtomicBool::new(false);
-
-        cosmic::iced::event::listen_with(|event, _status, id| match event {
+        match event {
             Event::Keyboard(Key::ModifiersChanged(m)) => {
-                CTRL.store(m.control(), Ordering::Relaxed);
+                ctrl.store(m.control(), Ordering::Relaxed);
                 Some(Message::Modifiers(m))
             }
             Event::Window(cosmic::iced::window::Event::Resized(size)) => {
@@ -3354,14 +3502,14 @@ mod app {
                     Message::FocusStep(step)
                 })
             }
-            Event::Mouse(Mouse::WheelScrolled { delta }) if CTRL.load(Ordering::Relaxed) => {
+            Event::Mouse(Mouse::WheelScrolled { delta }) if ctrl.load(Ordering::Relaxed) => {
                 let dy = match delta {
                     ScrollDelta::Lines { y, .. } | ScrollDelta::Pixels { y, .. } => y,
                 };
                 (dy != 0.0).then(|| Message::Zoom(if dy > 0.0 { 1.1 } else { 1.0 / 1.1 }))
             }
             _ => None,
-        })
+        }
     }
 
     /// Cursor moves and the release ending a drag; subscribed only during one, so
