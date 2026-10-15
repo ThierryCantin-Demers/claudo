@@ -97,7 +97,14 @@ fn turn(
     let mut text = String::new();
     let mut session_id = String::new();
     let events = live
-        .send_turn(CONVERSATION, config, resume, "claudo live probe", prompt)
+        .send_turn(
+            CONVERSATION,
+            config,
+            resume,
+            "claudo live probe",
+            &[],
+            prompt,
+        )
         .expect("send turn");
     for ev in events {
         match ev {

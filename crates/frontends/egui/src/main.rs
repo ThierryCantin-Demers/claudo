@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use claudo_protocol::{
-    Command, ConversationInfo, Effort, Item, ModelOption, Overrides, Profile, ServerEvent,
-    Settings, SystemStatus, ToolCall,
+    Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides, Profile,
+    ServerEvent, Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -88,8 +88,8 @@ struct ClaudoApp {
     /// instead of sudden jumps.
     reveal: f32,
     error: Option<String>,
-    /// Calls waiting for the user's answer, with their request ids.
-    approvals: Vec<(String, ToolCall)>,
+    /// Calls waiting for the user's answer: request id, call, and what allowing always covers.
+    approvals: Vec<(String, ToolCall, String)>,
     md_cache: CommonMarkCache,
 }
 
@@ -353,9 +353,10 @@ impl ClaudoApp {
                     conversation_id,
                     request_id,
                     call,
+                    scope,
                 } => {
                     if self.is_current(&conversation_id) {
-                        self.approvals.push((request_id, call));
+                        self.approvals.push((request_id, call, scope));
                     }
                 }
 
@@ -738,26 +739,35 @@ impl ClaudoApp {
                 let streaming = self.streaming;
 
                 let mut answer = None;
-                for (request_id, call) in &self.approvals {
+                for (request_id, call, scope) in &self.approvals {
                     ui.horizontal(|ui| {
                         ui.strong("Claude wants to run:");
                         ui.monospace(&call.summary);
-                        if ui.button("Allow").clicked() {
-                            answer = Some((request_id.clone(), true));
+                        if ui.button("Allow once").clicked() {
+                            answer = Some((request_id.clone(), Decision::AllowOnce));
+                        }
+                        if ui
+                            .button("Allow always")
+                            .on_hover_text(format!(
+                                "Don't ask again for {scope} in this conversation"
+                            ))
+                            .clicked()
+                        {
+                            answer = Some((request_id.clone(), Decision::AllowAlways));
                         }
                         if ui.button("Deny").clicked() {
-                            answer = Some((request_id.clone(), false));
+                            answer = Some((request_id.clone(), Decision::Deny));
                         }
                     });
                 }
-                if let (Some((request_id, allow)), Some(conversation_id)) =
+                if let (Some((request_id, decision)), Some(conversation_id)) =
                     (answer, self.current.clone())
                 {
-                    self.approvals.retain(|(id, _)| *id != request_id);
+                    self.approvals.retain(|(id, ..)| *id != request_id);
                     self.transport.send(Command::AnswerApproval {
                         conversation_id,
                         request_id,
-                        allow,
+                        decision,
                     });
                 }
 

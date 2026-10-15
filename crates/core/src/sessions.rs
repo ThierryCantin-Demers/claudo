@@ -51,6 +51,9 @@ pub struct ConversationMeta {
     pub renamed: bool,
     #[serde(default)]
     pub archived: bool,
+    /// Approval scopes the user chose to allow always in this conversation.
+    #[serde(default)]
+    pub always_allowed: Vec<String>,
     pub session_id: Option<String>,
     #[serde(default)]
     pub overrides: Overrides,
@@ -134,6 +137,7 @@ impl Store {
             attached,
             renamed: false,
             archived: false,
+            always_allowed: Vec::new(),
             session_id: None,
             overrides: Overrides::default(),
             context: ContextUsage::default(),
@@ -180,6 +184,15 @@ impl Store {
             && c.archived != archived
         {
             c.archived = archived;
+            self.save();
+        }
+    }
+
+    pub fn allow_always(&mut self, id: &str, scope: String) {
+        if let Some(c) = self.get_mut(id)
+            && !c.always_allowed.contains(&scope)
+        {
+            c.always_allowed.push(scope);
             self.save();
         }
     }

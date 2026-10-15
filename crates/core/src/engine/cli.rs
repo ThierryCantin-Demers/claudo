@@ -4,7 +4,7 @@
 //!
 //! This is the seam that isolates CLI/stream-json specifics from the rest of the app.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdin, Command, Stdio};
@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use claudo_protocol::{ContextUsage, ModelOption, Profile, Quota, QuotaWindow, ToolCall};
+use claudo_protocol::{ContextUsage, Decision, ModelOption, Profile, Quota, QuotaWindow, ToolCall};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -92,7 +92,11 @@ pub enum EngineEvent {
     /// The subscription's usage windows, reported once per turn.
     Quota(Quota),
     /// A call matched `ASK_RULES`; the process waits for `Session::answer`.
-    ApprovalNeeded { request_id: String, call: ToolCall },
+    ApprovalNeeded {
+        request_id: String,
+        call: ToolCall,
+        scope: String,
+    },
     /// A tool returned. In `Safe`/`AcceptEdits` a denial arrives here as an error.
     ToolResult {
         call_id: String,
@@ -141,8 +145,15 @@ struct Shared {
     exited: Condvar,
     incoming: Option<Incoming>,
     last_activity: Mutex<Instant>,
-    /// Inputs of approvals awaiting an answer, keyed by request id; an allow echoes them back.
-    approvals: Mutex<HashMap<String, Value>>,
+    /// Approvals awaiting an answer, keyed by request id; an allow echoes the input back.
+    approvals: Mutex<HashMap<String, Pending>>,
+    /// Scopes the user allowed always; their calls are allowed without asking.
+    always: Mutex<HashSet<String>>,
+}
+
+struct Pending {
+    input: Value,
+    scope: String,
 }
 
 /// Turns are told apart by the ids the CLI reports as it starts each message, since it
@@ -236,6 +247,7 @@ impl Session {
             incoming,
             last_activity: Mutex::new(Instant::now()),
             approvals: Mutex::default(),
+            always: Mutex::default(),
         });
         // Without it the process joins the other agents only once its first turn ends.
         shared.write(&json!({
@@ -247,6 +259,7 @@ impl Session {
         // Drained continuously: a long-lived process would block once the pipe filled.
         let stderr = thread::spawn(move || stderr_tail(stderr));
         let reader = shared.clone();
+        let bypass = config.profile == Profile::FullAuto;
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 reader.touch();
@@ -263,18 +276,30 @@ impl Session {
                     }
                     continue;
                 }
-                let events = match permission_prompt(&v) {
+                let events = match permission_prompt(&v, bypass) {
                     Some(Prompt::Ask {
                         request_id,
                         call,
                         input,
+                        scope,
                     }) => {
-                        reader
-                            .approvals
-                            .lock()
-                            .unwrap()
-                            .insert(request_id.clone(), input);
-                        vec![EngineEvent::ApprovalNeeded { request_id, call }]
+                        if reader.always.lock().unwrap().contains(&scope) {
+                            let _ = reader.write(&allow(&request_id, input));
+                            Vec::new()
+                        } else {
+                            reader.approvals.lock().unwrap().insert(
+                                request_id.clone(),
+                                Pending {
+                                    input,
+                                    scope: scope.clone(),
+                                },
+                            );
+                            vec![EngineEvent::ApprovalNeeded {
+                                request_id,
+                                call,
+                                scope,
+                            }]
+                        }
                     }
                     Some(Prompt::Refuse { request_id, tool }) => {
                         let message = format!(
@@ -404,24 +429,29 @@ impl Session {
         }))
     }
 
-    /// Answer an `ApprovalNeeded`; the waiting call then runs or fails.
-    pub fn answer(&self, request_id: &str, allow: bool) -> io::Result<()> {
-        let input = self
+    /// Answer an `ApprovalNeeded`; the waiting call then runs or fails. Returns its scope.
+    pub fn answer(&self, request_id: &str, decision: Decision) -> io::Result<String> {
+        let Pending { input, scope } = self
             .shared
             .approvals
             .lock()
             .unwrap()
             .remove(request_id)
             .ok_or(io::ErrorKind::NotFound)?;
-        let response = if allow {
-            control_response(
-                request_id,
-                json!({ "behavior": "allow", "updatedInput": input }),
-            )
-        } else {
-            deny(request_id, "The user denied this.")
+        if decision == Decision::AllowAlways {
+            self.allow_always(&scope);
+        }
+        let response = match decision {
+            Decision::Deny => deny(request_id, "The user denied this."),
+            Decision::AllowOnce | Decision::AllowAlways => allow(request_id, input),
         };
-        self.shared.write(&response)
+        self.shared.write(&response)?;
+        Ok(scope)
+    }
+
+    /// Allow later calls in `scope` without an `ApprovalNeeded`.
+    pub fn allow_always(&self, scope: &str) {
+        self.shared.always.lock().unwrap().insert(scope.to_string());
     }
 
     pub fn config(&self) -> &SessionConfig {
@@ -489,6 +519,9 @@ enum Prompt {
         request_id: String,
         call: ToolCall,
         input: Value,
+        /// What allowing it always covers: the rule it matched, or the call itself when
+        /// something besides a rule may also have asked.
+        scope: String,
     },
     Refuse {
         request_id: String,
@@ -496,7 +529,8 @@ enum Prompt {
     },
 }
 
-fn permission_prompt(v: &Value) -> Option<Prompt> {
+/// `bypass`: the process runs in `bypassPermissions`, where only a rule asks.
+fn permission_prompt(v: &Value, bypass: bool) -> Option<Prompt> {
     if v.get("type")?.as_str()? != "control_request" {
         return None;
     }
@@ -507,18 +541,26 @@ fn permission_prompt(v: &Value) -> Option<Prompt> {
     }
     let field = |key| request.get(key).and_then(Value::as_str);
     let tool = field("tool_name").unwrap_or("tool").to_string();
-    let asked = match field("decision_reason_type") {
+    let reason = field("decision_reason_type");
+    let command = request.pointer("/input/command").and_then(Value::as_str);
+    let rule = command.and_then(ask_rule_in);
+    let asked = match reason {
         Some("rule") => true,
-        Some("subcommandResults") => request
-            .pointer("/input/command")
-            .and_then(Value::as_str)
-            .is_some_and(runs_ask_rule),
+        Some("subcommandResults") => rule.is_some(),
         _ => false,
     };
     if !asked {
         return Some(Prompt::Refuse { request_id, tool });
     }
     let input = request.get("input").cloned().unwrap_or(Value::Null);
+    let scope = match (tool.as_str(), command) {
+        ("Bash", Some(command)) => match rule {
+            Some(rule) if bypass || reason == Some("rule") => rule.to_string(),
+            _ => command.to_string(),
+        },
+        _ if ASK_RULES.contains(&tool.as_str()) => tool.clone(),
+        _ => format!("{tool} {}", summarize(&input)),
+    };
     let call = ToolCall {
         call_id: field("tool_use_id").unwrap_or("").to_string(),
         name: tool,
@@ -531,15 +573,16 @@ fn permission_prompt(v: &Value) -> Option<Prompt> {
         request_id,
         call,
         input,
+        scope,
     })
 }
 
-/// The CLI reports a compound command as `subcommandResults`, without naming the part
-/// that prompted, so find one matching a `Bash(...)` ask rule.
-fn runs_ask_rule(command: &str) -> bool {
+/// The command prefix of the `Bash(...)` ask rule a part of `command` matches. The CLI
+/// reports a compound command as `subcommandResults`, without naming the part that asked.
+fn ask_rule_in(command: &str) -> Option<&'static str> {
     command
         .split(['&', '|', ';', '\n', '(', ')', '{', '}', '`'])
-        .any(|part| {
+        .find_map(|part| {
             let words: Vec<&str> = part
                 .split_whitespace()
                 .skip_while(|word| word.contains('='))
@@ -547,7 +590,7 @@ fn runs_ask_rule(command: &str) -> bool {
             ASK_RULES
                 .iter()
                 .filter_map(|rule| rule.strip_prefix("Bash(")?.strip_suffix(":*)"))
-                .any(|prefix| words.starts_with(&prefix.split_whitespace().collect::<Vec<_>>()))
+                .find(|prefix| words.starts_with(&prefix.split_whitespace().collect::<Vec<_>>()))
         })
 }
 
@@ -584,6 +627,13 @@ fn control_response(request_id: &str, response: Value) -> Value {
         "type": "control_response",
         "response": { "subtype": "success", "request_id": request_id, "response": response },
     })
+}
+
+fn allow(request_id: &str, input: Value) -> Value {
+    control_response(
+        request_id,
+        json!({ "behavior": "allow", "updatedInput": input }),
+    )
 }
 
 fn deny(request_id: &str, message: &str) -> Value {
@@ -906,16 +956,18 @@ mod tests {
         let rule = line(
             r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"gh pr create --title x"},"decision_reason_type":"rule","tool_use_id":"t9"}}"#,
         );
-        match permission_prompt(&rule) {
+        match permission_prompt(&rule, false) {
             Some(Prompt::Ask {
                 request_id,
                 call,
                 input,
+                scope,
             }) => {
                 assert_eq!(request_id, "r1");
                 assert_eq!(call.call_id, "t9");
                 assert_eq!(call.summary, "gh pr create --title x");
                 assert_eq!(input["command"], "gh pr create --title x");
+                assert_eq!(scope, "gh pr create");
             }
             _ => panic!("rule prompt not offered to the user"),
         }
@@ -924,14 +976,14 @@ mod tests {
             r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a"}}}"#,
         );
         assert!(
-            matches!(permission_prompt(&mode), Some(Prompt::Refuse { request_id, tool }) if request_id == "r2" && tool == "Write")
+            matches!(permission_prompt(&mode, false), Some(Prompt::Refuse { request_id, tool }) if request_id == "r2" && tool == "Write")
         );
 
         let other = line(
             r#"{"type":"control_request","request_id":"r3","request":{"subtype":"interrupt"}}"#,
         );
-        assert!(permission_prompt(&other).is_none());
-        assert!(permission_prompt(&line(r#"{"type":"result"}"#)).is_none());
+        assert!(permission_prompt(&other, false).is_none());
+        assert!(permission_prompt(&line(r#"{"type":"result"}"#), false).is_none());
     }
 
     #[test]
@@ -942,20 +994,24 @@ mod tests {
                 Value::from(command)
             ))
         };
-        assert!(matches!(
-            permission_prompt(&request("cd /x && gh issue create --help")),
-            Some(Prompt::Ask { .. })
-        ));
-        assert!(matches!(
-            permission_prompt(&request("cd /x && ls")),
-            Some(Prompt::Refuse { .. })
-        ));
+        let scope = |command, bypass| match permission_prompt(&request(command), bypass) {
+            Some(Prompt::Ask { scope, .. }) => Some(scope),
+            _ => None,
+        };
+        let compound = "cd /x && gh issue create --help";
+        assert_eq!(scope(compound, true).unwrap(), "gh issue create");
+        // Outside bypassPermissions the cd may be what asked, so only the exact call is covered.
+        assert_eq!(scope(compound, false).unwrap(), compound);
+        assert_eq!(scope("cd /x && ls", true), None);
 
-        assert!(runs_ask_rule("git push; GH_REPO=a/b gh pr create --fill"));
-        assert!(runs_ask_rule("echo $(gh  issue create -t x)"));
-        assert!(runs_ask_rule("cd /x\ngh issue create | cat"));
-        assert!(!runs_ask_rule("cd /x && gh issue list"));
-        assert!(!runs_ask_rule("gh issue created"));
+        assert_eq!(
+            ask_rule_in("git push; GH_REPO=a/b gh pr create --fill"),
+            Some("gh pr create")
+        );
+        assert!(ask_rule_in("echo $(gh  issue create -t x)").is_some());
+        assert!(ask_rule_in("cd /x\ngh issue create | cat").is_some());
+        assert!(ask_rule_in("cd /x && gh issue list").is_none());
+        assert!(ask_rule_in("gh issue created").is_none());
     }
 
     #[test]

@@ -142,7 +142,10 @@ call that would prompt and waits for a `control_response`. Ask rules hold in eve
 as `ApprovalRequested`, and `"subcommandResults"` ones, which the CLI sends for a compound
 command like `cd x && gh issue create`, when a part of the command matches a rule; the rest are denied with the message the CLI used before, so Safe mode
 behaves as it always did. Without `--permission-prompt-tool stdio` the CLI denies on its own
-and sends nothing; no `initialize` handshake is needed.
+and sends nothing; no `initialize` handshake is needed. claudo answers "Allow always" itself:
+the scope (the rule matched, or the exact call when something else may have asked) is saved
+on the conversation and given to each process it spawns, which then allows it without asking,
+since an allow rule cannot override an ask rule.
 
 **Usage comes from the user's subscription pool**, the same quota as interactive Claude Code.
 Each turn carries agent overhead (roughly 6-12k cache creation tokens on a fresh session).

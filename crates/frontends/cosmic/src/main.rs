@@ -24,8 +24,8 @@ fn main() -> cosmic::iced::Result {
 #[cfg(feature = "cosmic")]
 mod app {
     use claudo_protocol::{
-        Command, ConversationId, ConversationInfo, Effort, Item, ModelOption, Overrides, Profile,
-        ServerEvent, Settings, SystemStatus, ToolCall,
+        Command, ConversationId, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides,
+        Profile, ServerEvent, Settings, SystemStatus, ToolCall,
     };
     use claudo_transport::{Commands, spawn_backend};
 
@@ -137,13 +137,20 @@ mod app {
         }
     }
 
+    struct Approval {
+        request_id: String,
+        call: ToolCall,
+        /// What allowing always covers, such as `gh issue create`.
+        scope: String,
+    }
+
     /// Everything shown for one conversation, whichever tile shows it. It outlives its
     /// tile while a turn runs, so a background agent's progress is there on return.
     struct ConversationView {
         items: Vec<Entry>,
         draft: text_editor::Content,
-        /// Calls waiting for the user's answer, with their request ids.
-        approvals: Vec<(String, ToolCall)>,
+        /// Calls waiting for the user's answer.
+        approvals: Vec<Approval>,
         streaming: bool,
         assistant_idx: Option<usize>,
         /// Chars of the streaming message revealed so far. The CLI delivers text
@@ -302,8 +309,15 @@ mod app {
                     }
                 }
                 ServerEvent::ApprovalRequested {
-                    request_id, call, ..
-                } => self.approvals.push((request_id, call)),
+                    request_id,
+                    call,
+                    scope,
+                    ..
+                } => self.approvals.push(Approval {
+                    request_id,
+                    call,
+                    scope,
+                }),
                 ServerEvent::Completed { is_error, .. } => {
                     self.streaming = false;
                     self.approvals.clear();
@@ -564,7 +578,7 @@ mod app {
         Answer {
             conversation_id: ConversationId,
             request_id: String,
-            allow: bool,
+            decision: Decision,
         },
         SetPage(Page),
         ToggleSidebar,
@@ -1608,32 +1622,42 @@ mod app {
             column.extend(
                 view.approvals
                     .iter()
-                    .map(|(request, call)| self.approval_card(id, request, call)),
+                    .map(|approval| self.approval_card(id, approval)),
             );
             column.push(self.composer(id, view, compact));
             widget::Column::with_children(column).spacing(8).into()
         }
 
-        /// What Claude wants to run, and the two answers. The turn waits on it.
+        /// What Claude wants to run, and the answers. The turn waits on it.
         fn approval_card<'a>(
             &self,
             id: &ConversationId,
-            request_id: &str,
-            call: &'a ToolCall,
+            approval: &'a Approval,
         ) -> Element<'a, Message> {
             let size = 14.0 * self.zoom;
-            let answer = |allow| Message::Answer {
+            let call = &approval.call;
+            let answer = |decision| Message::Answer {
                 conversation_id: id.clone(),
-                request_id: request_id.to_string(),
-                allow,
+                request_id: approval.request_id.clone(),
+                decision,
             };
             let buttons = widget::Row::with_children(vec![
                 widget::space::horizontal().into(),
                 widget::button::destructive("Deny")
-                    .on_press(answer(false))
+                    .on_press(answer(Decision::Deny))
                     .into(),
-                widget::button::suggested("Allow")
-                    .on_press(answer(true))
+                widget::tooltip(
+                    widget::button::standard("Allow always")
+                        .on_press(answer(Decision::AllowAlways)),
+                    widget::text(format!(
+                        "Don't ask again for {} in this conversation",
+                        approval.scope
+                    )),
+                    widget::tooltip::Position::Top,
+                )
+                .into(),
+                widget::button::suggested("Allow once")
+                    .on_press(answer(Decision::AllowOnce))
                     .into(),
             ])
             .spacing(8);
@@ -2848,15 +2872,15 @@ mod app {
                 Message::Answer {
                     conversation_id,
                     request_id,
-                    allow,
+                    decision,
                 } => {
                     if let Some(view) = self.views.get_mut(&conversation_id) {
-                        view.approvals.retain(|(id, _)| *id != request_id);
+                        view.approvals.retain(|a| a.request_id != request_id);
                     }
                     self.cmd(Command::AnswerApproval {
                         conversation_id,
                         request_id,
-                        allow,
+                        decision,
                     });
                 }
                 // libcosmic's Wayland teardown races between two threads and segfaults.

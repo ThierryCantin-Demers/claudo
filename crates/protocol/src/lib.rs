@@ -190,6 +190,14 @@ pub struct ToolCall {
     pub is_error: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Decision {
+    Deny,
+    AllowOnce,
+    /// Allow, and stop asking about the request's scope in this conversation.
+    AllowAlways,
+}
+
 /// Per-conversation overrides. Each `None` field falls back to the global
 /// `Settings` value; `Some` wins for that conversation only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -311,7 +319,7 @@ pub enum Command {
     AnswerApproval {
         conversation_id: ConversationId,
         request_id: String,
-        allow: bool,
+        decision: Decision,
     },
 }
 
@@ -369,6 +377,8 @@ pub enum ServerEvent {
         conversation_id: ConversationId,
         request_id: String,
         call: ToolCall,
+        /// What `Decision::AllowAlways` stops asking about, such as `gh issue create`.
+        scope: String,
     },
     Completed {
         conversation_id: ConversationId,

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Command, ConversationInfo, ModelOption, ServerEvent};
+use claudo_protocol::{Command, ConversationInfo, Decision, ModelOption, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{EngineEvent, SessionConfig};
@@ -145,12 +145,16 @@ impl Backend {
             Command::AnswerApproval {
                 conversation_id,
                 request_id,
-                allow,
-            } => {
-                if let Err(detail) = self.live.answer(&conversation_id, &request_id, allow) {
-                    self.error(conversation_id, detail);
-                }
-            }
+                decision,
+            } => match self.live.answer(&conversation_id, &request_id, decision) {
+                Ok(scope) if decision == Decision::AllowAlways => self
+                    .store
+                    .lock()
+                    .unwrap()
+                    .allow_always(&conversation_id, scope),
+                Ok(_) => {}
+                Err(detail) => self.error(conversation_id, detail),
+            },
         }
     }
 
@@ -218,7 +222,7 @@ impl Backend {
         model: String,
         effort: claudo_protocol::Effort,
     ) {
-        let (cwd, session_id, name) = {
+        let (cwd, session_id, name, always) = {
             let mut store = self.store.lock().unwrap();
             // A message to an archived conversation means it is in use again.
             store.set_archived(&conversation_id, false);
@@ -228,7 +232,12 @@ impl Backend {
                 return;
             };
             let meta = store.get(&conversation_id).expect("titled above");
-            (meta.cwd.clone(), meta.session_id.clone(), name)
+            (
+                meta.cwd.clone(),
+                meta.session_id.clone(),
+                name,
+                meta.always_allowed.clone(),
+            )
         };
         self.emit(conversations_event(&self.store));
 
@@ -243,6 +252,7 @@ impl Backend {
             config,
             session_id.as_deref(),
             &name,
+            &always,
             &text,
         ) {
             Ok(turn) => turn,
@@ -324,13 +334,16 @@ impl Forward {
                 text,
             }),
             EngineEvent::Quota(quota) => self.emit(ServerEvent::Quota(quota)),
-            EngineEvent::ApprovalNeeded { request_id, call } => {
-                self.emit(ServerEvent::ApprovalRequested {
-                    conversation_id,
-                    request_id,
-                    call,
-                })
-            }
+            EngineEvent::ApprovalNeeded {
+                request_id,
+                call,
+                scope,
+            } => self.emit(ServerEvent::ApprovalRequested {
+                conversation_id,
+                request_id,
+                call,
+                scope,
+            }),
             EngineEvent::ToolStarted(call) => self.emit(ServerEvent::ToolStarted {
                 conversation_id,
                 call,

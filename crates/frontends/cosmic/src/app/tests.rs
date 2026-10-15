@@ -330,6 +330,22 @@ fn snapshots() {
         h.move_to(x, 400.0);
     }
     h.snapshot("dragging");
+
+    let mut app = two_tiles();
+    let command = "cd /tmp && gh issue create --title Probe";
+    app.views.get_mut(ALPHA).unwrap().approvals.push(Approval {
+        request_id: "r1".to_string(),
+        call: ToolCall {
+            call_id: "t1".to_string(),
+            name: "Bash".to_string(),
+            summary: command.to_string(),
+            input: String::new(),
+            result: None,
+            is_error: false,
+        },
+        scope: "gh issue create".to_string(),
+    });
+    Harness::new(app).snapshot("approval");
 }
 
 #[test]

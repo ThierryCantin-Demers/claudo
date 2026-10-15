@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use claudo_protocol::ConversationId;
+use claudo_protocol::{ConversationId, Decision};
 
 use crate::claude_bin;
 use crate::engine::{EngineEvent, Session, SessionConfig};
@@ -48,13 +48,15 @@ impl LiveSessions {
 
     /// Start a turn on the conversation's process, or queue it behind the running
     /// one. A new process named `name` is spawned, resuming `resume`, when there is
-    /// none, it exited, or its flags differ from `config`.
+    /// none, it exited, or its flags differ from `config`. A new process allows the
+    /// `always` approval scopes without asking.
     pub fn send_turn(
         &self,
         conversation_id: &str,
         config: SessionConfig,
         resume: Option<&str>,
         name: &str,
+        always: &[String],
         prompt: &str,
     ) -> Result<Receiver<EngineEvent>, String> {
         let mut sessions = self.sessions.lock().unwrap();
@@ -82,6 +84,9 @@ impl LiveSessions {
         });
         let mut session = Session::spawn(config, resume, name, incoming)
             .map_err(|e| format!("failed to launch `{}`: {e}", claude_bin()))?;
+        for scope in always {
+            session.allow_always(scope);
+        }
         let turn = session
             .send(prompt)
             .map_err(|e| format!("claude exited before the turn was sent: {e}"))?;
@@ -112,19 +117,19 @@ impl LiveSessions {
             .map_err(|e| format!("could not stop the turn: {e}"))
     }
 
-    /// Answer the approval a conversation's running turn is waiting on.
+    /// Answer the approval a conversation's running turn is waiting on. Returns its scope.
     pub fn answer(
         &self,
         conversation_id: &str,
         request_id: &str,
-        allow: bool,
-    ) -> Result<(), String> {
+        decision: Decision,
+    ) -> Result<String, String> {
         let sessions = self.sessions.lock().unwrap();
         let session = sessions
             .get(conversation_id)
             .ok_or_else(|| "that conversation has no running claude process".to_string())?;
         session
-            .answer(request_id, allow)
+            .answer(request_id, decision)
             .map_err(|e| format!("could not answer the approval: {e}"))
     }
 
