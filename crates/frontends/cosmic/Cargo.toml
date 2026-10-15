@@ -14,7 +14,7 @@ path = "src/main.rs"
 [features]
 default = []
 cosmic = ["dep:libcosmic", "dep:serde"]
-# Hot-patches `view` and `update` while running under `cargo hot` (`cargo cosmic-hot`).
+# Hot-patches `view` and `update` while running under `cargo hot` (`cargo xtask cosmic --hot`).
 hot = ["cosmic", "dep:iced", "dep:iced_core", "iced_core/hot", "dep:iced_debug"]
 
 [dependencies]

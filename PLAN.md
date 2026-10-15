@@ -194,7 +194,7 @@ Even though tools live in Claude Code, exposing them through a socket is still a
 
 **M6: Polish (in progress)**
 - Done: one persistent `claude` process per conversation; model menus listing the CLI's families by alias, so each follows its newest version (Opus by default); live thinking summaries; a stop button; subscription usage windows parsed (not displayed yet); parser unit tests; COSMIC tiles, several agents side by side (views keyed by conversation, a layout per window, so more windows are more layouts).
-- COSMIC, following Claude Desktop's layout: markdown with highlighted code, message bubbles, expandable thinking and tool rows, a multi-line composer holding the conversation's model, thinking and permissions, a sidebar with New chat, Recents and Settings, a settings page, and hot reload (`cargo cosmic-hot`).
+- COSMIC, following Claude Desktop's layout: markdown with highlighted code, message bubbles, expandable thinking and tool rows, a multi-line composer holding the conversation's model, thinking and permissions, a sidebar with New chat, Recents and Settings, a settings page, and hot reload (`cargo xtask cosmic --hot`).
 - Open: more windows (`view_window`, moving a tile between windows), showing the usage windows, attaching a project folder in COSMIC, attachments/images, conversation search, packaging (RPM/deb/AppImage, .msi, .dmg), autostart for daemon mode.
 
 ## 13. Open questions for review

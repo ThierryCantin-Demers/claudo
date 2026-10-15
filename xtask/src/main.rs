@@ -28,9 +28,11 @@ enum Task {
     Cosmic {
         #[arg(long)]
         release: bool,
+        /// Run under cargo-hot, patching the app live as its sources change. Needs the dev
+        /// build: a release one keeps running the old view code the optimizer inlined.
+        #[arg(long, conflicts_with = "release")]
+        hot: bool,
     },
-    /// Run the COSMIC app under cargo-hot, patching it live as its sources change.
-    Hot,
     /// Run the egui app.
     Egui,
     /// Serve the web bundle and the backend over a WebSocket.
@@ -68,14 +70,14 @@ fn run(task: Task) -> Result<(), String> {
     match task {
         Task::Install => install(),
         Task::Uninstall => uninstall(),
-        Task::Cosmic { release } => {
+        Task::Cosmic { hot: true, .. } => cargo(&["hot", "-p", COSMIC_BIN, "--features", "hot"]),
+        Task::Cosmic { release, .. } => {
             let mut args = vec!["run", "-p", COSMIC_BIN, "--features", "cosmic"];
             if release {
                 args.push("--release");
             }
             cargo(&args)
         }
-        Task::Hot => cargo(&["hot", "-p", COSMIC_BIN, "--features", "hot"]),
         Task::Egui => cargo(&["run", "-p", "claudo-egui", "--release"]),
         Task::Daemon => cargo(&["run", "-p", "claudo-daemon"]),
         Task::Web => web(),

@@ -1,9 +1,2 @@
 [alias]
 xtask = "run -q -p xtask --"
-cosmic = "xtask cosmic"
-cosmic-release = "xtask cosmic --release"
-cosmic-hot = "xtask hot"
-egui = "xtask egui"
-daemon = "xtask daemon"
-probe = "xtask probe"
-lint = "xtask lint"

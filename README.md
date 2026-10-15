@@ -20,12 +20,12 @@ cargo xtask install
 
 That installs `claudo-cosmic` into `~/.cargo/bin` with a Claudo entry and icon in the app
 launcher; `cargo xtask uninstall` removes all three. To run it from the checkout instead:
-`cargo cosmic-release`.
+`cargo xtask cosmic --release`.
 
 ### egui (Linux, macOS, Windows)
 
 ```bash
-cargo egui
+cargo xtask egui
 ```
 
 ### Browser
@@ -41,7 +41,7 @@ Then build the bundle and serve it:
 
 ```bash
 cargo xtask web
-cargo daemon
+cargo xtask daemon
 ```
 
 Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
@@ -100,19 +100,18 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 ```bash
 cargo xtask --help          # every command
 cargo build --workspace     # everything except COSMIC
-cargo lint                  # clippy on everything, COSMIC included
+cargo xtask lint            # clippy on everything, COSMIC included
 cargo xtask test            # every test, COSMIC's headless UI tests included
-cargo probe live_probe      # probes hit the real CLI and cost tokens
+cargo xtask probe live_probe # probes hit the real CLI and cost tokens
 ```
 
-`cargo probe` alone lists the probes. The commands live in `xtask/`; the short aliases in
-`.cargo/config.toml` call it.
+`cargo xtask probe` alone lists the probes. The commands live in `xtask/`.
 
 ### Live reload (COSMIC)
 
 ```bash
 cargo install cargo-hot --version 0.1.1 --locked   # once
-cargo cosmic-hot
+cargo xtask cosmic --hot
 ```
 
 It needs the dev build. A release build loads each patch but keeps running the old
