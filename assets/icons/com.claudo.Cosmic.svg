@@ -1,13 +1,46 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#e08a66"/>
-      <stop offset="1" stop-color="#c4613c"/>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1b33"/>
+      <stop offset="1" stop-color="#14254a"/>
     </linearGradient>
+    <radialGradient id="halo">
+      <stop offset="0" stop-color="#7fd3ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7fd3ff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tile">
+      <rect x="8" y="8" width="112" height="112" rx="26"/>
+    </clipPath>
   </defs>
-  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
-  <path d="M34 36h60a10 10 0 0 1 10 10v30a10 10 0 0 1-10 10H60l-18 14v-14h-8a10 10 0 0 1-10-10V46a10 10 0 0 1 10-10z" fill="#fff7f2"/>
-  <circle cx="48" cy="61" r="5" fill="#c4613c"/>
-  <circle cx="64" cy="61" r="5" fill="#c4613c"/>
-  <circle cx="80" cy="61" r="5" fill="#c4613c"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#sky)"/>
+  <g clip-path="url(#tile)">
+    <circle cx="37.8" cy="108.4" r="0.7" fill="#9fe3ff" opacity="0.54"/>
+    <circle cx="20.2" cy="29.1" r="1.2" fill="#9fe3ff" opacity="0.54"/>
+    <circle cx="34.5" cy="95.7" r="0.7" fill="#9fe3ff" opacity="0.67"/>
+    <circle cx="79.6" cy="25.3" r="0.7" fill="#9fe3ff" opacity="0.62"/>
+    <circle cx="95.6" cy="26.3" r="0.7" fill="#9fe3ff" opacity="0.60"/>
+    <circle cx="78.4" cy="102.5" r="1.2" fill="#9fe3ff" opacity="0.81"/>
+    <circle cx="19.6" cy="83.4" r="0.7" fill="#9fe3ff" opacity="0.88"/>
+    <circle cx="50.2" cy="100.3" r="0.7" fill="#9fe3ff" opacity="0.52"/>
+    <circle cx="79.1" cy="93.6" r="1.2" fill="#9fe3ff" opacity="0.86"/>
+    <circle cx="37.1" cy="19.2" r="0.9" fill="#9fe3ff" opacity="0.62"/>
+    <circle cx="96.1" cy="101.6" r="0.7" fill="#9fe3ff" opacity="0.75"/>
+    <circle cx="27.2" cy="105.5" r="0.7" fill="#9fe3ff" opacity="0.54"/>
+    <circle cx="17.3" cy="89.4" r="0.9" fill="#9fe3ff" opacity="0.83"/>
+    <circle cx="70.6" cy="102.9" r="0.7" fill="#9fe3ff" opacity="0.63"/>
+    <circle cx="25.1" cy="24.2" r="0.7" fill="#9fe3ff" opacity="0.79"/>
+    <circle cx="30.3" cy="74.0" r="0.7" fill="#9fe3ff" opacity="0.46"/>
+    <circle cx="29.5" cy="53.1" r="1.2" fill="#9fe3ff" opacity="0.50"/>
+    <circle cx="75.3" cy="100.8" r="1.2" fill="#9fe3ff" opacity="0.53"/>
+    <circle cx="27.6" cy="35.2" r="0.7" fill="#9fe3ff" opacity="0.67"/>
+    <circle cx="27.7" cy="71.8" r="0.9" fill="#9fe3ff" opacity="0.74"/>
+    <ellipse cx="96" cy="94" rx="4" ry="1.6" fill="#7fd3ff" opacity="0.7" transform="rotate(-30 96 94)"/>
+    <ellipse cx="30" cy="92" rx="3" ry="1.2" fill="#7fd3ff" opacity="0.6" transform="rotate(20 30 92)"/>
+    <circle cx="64" cy="64" r="25" fill="url(#halo)"/>
+    <path d="M64.0 18.0 67.6 64.0 64.0 110.0 60.4 64.0Z" fill="#f08a62"/>
+    <path d="M103.8 41.0 65.8 67.1 24.2 87.0 62.2 60.9Z" fill="#f08a62"/>
+    <path d="M103.8 87.0 62.2 67.1 24.2 41.0 65.8 60.9Z" fill="#f08a62"/>
+    <path d="M83.3 64.0 64.0 66.9 44.7 64.0 64.0 61.1Z" fill="#f08a62"/>
+    <circle cx="64" cy="64" r="4.7" fill="#ffd9c4"/>
+  </g>
 </svg>
