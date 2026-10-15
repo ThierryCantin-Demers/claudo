@@ -421,6 +421,8 @@ mod app {
         commands_width: f32,
         size: Option<(f32, f32)>,
         drag: Option<Drag>,
+        /// Where a tile dragged from another window would land, from the tile row's left.
+        drop_at: Option<f32>,
     }
 
     impl Default for WindowLayout {
@@ -435,6 +437,7 @@ mod app {
                 commands_width: COMMANDS_WIDTH,
                 size: None,
                 drag: None,
+                drop_at: None,
             }
         }
     }
@@ -481,6 +484,8 @@ mod app {
             origin: Option<Point>,
             at: Option<Point>,
             slot: usize,
+            /// It left the window, as a drag and drop the compositor carries.
+            away: bool,
         },
     }
 
@@ -516,7 +521,7 @@ mod app {
 
     /// Where an opened or created conversation goes.
     #[derive(Debug, Clone, Copy)]
-    enum Placement {
+    pub enum Placement {
         /// Into the focused tile, in place of its conversation.
         Focused,
         /// Into a new tile at the right end.
@@ -749,6 +754,24 @@ mod app {
         OpenTile(ConversationId),
         /// A conversation in a window of its own, moved there if a tile showed it.
         OpenWindow(ConversationId),
+        /// A conversation in a new tile of another open window, moved there if shown.
+        MoveToWindow(ConversationId, window::Id),
+        NewChat(Placement),
+        /// A new chat in a new window.
+        NewWindow,
+        /// The dragged tile left its window.
+        TileAway,
+        /// Another window, or this one, took the tile that left.
+        TileLanded,
+        /// The tile that left was dropped outside every window.
+        TileDroppedOutside(ConversationId),
+        /// A tile from another window hovers this window's tiles, at this x.
+        DropHover(f32),
+        DropLeave,
+        TileDropped {
+            conversation: ConversationId,
+            x: f32,
+        },
         /// The header bar of a window libcosmic does not draw.
         WindowDrag,
         WindowMaximize,
@@ -993,6 +1016,57 @@ mod app {
             id
         }
 
+        /// Put a tile dropped on the current window where it landed, taking it from its own.
+        fn drop_tile(&mut self, conversation: ConversationId, x: f32) {
+            let w = self.current;
+            self.layout_mut().drop_at = None;
+            for layout in self.windows.values_mut() {
+                if matches!(layout.drag, Some(Drag::Tile { away: true, .. })) {
+                    layout.drag = None;
+                }
+            }
+            if self.info(&conversation).is_none() {
+                return;
+            }
+            let x = x - self.tile_room(w).0;
+            let landing = |centers: Vec<f32>| centers.iter().filter(|c| **c < x).count();
+            match self.tile_of(&conversation) {
+                Some((from, i)) if from == w => {
+                    let slot = landing(self.centers_without(w, i));
+                    self.move_tile(i, slot);
+                }
+                _ => {
+                    let slot = landing(self.centers_without(w, usize::MAX));
+                    self.take_out(&conversation);
+                    self.current = w;
+                    self.layout_mut().page = Page::Chat;
+                    self.open(conversation, Placement::Right);
+                    let last = self.layout().tiles.len().saturating_sub(1);
+                    self.move_tile(last, slot);
+                }
+            }
+            self.tasks.push(window::gain_focus(w));
+            self.persist();
+        }
+
+        /// Every open window but `w`, named by its number and focused conversation, for
+        /// the menus that move a conversation there.
+        fn other_windows(&self, w: window::Id) -> Vec<(window::Id, String)> {
+            let mut ids: Vec<window::Id> = self.windows.keys().copied().collect();
+            ids.sort();
+            ids.iter()
+                .enumerate()
+                .filter(|(_, id)| **id != w)
+                .map(|(n, id)| {
+                    let title = self
+                        .focused(*id)
+                        .and_then(|c| self.info(c))
+                        .map_or("New conversation", |c| c.title.as_str());
+                    (*id, format!("window {} · {}", n + 1, truncate(title, 40)))
+                })
+                .collect()
+        }
+
         /// Show a conversation in a window of its own, taking it from where it was.
         fn open_in_new_window(&mut self, id: ConversationId) {
             self.take_out(&id);
@@ -1134,7 +1208,10 @@ mod app {
         }
 
         fn drag_tile(&mut self, point: Point) {
-            let Some(Drag::Tile { from, .. }) = self.layout().drag else {
+            let Some(Drag::Tile {
+                from, away: false, ..
+            }) = self.layout().drag
+            else {
                 return;
             };
             let centers = self.centers_without(self.current, from);
@@ -1178,7 +1255,7 @@ mod app {
             let Some(id) = layout.tiles.get(from).map(|t| t.conversation.clone()) else {
                 return;
             };
-            if layout.page != Page::Chat || layout.tiles.len() < 2 {
+            if layout.page != Page::Chat {
                 return;
             }
             layout.focused = from;
@@ -1187,6 +1264,7 @@ mod app {
                 origin: None,
                 at: None,
                 slot: from,
+                away: false,
             });
             self.focus_composer = Some(id);
         }
@@ -1637,17 +1715,28 @@ mod app {
             widget::container(
                 widget::Column::with_children(
                     vec![
-                        widget::tooltip(
-                            widget::button::text(if self.modifiers.shift() {
-                                "New tile"
-                            } else {
-                                "New chat"
-                            })
-                            .leading_icon(widget::icon::from_name("list-add-symbolic"))
-                            .on_press(Message::New),
-                            widget::text("Shift+click for a new tile"),
-                            widget::tooltip::Position::Bottom,
+                        widget::context_menu(
+                            widget::tooltip(
+                                widget::button::text(if self.modifiers.shift() {
+                                    "New tile"
+                                } else {
+                                    "New chat"
+                                })
+                                .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                                .on_press(Message::New),
+                                widget::text("Shift+click for a new tile, right-click for more"),
+                                widget::tooltip::Position::Bottom,
+                            ),
+                            Some(vec![
+                                menu_item(
+                                    "New chat in new tile",
+                                    Message::NewChat(Placement::Right),
+                                ),
+                                menu_item("New chat in new window", Message::NewWindow),
+                            ]),
                         )
+                        .window_id(w)
+                        .on_surface_action(Message::Surface)
                         .into(),
                         widget::text("Recents")
                             .size(12.0 * self.zoom)
@@ -1713,9 +1802,17 @@ mod app {
             .padding([6, 10])
             .width(Length::Fill);
             let id = || c.id.clone();
-            let menu = vec![
+            let mut menu = vec![
                 menu_item("Open in new tile", Message::OpenTile(id())),
                 menu_item("Open in new window", Message::OpenWindow(id())),
+            ];
+            menu.extend(self.other_windows(w).into_iter().map(|(other, name)| {
+                menu_item(
+                    format!("Open in {name}"),
+                    Message::MoveToWindow(id(), other),
+                )
+            }));
+            menu.extend([
                 menu_item("Rename", Message::StartRename(id(), TitleAt::Sidebar)),
                 if c.archived {
                     menu_item("Unarchive", Message::Archive(id(), false))
@@ -1723,7 +1820,7 @@ mod app {
                     menu_item("Archive", Message::Archive(id(), true))
                 },
                 menu_item("Delete…", Message::AskDelete(id())),
-            ];
+            ]);
             // Its popup opens over this window; by default it would over the first one.
             widget::context_menu(item, Some(menu))
                 .window_id(w)
@@ -1752,10 +1849,17 @@ mod app {
                     from,
                     at: Some(at),
                     slot,
+                    away: false,
                     ..
                 }) => Some((from, at, slot)),
                 _ => None,
             };
+            let landing = layout.drop_at.map(|x| {
+                self.centers_without(w, usize::MAX)
+                    .iter()
+                    .filter(|c| **c < x)
+                    .count()
+            });
             let width = |share: f32| {
                 if overflow {
                     Length::Fixed(self.tile_min())
@@ -1774,6 +1878,9 @@ mod app {
 
             let mut row: Vec<Element<Message>> = Vec::new();
             for (k, &i) in order.iter().enumerate() {
+                if landing == Some(k) {
+                    row.push(landing_marker());
+                }
                 if k > 0 {
                     row.push(if overflow || lifted.is_some() {
                         divider()
@@ -1797,6 +1904,9 @@ mod app {
                     pixels,
                 };
                 row.push(self.tile(&tile.conversation, view, tile_view, width(tile.share)));
+            }
+            if landing == Some(order.len()) {
+                row.push(landing_marker());
             }
             let row = widget::Row::with_children(row).height(Length::Fill);
             let row: Element<Message> = if overflow {
@@ -1831,12 +1941,46 @@ mod app {
                     .width(Length::Fill)
                     .height(Length::Fill),
             );
-            if matches!(layout.drag, Some(Drag::Tile { .. })) {
+            if matches!(layout.drag, Some(Drag::Tile { away: false, .. })) {
                 area = area
                     .on_move(Message::DragTile)
                     .interaction(cosmic::iced::mouse::Interaction::Grabbing);
             }
-            area.into()
+            widget::dnd_destination(area, vec![tile_drag::TILE_MIME.into()])
+                .drag_id(tile_drag::drop_target_id(w))
+                .on_motion(|x, _| Message::DropHover(x as f32))
+                .on_leave(|| Message::DropLeave)
+                .on_finish(|_, data, _, x, _| Message::TileDropped {
+                    conversation: String::from_utf8_lossy(&data).into_owned(),
+                    x: x as f32,
+                })
+                .into()
+        }
+
+        /// What a window's content hands the compositor if its dragged tile leaves it.
+        fn carried(&self, w: window::Id) -> Option<tile_drag::Carried> {
+            let layout = self.window(w);
+            let Some(Drag::Tile { from, .. }) = layout.drag else {
+                return None;
+            };
+            let tile = layout.tiles.get(from)?;
+            let info = self.info(&tile.conversation);
+            let latest = self.views.get(&tile.conversation).and_then(|view| {
+                view.items.iter().rev().find_map(|entry| match entry {
+                    Entry::User(text) | Entry::Incoming { text, .. } => Some(text.clone()),
+                    Entry::Reply(reply) => Some(reply.text.clone()),
+                    _ => None,
+                })
+            });
+            let pixels = self.tile_room(w).1.map_or(self.tile_min(), |room| {
+                tile.share / self.total_share(w) * room
+            });
+            Some(tile_drag::Carried {
+                conversation: tile.conversation.clone(),
+                title: info.map_or("New conversation".to_string(), |c| c.title.clone()),
+                latest: latest.map(|text| truncate(&text, 400)),
+                size: Size::new((pixels * 0.55).clamp(220.0, 420.0), 180.0 * self.zoom),
+            })
         }
 
         /// A dragged tile, shrunk to its title, context and latest message.
@@ -1980,6 +2124,12 @@ mod app {
                 "Move to new window",
                 Message::OpenWindow(id.clone()),
             ));
+            menu.extend(self.other_windows(w).into_iter().map(|(other, name)| {
+                menu_item(
+                    format!("Move to {name}"),
+                    Message::MoveToWindow(id.clone(), other),
+                )
+            }));
             menu.push(menu_item("Close", Message::Close(id.clone())));
             widget::context_menu(header, Some(menu))
                 .window_id(w)
@@ -2269,10 +2419,29 @@ mod app {
         }
     }
 
-    fn menu_item(label: &'static str, message: Message) -> menu::Tree<Message> {
+    fn menu_item(label: impl Into<String>, message: Message) -> menu::Tree<Message> {
         menu::Tree::from(Element::from(
-            menu::menu_button(vec![widget::text(label).into()]).on_press(message),
+            menu::menu_button(vec![widget::text(label.into()).into()]).on_press(message),
         ))
+    }
+
+    /// Where a tile dragged from another window would land.
+    fn landing_marker<'a>() -> Element<'a, Message> {
+        widget::container(widget::space::horizontal())
+            .width(Length::Fixed(4.0))
+            .height(Length::Fill)
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                container::Style {
+                    background: Some(Color::from(cosmic.accent_color()).into()),
+                    border: Border {
+                        radius: cosmic.corner_radii.radius_xs.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }
+            }))
+            .into()
     }
 
     fn pill(label: &str, size: f32) -> Element<'_, Message> {
@@ -3185,6 +3354,47 @@ mod app {
                     self.open(id, Placement::Right);
                 }
                 Message::OpenWindow(id) => self.open_in_new_window(id),
+                Message::MoveToWindow(id, w) => {
+                    if self.windows.contains_key(&w) {
+                        self.take_out(&id);
+                        self.current = w;
+                        self.layout_mut().page = Page::Chat;
+                        self.open(id, Placement::Right);
+                        self.tasks.push(window::gain_focus(w));
+                    }
+                }
+                Message::NewChat(placement) => {
+                    self.layout_mut().page = Page::Chat;
+                    self.new_conversation(placement);
+                }
+                Message::NewWindow => {
+                    let current = self.layout();
+                    let layout = WindowLayout {
+                        sidebar_open: current.sidebar_open,
+                        sidebar_width: current.sidebar_width,
+                        size: current.size,
+                        ..WindowLayout::default()
+                    };
+                    self.current = self.open_window(layout);
+                    self.new_conversation(Placement::Right);
+                }
+                Message::TileAway => {
+                    if let Some(Drag::Tile { at, away, .. }) = &mut self.layout_mut().drag {
+                        *at = None;
+                        *away = true;
+                    }
+                }
+                Message::TileLanded => self.layout_mut().drag = None,
+                Message::TileDroppedOutside(id) => {
+                    self.layout_mut().drag = None;
+                    self.open_in_new_window(id);
+                }
+                Message::DropHover(x) => {
+                    let start = self.tile_room(self.current).0;
+                    self.layout_mut().drop_at = Some(x - start);
+                }
+                Message::DropLeave => self.layout_mut().drop_at = None,
+                Message::TileDropped { conversation, x } => self.drop_tile(conversation, x),
                 Message::WindowDrag => return window::drag(self.current),
                 Message::WindowMaximize => return window::toggle_maximize(self.current),
                 Message::WindowMinimize => return window::minimize(self.current, true),
@@ -3333,12 +3543,17 @@ mod app {
                     if let Some((w, _)) = self.dragging() {
                         self.current = w;
                     }
+                    // A tile away from its window ends with the drag and drop that carries it.
+                    let ended = self
+                        .layout_mut()
+                        .drag
+                        .take_if(|drag| !matches!(drag, Drag::Tile { away: true, .. }));
                     if let Some(Drag::Tile {
                         from,
                         at: Some(_),
                         slot,
                         ..
-                    }) = self.layout_mut().drag.take()
+                    }) = ended
                     {
                         self.move_tile(from, slot);
                         self.focus_composer = self.focused(self.current).cloned();
@@ -3624,9 +3839,18 @@ mod app {
                 );
                 columns.push(panel);
             }
-            widget::Row::with_children(columns)
-                .height(Length::Fill)
-                .into()
+            let size = layout
+                .size
+                .map_or(Size::INFINITE, |(width, height)| Size::new(width, height));
+            tile_drag::TearOff {
+                content: widget::Row::with_children(columns)
+                    .height(Length::Fill)
+                    .into(),
+                window: w,
+                bounds: size,
+                carried: self.carried(w),
+            }
+            .into()
         }
 
         /// The header bar's end: the focused conversation's context with one tile, and the
@@ -3733,6 +3957,7 @@ mod app {
                     K::Character("0") => Some(Message::ZoomReset),
                     K::Character("w" | "W") => Some(Message::CloseFocused),
                     K::Character("c" | "C") => Some(Message::Copy),
+                    K::Character("n" | "N") if modifiers.alt() => Some(Message::NewWindow),
                     K::Character("n" | "N") => Some(Message::New),
                     _ => None,
                 }
@@ -3802,6 +4027,7 @@ mod app {
     mod selectable;
     #[cfg(test)]
     mod tests;
+    mod tile_drag;
     mod usage;
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its

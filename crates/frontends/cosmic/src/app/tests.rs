@@ -390,6 +390,12 @@ fn snapshots() {
     let mut h = Harness::new(app);
     let window = h.app.view_window(second);
     render_alone(&mut h.renderer, window, "second-window");
+
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let x = app.tile_room(main).0 + 560.0;
+    let _ = app.update(Message::In(main, Box::new(Message::DropHover(x))));
+    Harness::new(app).snapshot("drop-marker");
 }
 
 #[test]
@@ -780,6 +786,146 @@ fn a_conversation_moves_to_a_window_of_its_own() {
         "the other window becomes the main one"
     );
     assert!(app.tile_of(ALPHA).is_none() && app.tile_of(BRAVO).is_some());
+}
+
+/// Alpha in the main window and Bravo in a second one, both the test window's size.
+fn two_windows() -> (ClaudoApp, window::Id, window::Id) {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::OpenWindow(BRAVO.to_string())),
+    ));
+    let (second, _) = app.tile_of(BRAVO).unwrap();
+    app.windows.get_mut(&second).unwrap().size = Some((WINDOW.width, WINDOW.height));
+    (app, main, second)
+}
+
+#[test]
+fn tiles_move_to_windows_already_open() {
+    let (mut app, main, second) = two_windows();
+    let names: Vec<String> = app
+        .other_windows(main)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    assert_eq!(names, ["window 2 · Bravo"]);
+
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::MoveToWindow(ALPHA.to_string(), second)),
+    ));
+    let ids = |app: &ClaudoApp, w| -> Vec<String> {
+        app.window(w)
+            .tiles
+            .iter()
+            .map(|t| t.conversation.clone())
+            .collect()
+    };
+    assert_eq!(ids(&app, second), [BRAVO, ALPHA]);
+    assert!(
+        app.window(main).tiles.is_empty(),
+        "the main window waits for a new chat"
+    );
+    assert_eq!(app.pending.values().next().map(|(w, _)| *w), Some(main));
+}
+
+#[test]
+fn a_tile_dropped_on_another_window_lands_where_it_is_dropped() {
+    let (mut app, main, second) = two_windows();
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::OpenTile(BRAVO.to_string())),
+    ));
+    let _ = app.update(Message::In(
+        second,
+        Box::new(Message::OpenWindow(ALPHA.to_string())),
+    ));
+    // Alpha alone in a third window now; drop it at the left edge of Bravo's window.
+    let x = app.tile_room(second).0 + 10.0;
+    let _ = app.update(Message::In(
+        second,
+        Box::new(Message::TileDropped {
+            conversation: ALPHA.to_string(),
+            x,
+        }),
+    ));
+    let ids: Vec<&str> = app
+        .window(second)
+        .tiles
+        .iter()
+        .map(|t| t.conversation.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [ALPHA, BRAVO],
+        "it lands left of the tile it was dropped before"
+    );
+    assert_eq!(
+        app.windows.len(),
+        2,
+        "the window it left had no other tile, so it closed"
+    );
+
+    // Dropped back in its own window past the other tile, it moves right.
+    let _ = app.update(Message::In(
+        second,
+        Box::new(Message::TileDropped {
+            conversation: ALPHA.to_string(),
+            x: WINDOW.width - 20.0,
+        }),
+    ));
+    let ids: Vec<&str> = app
+        .window(second)
+        .tiles
+        .iter()
+        .map(|t| t.conversation.as_str())
+        .collect();
+    assert_eq!(ids, [BRAVO, ALPHA]);
+}
+
+#[test]
+fn a_tile_dropped_outside_every_window_gets_its_own() {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::StartMove(BRAVO.to_string())),
+    ));
+    let _ = app.update(Message::In(main, Box::new(Message::TileAway)));
+    assert!(matches!(
+        app.window(main).drag,
+        Some(Drag::Tile {
+            away: true,
+            at: None,
+            ..
+        })
+    ));
+    let _ = app.update(Message::DragEnd);
+    assert!(
+        app.window(main).drag.is_some(),
+        "a release does not end a drag the compositor carries"
+    );
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::TileDroppedOutside(BRAVO.to_string())),
+    ));
+    assert!(app.window(main).drag.is_none());
+    assert!(app.tile_of(BRAVO).is_some_and(|(w, _)| w != main));
+}
+
+#[test]
+fn a_new_chat_can_open_in_a_new_window() {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let _ = app.update(Message::In(main, Box::new(Message::NewWindow)));
+    assert_eq!(app.windows.len(), 2);
+    let (w, _) = *app
+        .pending
+        .values()
+        .next()
+        .expect("a chat is being created");
+    assert_ne!(w, main, "for the new window");
 }
 
 #[test]
