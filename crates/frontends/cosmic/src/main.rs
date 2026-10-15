@@ -13,7 +13,12 @@ fn main() {
 
 #[cfg(feature = "cosmic")]
 fn main() -> cosmic::iced::Result {
-    cosmic::app::run::<app::ClaudoApp>(cosmic::app::Settings::default(), ())
+    let ui = app::UiState::load();
+    let mut settings = cosmic::app::Settings::default();
+    if let Some((width, height)) = ui.window {
+        settings = settings.size(cosmic::iced::Size::new(width, height));
+    }
+    cosmic::app::run::<app::ClaudoApp>(settings, ui)
 }
 
 #[cfg(feature = "cosmic")]
@@ -25,7 +30,11 @@ mod app {
     use claudo_transport::{Commands, spawn_backend};
 
     use cosmic::app::{Core, Task};
+    use std::collections::HashMap;
     use std::hash::Hash;
+
+    use cosmic::cosmic_config::{Config, ConfigGet, ConfigSet};
+    use serde::{Deserialize, Serialize};
 
     use cosmic::iced::advanced::subscription::{EventStream, Hasher, Recipe, from_recipe};
     use cosmic::iced::futures::stream::BoxStream;
@@ -125,12 +134,62 @@ mod app {
         error: Option<String>,
         page: Page,
         sidebar_open: bool,
+        window: Option<(f32, f32)>,
+        drafts: HashMap<String, String>,
+        /// The conversation to reopen once the list first arrives.
+        restore: Option<String>,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Page {
         Chat,
         Settings,
+    }
+
+    /// Where the window was left, restored on the next launch.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct UiState {
+        sidebar_open: bool,
+        page: Page,
+        conversation: Option<String>,
+        zoom: f32,
+        pub window: Option<(f32, f32)>,
+        /// Unsent text, per conversation.
+        drafts: HashMap<String, String>,
+    }
+
+    impl Default for UiState {
+        fn default() -> Self {
+            Self {
+                sidebar_open: true,
+                page: Page::Chat,
+                conversation: None,
+                zoom: 1.0,
+                window: None,
+                drafts: HashMap::new(),
+            }
+        }
+    }
+
+    const UI_STATE: &str = "ui";
+
+    impl UiState {
+        pub fn load() -> Self {
+            Self::store()
+                .and_then(|store| store.get(UI_STATE).ok())
+                .unwrap_or_default()
+        }
+
+        fn save(&self) {
+            if let Some(store) = Self::store() {
+                let _ = store.set(UI_STATE, self);
+            }
+        }
+
+        fn store() -> Option<Config> {
+            Config::new_state(ClaudoApp::APP_ID, 1).ok()
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -162,6 +221,7 @@ mod app {
         },
         SetPage(Page),
         ToggleSidebar,
+        Resized(cosmic::iced::window::Id, cosmic::iced::Size),
         /// The main window is closing.
         Quit,
         New,
@@ -224,6 +284,9 @@ mod app {
             if self.streaming {
                 return;
             }
+            self.stash_draft();
+            self.draft =
+                text_editor::Content::with_text(self.drafts.get(&id).map_or("", String::as_str));
             self.current = Some(id.clone());
             self.sync_overrides();
             self.items.clear();
@@ -281,7 +344,36 @@ mod app {
                 effort,
             });
             self.draft = text_editor::Content::new();
+            if let Some(id) = &self.current {
+                self.drafts.remove(id);
+            }
             self.focus_composer = true;
+        }
+
+        /// Keep the composer's text for the conversation being left.
+        fn stash_draft(&mut self) {
+            let Some(id) = self.current.clone() else {
+                return;
+            };
+            let text = self.draft.text();
+            if text.trim().is_empty() {
+                self.drafts.remove(&id);
+            } else {
+                self.drafts.insert(id, text);
+            }
+        }
+
+        fn persist(&mut self) {
+            self.stash_draft();
+            UiState {
+                sidebar_open: self.sidebar_open,
+                page: self.page,
+                conversation: self.current.clone(),
+                zoom: self.zoom,
+                window: self.window,
+                drafts: self.drafts.clone(),
+            }
+            .save();
         }
 
         fn push_assistant(&mut self, text: &str) {
@@ -353,6 +445,8 @@ mod app {
                 ServerEvent::Conversations { list, current } => {
                     self.conversations = list;
                     if let Some(id) = current {
+                        self.stash_draft();
+                        self.draft = text_editor::Content::new();
                         self.current = Some(id);
                         self.sync_overrides();
                         self.items.clear();
@@ -360,11 +454,12 @@ mod app {
                         self.error = None;
                         self.focus_composer = true;
                     } else if self.current.is_none() {
-                        match self.conversations.first() {
-                            Some(first) => {
-                                let id = first.id.clone();
-                                self.open(id);
-                            }
+                        let saved = self.restore.take();
+                        let reopen = saved
+                            .filter(|id| self.conversations.iter().any(|c| c.id == *id))
+                            .or_else(|| self.conversations.first().map(|c| c.id.clone()));
+                        match reopen {
+                            Some(id) => self.open(id),
                             None => self.cmd(Command::NewScratch),
                         }
                     }
@@ -462,7 +557,7 @@ mod app {
             let efforts: Vec<&str> = Effort::ALL.iter().map(|e| e.label()).collect();
             let profiles: Vec<&str> = PROFILES.iter().map(|p| p.label()).collect();
             let defaults = widget::settings::section()
-                .title("Defaults for new conversations")
+                .title("Defaults")
                 .add(widget::settings::item(
                     "Model",
                     widget::dropdown(
@@ -506,9 +601,12 @@ mod app {
                 widget::text(self.settings.profile.tooltip())
                     .class(dim())
                     .into(),
-                widget::text("Each conversation can change these from its message box.")
-                    .class(dim())
-                    .into(),
+                widget::text(
+                    "Every conversation uses these until you change its model, thinking or \
+                     permissions from its message box.",
+                )
+                .class(dim())
+                .into(),
             ])
             .spacing(16)
             .padding([24, 16])
@@ -1032,7 +1130,7 @@ mod app {
 
     impl Application for ClaudoApp {
         type Executor = cosmic::executor::Default;
-        type Flags = ();
+        type Flags = UiState;
         type Message = Message;
         const APP_ID: &'static str = "com.claudo.Cosmic";
 
@@ -1044,7 +1142,7 @@ mod app {
             &mut self.core
         }
 
-        fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
+        fn init(core: Core, ui: UiState) -> (Self, Task<Message>) {
             let app = ClaudoApp {
                 core,
                 commands: None,
@@ -1061,16 +1159,19 @@ mod app {
                 assistant_idx: None,
                 reveal: 0.0,
                 pulse: 0.0,
-                zoom: 1.0,
+                zoom: ui.zoom,
                 error: None,
-                page: Page::Chat,
-                sidebar_open: true,
+                page: ui.page,
+                sidebar_open: ui.sidebar_open,
+                window: ui.window,
+                drafts: ui.drafts,
+                restore: ui.conversation,
             };
             (app, Task::none())
         }
 
         fn subscription(&self) -> Subscription<Message> {
-            let mut subscriptions = vec![named("backend", backend_worker), zoom_events()];
+            let mut subscriptions = vec![named("backend", backend_worker), window_events()];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
             // Timers run only while something animates; idle stays event-driven.
@@ -1097,8 +1198,12 @@ mod app {
                 Message::Pulse => self.pulse += PULSE_TICK.as_secs_f32(),
                 Message::Zoom(factor) => {
                     self.zoom = (self.zoom * factor).clamp(0.5, 3.0);
+                    self.persist();
                 }
-                Message::ZoomReset => self.zoom = 1.0,
+                Message::ZoomReset => {
+                    self.zoom = 1.0;
+                    self.persist();
+                }
                 Message::Edit(action) => self.draft.perform(action),
                 Message::Send => self.send(),
                 Message::Stop => {
@@ -1123,13 +1228,26 @@ mod app {
                 Message::Open(id) => {
                     self.page = Page::Chat;
                     self.open(id);
+                    self.persist();
                 }
                 Message::New => {
                     self.page = Page::Chat;
                     self.cmd(Command::NewScratch);
                 }
-                Message::SetPage(page) => self.page = page,
-                Message::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+                Message::SetPage(page) => {
+                    self.page = page;
+                    self.persist();
+                }
+                Message::ToggleSidebar => {
+                    self.sidebar_open = !self.sidebar_open;
+                    self.persist();
+                }
+                // Popups are windows too; only the main one's size is worth restoring.
+                Message::Resized(id, size) => {
+                    if self.core.main_window_id() == Some(id) {
+                        self.window = Some((size.width, size.height));
+                    }
+                }
                 Message::Answer { request_id, allow } => {
                     self.approvals.retain(|(id, _)| *id != request_id);
                     if let Some(conversation_id) = self.current.clone() {
@@ -1142,7 +1260,10 @@ mod app {
                 }
                 // libcosmic's Wayland teardown races between two threads and segfaults.
                 // Nothing here needs tearing down: state is saved as it changes.
-                Message::Quit => std::process::exit(0),
+                Message::Quit => {
+                    self.persist();
+                    std::process::exit(0)
+                }
                 Message::SetModel(i) => {
                     if let Some((_, v)) = MODEL_PRESETS.get(i) {
                         self.settings.model = (*v).to_string();
@@ -1292,9 +1413,10 @@ mod app {
         }
     }
 
-    /// Ctrl+scroll and Ctrl+`+`/`-`/`0`. Scroll events carry no modifier state, so
-    /// Ctrl is tracked here; a plain scroll yields no message, as each one rebuilds the view.
-    fn zoom_events() -> Subscription<Message> {
+    /// Window resizes, plus Ctrl+scroll and Ctrl+`+`/`-`/`0` zoom. Scroll events carry no
+    /// modifier state, so Ctrl is tracked here; a plain scroll yields no message, as each
+    /// one rebuilds the view.
+    fn window_events() -> Subscription<Message> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         use cosmic::iced::Event;
@@ -1303,10 +1425,13 @@ mod app {
 
         static CTRL: AtomicBool = AtomicBool::new(false);
 
-        cosmic::iced::event::listen_with(|event, _status, _id| match event {
+        cosmic::iced::event::listen_with(|event, _status, id| match event {
             Event::Keyboard(Key::ModifiersChanged(m)) => {
                 CTRL.store(m.control(), Ordering::Relaxed);
                 None
+            }
+            Event::Window(cosmic::iced::window::Event::Resized(size)) => {
+                Some(Message::Resized(id, size))
             }
             Event::Keyboard(Key::KeyPressed { key, modifiers, .. }) if modifiers.control() => {
                 match key.as_ref() {
