@@ -1,5 +1,6 @@
 //! Smoke test: settings persist across backend instances (temp data dir), a model
-//! version claudo once saved loads as its family's alias, and the CLI lists its models.
+//! version claudo once saved loads as its family's alias, and the CLI lists its models and
+//! reports usage without a turn.
 //! Usage: cargo run -p claudo-core --example settings_probe
 
 use claudo_core::backend::Backend;
@@ -36,6 +37,27 @@ fn main() {
     if let Some(ServerEvent::Models(models)) = rx2.blocking_recv() {
         for m in models {
             println!("model: {:?} runs {}", m.value, m.label);
+        }
+    }
+
+    backend2.handle(Command::GetUsage);
+    if let Some(ServerEvent::Quota(quota)) = rx2.blocking_recv() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for (name, window) in [
+            ("five hour", quota.five_hour),
+            ("seven day", quota.seven_day),
+        ] {
+            match window {
+                Some(w) => println!(
+                    "{name}: {:.0}% used, resets in {} min",
+                    w.used * 100.0,
+                    w.resets_at.saturating_sub(now) / 60
+                ),
+                None => println!("{name}: not reported"),
+            }
         }
     }
 

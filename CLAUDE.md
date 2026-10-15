@@ -100,6 +100,10 @@ Each user line carries a `uuid`, and an `initialize` control request goes first.
 lists the models: claudo offers the family aliases (`opus`, `sonnet`, ...) labelled with
 the version each runs today (`displayName`), so a choice follows new releases.
 
+A `get_usage` control request answers with `rate_limits.five_hour` and `.seven_day`
+(`utilization` in percent, `resets_at` as RFC 3339) without a turn, so it costs no tokens;
+`cli::usage` asks a short-lived process for it.
+
 Every turn emits its own `system`/`init` and ends with its own `result`; the process then
 waits for the next line. Closing stdin makes it finish the running turn and exit.
 `--resume` keeps the session id, so a respawned process continues the same transcript.

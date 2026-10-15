@@ -22,9 +22,8 @@ use uuid::Uuid;
 
 use crate::claude_bin;
 
-/// The model families the CLI offers, by the alias that runs each one's newest version,
-/// as its `initialize` response lists them. Pinned older versions and `default` are left out.
-pub fn models() -> io::Result<Vec<ModelOption>> {
+/// The answer to one control request, from a short-lived process: no turn, no tokens.
+fn ask(subtype: &str) -> io::Result<Value> {
     let mut child = Command::new(claude_bin())
         .current_dir(std::env::temp_dir())
         .arg("-p")
@@ -36,23 +35,35 @@ pub fn models() -> io::Result<Vec<ModelOption>> {
         .stderr(Stdio::null())
         .spawn()?;
     let mut stdin = child.stdin.take().expect("stdin piped");
-    writeln!(
-        stdin,
-        "{}",
-        json!({ "type": "control_request", "request_id": "models", "request": { "subtype": "initialize" } })
-    )?;
+    for request in ["initialize", subtype] {
+        writeln!(
+            stdin,
+            "{}",
+            json!({ "type": "control_request", "request_id": request, "request": { "subtype": request } })
+        )?;
+    }
     let stdout = child.stdout.take().expect("stdout piped");
     let response = BufReader::new(stdout)
         .lines()
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-        .find(|v| v.get("type").and_then(Value::as_str) == Some("control_response"));
+        .find(|v| {
+            v.get("type").and_then(Value::as_str) == Some("control_response")
+                && v.pointer("/response/request_id").and_then(Value::as_str) == Some(subtype)
+        });
     drop(stdin);
     let _ = child.wait();
+    response
+        .and_then(|v| v.pointer("/response/response").cloned())
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
 
+/// The model families the CLI offers, by the alias that runs each one's newest version,
+/// as its `initialize` response lists them. Pinned older versions and `default` are left out.
+pub fn models() -> io::Result<Vec<ModelOption>> {
+    let response = ask("initialize")?;
     let models = response
-        .as_ref()
-        .and_then(|v| v.pointer("/response/response/models"))
+        .get("models")
         .and_then(Value::as_array)
         .ok_or(io::ErrorKind::InvalidData)?;
     Ok(models
@@ -66,6 +77,54 @@ pub fn models() -> io::Result<Vec<ModelOption>> {
             })
         })
         .collect())
+}
+
+/// The subscription's usage windows, without waiting for a turn to report them.
+pub fn usage() -> io::Result<Quota> {
+    let response = ask("get_usage")?;
+    let limits = response
+        .get("rate_limits")
+        .ok_or(io::ErrorKind::InvalidData)?;
+    // Percents here, where a turn's `rate_limit_event` gives fractions.
+    let window = |key: &str| {
+        let window = limits.get(key)?;
+        Some(QuotaWindow {
+            used: window.get("utilization")?.as_f64()? as f32 / 100.0,
+            resets_at: unix_seconds(window.get("resets_at")?.as_str()?)?,
+        })
+    };
+    Ok(Quota {
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
+    })
+}
+
+/// Unix seconds of an RFC 3339 time, such as `2026-10-15T21:30:00.476926+00:00`.
+fn unix_seconds(time: &str) -> Option<u64> {
+    let (date, rest) = time.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
+    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
+    let (clock, zone) = rest.split_at(rest.find(['Z', '+', '-']).unwrap_or(rest.len()));
+    let mut clock = clock.splitn(3, ':');
+    let hour = clock.next()?.parse::<i64>().ok()?;
+    let minute = clock.next()?.parse::<i64>().ok()?;
+    let second = clock.next()?.split('.').next()?.parse::<i64>().ok()?;
+    let offset = match zone.chars().next() {
+        None | Some('Z') => 0,
+        Some(sign) => {
+            let (h, m) = zone[1..].split_once(':')?;
+            let offset = h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60;
+            if sign == '-' { -offset } else { offset }
+        }
+    };
+    // Days since 1970-01-01 in the proleptic Gregorian calendar (Howard Hinnant's days_from_civil).
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second - offset).ok()
 }
 
 /// Map the shared `Profile` to the CLI's `--permission-mode` value. True
@@ -1183,6 +1242,20 @@ mod tests {
         assert_eq!(end.background.status, TaskStatus::Completed);
         assert_eq!(end.summary, "It ended");
         assert!(task_notification("please read <task-notification> docs").is_none());
+    }
+
+    #[test]
+    fn usage_reset_times_become_unix_seconds() {
+        assert_eq!(
+            unix_seconds("2026-10-15T21:30:00.476926+00:00"),
+            Some(1_792_099_800)
+        );
+        assert_eq!(
+            unix_seconds("2026-10-18T06:00:00-04:30"),
+            Some(1_792_319_400)
+        );
+        assert_eq!(unix_seconds("2026-10-15T21:30:00Z"), Some(1_792_099_800));
+        assert_eq!(unix_seconds("tomorrow"), None);
     }
 
     #[test]

@@ -72,6 +72,15 @@ impl Backend {
                 });
             }
 
+            Command::GetUsage => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    if let Ok(quota) = crate::engine::cli::usage() {
+                        let _ = events.send(ServerEvent::Quota(quota));
+                    }
+                });
+            }
+
             Command::UpdateSettings { settings } => {
                 crate::settings::save(&settings);
                 self.emit(ServerEvent::Settings(settings));

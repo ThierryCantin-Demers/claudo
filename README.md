@@ -54,6 +54,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Permission profiles: Safe, Accept edits, Full auto.
 - Model and thinking level, globally or per conversation.
 - Context usage for the last turn.
+- COSMIC: your plan's usage at the foot of the sidebar, the five-hour session and the week, with when each resets.
 - A scratch working directory per conversation, or an attached project folder.
 - Zoom with Ctrl+scroll or Ctrl+`+`/`-`/`0`.
 - COSMIC: several agents side by side in tiles (below).

@@ -360,6 +360,21 @@ fn snapshots() {
     let idx = app.views[ALPHA].commands().nth(2).unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
     Harness::new(app).snapshot("commands");
+
+    let mut app = two_tiles();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let window = |used, hours: u64| claudo_protocol::QuotaWindow {
+        used,
+        resets_at: now + hours * 3600 + 1800,
+    };
+    app.quota = Some(claudo_protocol::Quota {
+        five_hour: Some(window(0.42, 2)),
+        seven_day: Some(window(0.86, 61)),
+    });
+    Harness::new(app).snapshot("usage");
 }
 
 #[test]

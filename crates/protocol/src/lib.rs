@@ -297,6 +297,8 @@ pub enum Command {
     GetSettings,
     /// Answered by `Models`.
     GetModels,
+    /// The subscription's usage windows now, answered with `Quota`. Turns report them too.
+    GetUsage,
     UpdateSettings {
         settings: Settings,
     },

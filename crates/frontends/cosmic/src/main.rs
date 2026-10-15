@@ -25,7 +25,7 @@ fn main() -> cosmic::iced::Result {
 mod app {
     use claudo_protocol::{
         Command, ConversationId, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides,
-        Profile, ServerEvent, Settings, SystemStatus, ToolCall,
+        Profile, Quota, ServerEvent, Settings, SystemStatus, ToolCall,
     };
     use claudo_transport::{Commands, spawn_backend};
 
@@ -539,6 +539,10 @@ mod app {
         restore: Option<(Vec<Tile>, usize)>,
         /// The conversation whose composer takes focus after this update.
         focus_composer: Option<ConversationId>,
+        /// The subscription's usage windows, as last reported.
+        quota: Option<Quota>,
+        /// Minutes since launch, counted to refresh `quota`.
+        minutes: u32,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,6 +626,7 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        Minute,
         /// Open or close the Commands panel.
         ShowCommands(bool),
         StartCommandsDrag,
@@ -1188,7 +1193,7 @@ mod app {
                 ServerEvent::Status(s) => self.status = Some(s),
                 ServerEvent::Settings(s) => self.settings = s,
                 ServerEvent::Models(models) => self.models = models,
-                ServerEvent::Quota(_) => {}
+                ServerEvent::Quota(quota) => self.quota = Some(usage::merged(self.quota, quota)),
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
                     self.restore_tiles();
@@ -1387,31 +1392,36 @@ mod app {
             }
 
             widget::container(
-                widget::Column::with_children(vec![
-                    widget::tooltip(
-                        widget::button::text(if self.modifiers.shift() {
-                            "New tile"
-                        } else {
-                            "New chat"
-                        })
-                        .leading_icon(widget::icon::from_name("list-add-symbolic"))
-                        .on_press(Message::New),
-                        widget::text("Shift+click for a new tile"),
-                        widget::tooltip::Position::Bottom,
-                    )
-                    .into(),
-                    widget::text("Recents")
-                        .size(12.0 * self.zoom)
-                        .class(dim())
+                widget::Column::with_children(
+                    vec![
+                        widget::tooltip(
+                            widget::button::text(if self.modifiers.shift() {
+                                "New tile"
+                            } else {
+                                "New chat"
+                            })
+                            .leading_icon(widget::icon::from_name("list-add-symbolic"))
+                            .on_press(Message::New),
+                            widget::text("Shift+click for a new tile"),
+                            widget::tooltip::Position::Bottom,
+                        )
                         .into(),
-                    widget::scrollable(widget::Column::with_children(list).spacing(2))
-                        .height(Length::Fill)
-                        .into(),
-                    widget::button::text("Settings")
+                        widget::text("Recents")
+                            .size(12.0 * self.zoom)
+                            .class(dim())
+                            .into(),
+                        widget::scrollable(widget::Column::with_children(list).spacing(2))
+                            .height(Length::Fill)
+                            .into(),
+                    ]
+                    .into_iter()
+                    .chain(self.usage())
+                    .chain([widget::button::text("Settings")
                         .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
                         .on_press(Message::SetPage(Page::Settings))
-                        .into(),
-                ])
+                        .into()])
+                    .collect::<Vec<Element<Message>>>(),
+                )
                 .spacing(8),
             )
             .width(Length::Fixed(self.layout.sidebar_width))
@@ -2760,12 +2770,20 @@ mod app {
                 drafts: ui.drafts,
                 restore: Some((ui.tiles, ui.focused)),
                 focus_composer: None,
+                quota: None,
+                minutes: 0,
             };
             (app, Task::none())
         }
 
         fn subscription(&self) -> Subscription<Message> {
-            let mut subscriptions = vec![named("backend", backend_worker), window_events()];
+            let mut subscriptions = vec![
+                named("backend", backend_worker),
+                window_events(),
+                // Also keeps the usage reset times current.
+                cosmic::iced::time::every(std::time::Duration::from_secs(60))
+                    .map(|_| Message::Minute),
+            ];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
             if matches!(self.drag, Some(Drag::Tile { .. }))
@@ -2790,6 +2808,12 @@ mod app {
         fn update(&mut self, message: Message) -> Task<Message> {
             match message {
                 Message::Connected(commands) => self.commands = Some(commands),
+                Message::Minute => {
+                    self.minutes += 1;
+                    if self.minutes.is_multiple_of(usage::USAGE_REFRESH_MINUTES) {
+                        self.cmd(Command::GetUsage);
+                    }
+                }
                 Message::Events(evs) => {
                     for ev in evs {
                         self.apply(ev);
@@ -3377,6 +3401,7 @@ mod app {
     mod selectable;
     #[cfg(test)]
     mod tests;
+    mod usage;
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its
     /// function's address, which a hot patch changes, so the backend would restart.
@@ -3430,6 +3455,7 @@ mod app {
                 commands.send(Command::GetStatus);
                 commands.send(Command::GetSettings);
                 commands.send(Command::GetModels);
+                commands.send(Command::GetUsage);
                 commands.send(Command::ListConversations);
                 let _ = output.send(Message::Connected(commands)).await;
                 while let Some(ev) = events.recv().await {
