@@ -37,6 +37,7 @@ mod app {
     use serde::{Deserialize, Serialize};
 
     use cosmic::iced::advanced::subscription::{EventStream, Hasher, Recipe, from_recipe};
+    use cosmic::iced::advanced::text::IntoFragment;
     use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit};
     use cosmic::iced::advanced::widget::{Operation, Tree, tree};
     use cosmic::iced::advanced::{Clipboard, Layout, Shell, Widget, layout, overlay, renderer};
@@ -48,6 +49,7 @@ mod app {
     };
     use cosmic::widget::{self, markdown, menu, text_editor};
     use cosmic::{Application, Element};
+    use selectable::{Collect, Mark, Selectable, Selection};
 
     const PROFILES: [Profile; 3] = [Profile::Safe, Profile::AcceptEdits, Profile::FullAuto];
     const COLUMN_WIDTH: f32 = 760.0;
@@ -412,6 +414,8 @@ mod app {
         page: Page,
         modifiers: keyboard::Modifiers,
         drag: Option<Drag>,
+        /// Text selected in a transcript; one at a time, as in a browser.
+        selection: Option<Selection>,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
         /// The tiles to reopen, with the focused one, once the conversation list arrives.
@@ -495,6 +499,18 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        /// A press in a transcript's text, starting a selection there.
+        SelectStart(ConversationId, Mark),
+        /// The cursor dragged the selection's end here.
+        SelectTo(Mark),
+        /// A double or triple click selected a word or a block.
+        SelectRange(ConversationId, Mark, Mark),
+        Copy,
+        /// The selected text, for the clipboard; `primary` for the one middle click pastes.
+        Copied {
+            text: String,
+            primary: bool,
+        },
         /// A hot patch landed. Handling any message rebuilds and redraws the view,
         /// which iced's own reload leaves until the next input event.
         #[cfg(feature = "hot")]
@@ -818,6 +834,15 @@ mod app {
             }
             self.layout.focused = focused.min(self.layout.tiles.len().saturating_sub(1));
             self.focus_composer = self.focused().cloned();
+        }
+
+        /// Copies the selected transcript text, gathered from the blocks on screen.
+        fn collect_selection(&self, primary: bool) -> Task<Message> {
+            if self.selection.as_ref().is_none_or(Selection::is_empty) {
+                return Task::none();
+            }
+            cosmic::iced::advanced::widget::operate(Collect::default())
+                .map(move |text| cosmic::Action::App(Message::Copied { text, primary }))
         }
 
         fn send(&mut self, id: ConversationId) {
@@ -1562,20 +1587,46 @@ mod app {
             let size = 14.0 * self.zoom;
             let settings = markdown_settings(size);
             let live = view.pulsing().then_some(self.pulse);
+            let texts = Texts {
+                conversation: id,
+                selection: self.selection.as_ref(),
+            };
             let mut rows: Vec<Element<Message>> = Vec::new();
             for (idx, entry) in view.items.iter().enumerate() {
                 let toggle = || Message::Toggle(id.clone(), idx);
                 rows.push(match entry {
-                    Entry::User(text) => user_bubble(text, size, self.zoom),
-                    Entry::Incoming { from, text } => incoming_card(from, text, size, self.zoom),
-                    Entry::Reply(reply) => {
-                        markdown::view(reply.markdown.items(), settings).map(Message::Link)
-                    }
+                    Entry::User(text) => user_bubble(
+                        texts.text(text.as_str(), size, (idx, 0)).shrink(),
+                        self.zoom,
+                    ),
+                    Entry::Incoming { from, text } => incoming_card(
+                        from,
+                        texts.text(text.as_str(), size, (idx, 0)),
+                        size,
+                        self.zoom,
+                    ),
+                    Entry::Reply(reply) => markdown::view_with(
+                        reply.markdown.items(),
+                        settings,
+                        &selectable::Viewer {
+                            conversation: id,
+                            entry: idx,
+                            selection: self.selection.as_ref(),
+                            next: std::cell::Cell::new(0),
+                        },
+                    ),
                     Entry::Thinking { text, open } => {
                         let last = idx + 1 == view.items.len();
-                        thinking_row(toggle(), text, *open, live.filter(|_| last), size)
+                        let body = open.then(|| {
+                            texts
+                                .text(text.as_str(), size * 0.95, (idx, 0))
+                                .color(dim_color())
+                        });
+                        thinking_row(toggle(), text, body, live.filter(|_| last), size)
                     }
-                    Entry::Tool { call, open } => tool_row(toggle(), call, *open, size),
+                    Entry::Tool { call, open } => {
+                        tool_row(toggle(), call, open.then_some((texts, idx)), size)
+                    }
                 });
             }
             if let Some(label) = view.activity() {
@@ -1869,8 +1920,32 @@ mod app {
         settings
     }
 
-    fn user_bubble(text: &str, size: f32, zoom: f32) -> Element<'_, Message> {
-        let bubble = widget::container(widget::text(text).size(size))
+    /// What a transcript's selectable text needs: whose it is and what is selected.
+    #[derive(Clone, Copy)]
+    struct Texts<'a> {
+        conversation: &'a ConversationId,
+        selection: Option<&'a Selection>,
+    }
+
+    impl<'a> Texts<'a> {
+        fn text(
+            &self,
+            text: impl IntoFragment<'a>,
+            size: f32,
+            block: (usize, usize),
+        ) -> Selectable<'a> {
+            Selectable::new(
+                vec![text::Span::new(text)],
+                size,
+                self.conversation,
+                block,
+                self.selection,
+            )
+        }
+    }
+
+    fn user_bubble<'a>(text: Selectable<'a>, zoom: f32) -> Element<'a, Message> {
+        let bubble = widget::container(text)
             .padding([10.0 * zoom, 14.0 * zoom])
             .max_width(BUBBLE_WIDTH * zoom)
             .class(cosmic::theme::Container::custom(|theme| {
@@ -1892,7 +1967,7 @@ mod app {
     /// for one the user wrote.
     fn incoming_card<'a>(
         from: &'a str,
-        text: &'a str,
+        text: Selectable<'a>,
         size: f32,
         zoom: f32,
     ) -> Element<'a, Message> {
@@ -1904,7 +1979,7 @@ mod app {
                     .font(cosmic::font::semibold())
                     .class(cosmic::theme::Text::Color(accent))
                     .into(),
-                widget::text(text).size(size).into(),
+                text.into(),
             ])
             .spacing(6.0 * zoom),
         )
@@ -1928,14 +2003,15 @@ mod app {
     }
 
     /// A one-line row naming the tool and what it acted on; expands to its input and output.
-    fn tool_row(
+    /// `open` carries what its input and output need to be selectable.
+    fn tool_row<'a>(
         on_toggle: Message,
-        call: &ToolCall,
-        open: bool,
+        call: &'a ToolCall,
+        open: Option<(Texts<'a>, usize)>,
         size: f32,
-    ) -> Element<'_, Message> {
+    ) -> Element<'a, Message> {
         let small = size * 0.85;
-        let chevron = if open {
+        let chevron = if open.is_some() {
             "go-down-symbolic"
         } else {
             "go-next-symbolic"
@@ -1971,13 +2047,13 @@ mod app {
             .on_press(on_toggle)
             .class(cosmic::theme::Button::Text)
             .width(Length::Fill);
-        if !open {
+        let Some((texts, idx)) = open else {
             return header.into();
-        }
+        };
 
-        let mut details = vec![tool_text("Input", &call.input, small)];
+        let mut details = vec![tool_text(texts, (idx, 0), "Input", &call.input, small)];
         if let Some(result) = &call.result {
-            details.push(tool_text("Output", result, small));
+            details.push(tool_text(texts, (idx, 1), "Output", result, small));
         }
         let details = widget::container(widget::Column::with_children(details).spacing(10))
             .padding(12)
@@ -1990,7 +2066,13 @@ mod app {
 
     /// Tool input or output in monospace, cut to its first lines: a build log
     /// can run to thousands, and the transcript lays out every one of them.
-    fn tool_text<'a>(label: &'a str, body: &'a str, size: f32) -> Element<'a, Message> {
+    fn tool_text<'a>(
+        texts: Texts<'a>,
+        block: (usize, usize),
+        label: &'a str,
+        body: &'a str,
+        size: f32,
+    ) -> Element<'a, Message> {
         let total = body.lines().count();
         let shown = body
             .lines()
@@ -1999,8 +2081,8 @@ mod app {
             .join("\n");
         let mut rows: Vec<Element<Message>> = vec![
             widget::text(label).size(size * 0.9).class(dim()).into(),
-            widget::text(shown)
-                .size(size)
+            texts
+                .text(shown, size, block)
                 .font(cosmic::font::mono())
                 .into(),
         ];
@@ -2062,14 +2144,15 @@ mod app {
 
     /// Claude's reasoning summary as one line: its latest sentence while it is
     /// still arriving, its first once done. Expands to the whole summary.
-    fn thinking_row(
+    /// `body` is the whole summary, when the row is open.
+    fn thinking_row<'a>(
         on_toggle: Message,
-        text: &str,
-        open: bool,
+        text: &'a str,
+        body: Option<Selectable<'a>>,
         live: Option<f32>,
         size: f32,
-    ) -> Element<'_, Message> {
-        let chevron = if open {
+    ) -> Element<'a, Message> {
+        let chevron = if body.is_some() {
             "go-down-symbolic"
         } else {
             "go-next-symbolic"
@@ -2105,19 +2188,22 @@ mod app {
         .on_press(on_toggle)
         .class(cosmic::theme::Button::Text)
         .width(Length::Fill);
-        if !open {
+        let Some(body) = body else {
             return header.into();
-        }
-        let body = widget::container(widget::text(text).size(size * 0.95).class(dim()))
-            .padding([4, 12, 8, 32]);
+        };
+        let body = widget::container(body).padding([4, 12, 8, 32]);
         widget::Column::with_children(vec![header.into(), body.into()])
             .spacing(2)
             .into()
     }
 
     fn dim() -> cosmic::theme::Text {
+        cosmic::theme::Text::Color(dim_color())
+    }
+
+    fn dim_color() -> Color {
         let color: Color = cosmic::theme::active().cosmic().on_bg_color().into();
-        cosmic::theme::Text::Color(Color { a: 0.6, ..color })
+        Color { a: 0.6, ..color }
     }
 
     fn destructive() -> cosmic::theme::Text {
@@ -2205,6 +2291,7 @@ mod app {
                 page: ui.page,
                 modifiers: keyboard::Modifiers::empty(),
                 drag: None,
+                selection: None,
                 drafts: ui.drafts,
                 restore: Some((ui.tiles, ui.focused)),
                 focus_composer: None,
@@ -2216,7 +2303,9 @@ mod app {
             let mut subscriptions = vec![named("backend", backend_worker), window_events()];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
-            if matches!(self.drag, Some(Drag::Tile { .. })) {
+            if matches!(self.drag, Some(Drag::Tile { .. }))
+                || self.selection.as_ref().is_some_and(|s| s.dragging)
+            {
                 subscriptions.push(cosmic::iced::event::listen_with(release_events));
             } else if self.drag.is_some() {
                 subscriptions.push(cosmic::iced::event::listen_with(drag_events));
@@ -2258,6 +2347,9 @@ mod app {
                 }
                 Message::Modifiers(modifiers) => self.modifiers = modifiers,
                 Message::Edit(id, action) => {
+                    if matches!(action, text_editor::Action::Click(_)) {
+                        self.selection = None;
+                    }
                     // An editor losing focus clears its selection through this message too.
                     if !matches!(
                         action,
@@ -2304,8 +2396,43 @@ mod app {
                     self.open(id, Placement::Right);
                 }
                 Message::Focus(id) => {
+                    self.selection = None;
                     self.focus(&id);
                     self.focus_composer = Some(id);
+                }
+                Message::SelectStart(conversation, mark) => {
+                    self.focus(&conversation);
+                    self.selection = Some(Selection {
+                        conversation,
+                        anchor: mark,
+                        focus: mark,
+                        dragging: true,
+                    });
+                }
+                Message::SelectTo(mark) => {
+                    if let Some(selection) = &mut self.selection
+                        && selection.dragging
+                    {
+                        selection.focus = mark;
+                    }
+                }
+                Message::SelectRange(conversation, anchor, focus) => {
+                    self.focus(&conversation);
+                    self.selection = Some(Selection {
+                        conversation,
+                        anchor,
+                        focus,
+                        dragging: false,
+                    });
+                    return self.collect_selection(true);
+                }
+                Message::Copy => return self.collect_selection(false),
+                Message::Copied { text, primary } => {
+                    return if primary {
+                        cosmic::iced::clipboard::write_primary(text)
+                    } else {
+                        cosmic::iced::clipboard::write(text)
+                    };
                 }
                 Message::Close(id) => self.close(&id),
                 Message::CloseFocused => {
@@ -2350,6 +2477,12 @@ mod app {
                 }
                 Message::DragTo(x) => self.drag_to(x),
                 Message::DragTile(point) => self.drag_tile(point),
+                Message::DragEnd if self.selection.as_ref().is_some_and(|s| s.dragging) => {
+                    if let Some(selection) = &mut self.selection {
+                        selection.dragging = false;
+                    }
+                    return self.collect_selection(true);
+                }
                 Message::DragEnd => {
                     if let Some(Drag::Tile {
                         from,
@@ -2606,6 +2739,7 @@ mod app {
                     K::Character("-") => Some(Message::Zoom(1.0 / 1.1)),
                     K::Character("0") => Some(Message::ZoomReset),
                     K::Character("w" | "W") => Some(Message::CloseFocused),
+                    K::Character("c" | "C") => Some(Message::Copy),
                     K::Character("n" | "N") => Some(Message::New),
                     _ => None,
                 }
@@ -2667,6 +2801,7 @@ mod app {
         .then_some(Message::DragEnd)
     }
 
+    mod selectable;
     #[cfg(test)]
     mod tests;
 

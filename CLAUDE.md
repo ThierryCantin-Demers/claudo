@@ -156,6 +156,11 @@ rather than `update`; `CentralPanel::show` takes a `&mut Ui`; panels are `egui::
 controlled by `TextEdit::return_key`, which is how Enter sends and Shift+Enter inserts a
 newline.
 
+**Selectable text**: iced's text and markdown widgets cannot be selected, so COSMIC
+transcripts draw their text with `Selectable` (`src/app/selectable.rs`), a rich-text widget
+on cosmic-text's hit testing and highlight runs, and render markdown through its `Viewer`.
+New transcript text should go through it too, or it cannot be selected or copied.
+
 **Fonts**: egui bundles Latin glyphs only, so the Japanese font is embedded via
 `include_bytes!` and registered as a fallback. Do not switch to loading system fonts; that
 breaks the web build and portability.

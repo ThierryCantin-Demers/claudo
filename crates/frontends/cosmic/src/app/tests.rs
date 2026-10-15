@@ -108,6 +108,19 @@ impl Harness {
             .expect("a written snapshot");
     }
 
+    /// What Ctrl+C would copy.
+    fn selected(&mut self) -> String {
+        use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
+        self.frame(|ui, renderer| {
+            let mut collect = selectable::Collect::default();
+            ui.operate(renderer, &mut black_box(&mut collect));
+            match Operation::<String>::finish(&collect) {
+                Outcome::Some(text) => text,
+                _ => String::new(),
+            }
+        })
+    }
+
     /// The scroll offset of each tile's transcript, left to right.
     fn offsets(&mut self) -> Vec<f32> {
         struct Offsets(Vec<(f32, f32)>);
@@ -260,4 +273,66 @@ fn snapshots() {
         h.move_to(x, 400.0);
     }
     h.snapshot("dragging");
+}
+
+#[test]
+fn text_is_selected_across_messages_and_copied() {
+    let mut h = Harness::new(two_tiles());
+
+    // From inside "Alpha answer 25" down into the second line of "Alpha answer 27".
+    h.move_to(330.0, 293.0);
+    h.send(vec![button(true)]);
+    h.move_to(450.0, 400.0);
+    h.move_to(400.0, 543.0);
+    h.send(vec![button(false)]);
+    let _ = h.app.update(Message::DragEnd);
+
+    let copied = h.selected();
+    println!("{copied:?}");
+    assert!(
+        copied.starts_with("nswer 25") || copied.starts_with("answer 25"),
+        "{copied:?}"
+    );
+    assert!(
+        copied.contains("\n\nAlpha question 26\n\nAlpha answer 26."),
+        "{copied:?}"
+    );
+    assert!(copied.contains("Alpha answer 27."), "{copied:?}");
+    assert!(
+        !copied.contains("taller than the window.\n\nAlpha question 28"),
+        "{copied:?}"
+    );
+}
+
+#[test]
+fn a_double_click_selects_a_word() {
+    let mut h = Harness::new(two_tiles());
+    h.move_to(450.0, 638.0);
+    h.send(vec![
+        button(true),
+        button(false),
+        button(true),
+        button(false),
+    ]);
+    assert_eq!(h.selected(), "paragraph");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn selection_snapshot() {
+    let mut app = two_tiles();
+    let view = app.views.get_mut(ALPHA).expect("Alpha");
+    view.items.push(Entry::Reply(Box::new(Reply::complete(
+        "## A heading\n\nSome **bold** text and `inline code`, then a list:\n\n\
+         - first point\n- second point\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nThe end."
+            .to_string(),
+    ))));
+    let mut h = Harness::new(app);
+    h.move_to(330.0, 640.0);
+    h.send(vec![button(true)]);
+    h.move_to(330.0, 780.0);
+    h.snapshot("selection");
+    h.send(vec![button(false)]);
+    let _ = h.app.update(Message::DragEnd);
+    println!("{:?}", h.selected());
 }
