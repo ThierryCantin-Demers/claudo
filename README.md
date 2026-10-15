@@ -57,7 +57,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - A scratch working directory per conversation, or an attached project folder.
 - Zoom with Ctrl+scroll or Ctrl+`+`/`-`/`0`.
 - COSMIC: several agents side by side in tiles (below).
-- COSMIC: the Commands panel (terminal button in the header bar; drag its edge to resize) lists the shell commands the focused conversation's agent ran, running ones first, background ones included; a row expands to the whole command and its output.
+- COSMIC: the Commands panel (terminal button in the header bar; drag its edge to resize) lists the shell commands of every open agent, grouped by conversation, running ones first and background ones included, plus any agent still running one after its tile closed; a row expands to the whole command and its output.
 - COSMIC: select any text in a conversation, across messages, and copy it with Ctrl+C; double-click selects a word, triple-click a paragraph, and a selection also fills the primary selection for middle-click paste.
 
 The COSMIC frontend cannot attach a project folder yet.

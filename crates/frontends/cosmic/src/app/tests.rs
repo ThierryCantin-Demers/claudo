@@ -355,7 +355,7 @@ fn snapshots() {
     Harness::new(app).snapshot("approval");
 
     let mut app = with_commands();
-    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    app.layout.sidebar_open = false;
     let _ = app.update(Message::ShowCommands(true));
     let idx = app.views[ALPHA].commands().nth(2).unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
@@ -609,7 +609,50 @@ fn with_commands() -> ClaudoApp {
 }
 
 #[test]
-fn the_commands_drawer_lists_running_commands_first() {
+fn the_commands_panel_lists_every_agent() {
+    use claudo_protocol::{Background, TaskStatus};
+    let mut app = with_commands();
+    let mut server = bash("b1", "npm run dev", "Serve the site");
+    server.background = Some(Background {
+        status: TaskStatus::Running,
+        output: None,
+    });
+    let bravo = app.views.get_mut(BRAVO).expect("Bravo");
+    bravo.items.push(Entry::Tool {
+        call: server,
+        open: false,
+    });
+    let groups = |app: &ClaudoApp| {
+        app.command_groups()
+            .iter()
+            .map(|(id, _)| id.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(groups(&app), [ALPHA, BRAVO], "the tiles, left to right");
+    let running: usize = app
+        .views
+        .values()
+        .map(ConversationView::running_commands)
+        .sum();
+    assert_eq!(running, 3, "the header counts every agent's");
+
+    let _ = app.update(Message::ToggleCommandGroup(BRAVO.to_string()));
+    assert!(app.views[BRAVO].commands_collapsed);
+
+    app.layout.tiles.retain(|t| t.conversation == ALPHA);
+    assert_eq!(
+        groups(&app),
+        [ALPHA, BRAVO],
+        "an untiled agent still running stays"
+    );
+    if let Some(Entry::Tool { call, .. }) = app.views.get_mut(BRAVO).unwrap().items.last_mut() {
+        call.background.as_mut().unwrap().status = TaskStatus::Completed;
+    }
+    assert_eq!(groups(&app), [ALPHA], "and goes once nothing runs");
+}
+
+#[test]
+fn the_commands_panel_lists_running_commands_first() {
     let mut app = with_commands();
     app.layout.tiles.retain(|t| t.conversation == ALPHA);
     let view = &app.views[ALPHA];

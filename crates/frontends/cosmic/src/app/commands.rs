@@ -71,13 +71,14 @@ impl ClaudoApp {
         }
     }
 
-    /// The header bar's button for the panel, with how many commands are running.
+    /// The header bar's button for the panel, with how many commands are running in all.
     pub(super) fn commands_button(&self) -> Element<'_, Message> {
         let open = self.layout.commands_open;
-        let running = self
-            .focused()
-            .and_then(|id| self.views.get(id))
-            .map_or(0, ConversationView::running_commands);
+        let running: usize = self
+            .views
+            .values()
+            .map(ConversationView::running_commands)
+            .sum();
         let mut content = vec![
             widget::icon::from_name("utilities-terminal-symbolic")
                 .size(16)
@@ -106,57 +107,44 @@ impl ClaudoApp {
         .into()
     }
 
+    /// The conversations the panel lists: the tiles left to right, then any other still
+    /// running a command, since an agent keeps working after its tile closes.
+    pub(super) fn command_groups(&self) -> Vec<(&ConversationId, &ConversationView)> {
+        let mut ids: Vec<&ConversationId> =
+            self.layout.tiles.iter().map(|t| &t.conversation).collect();
+        let mut others: Vec<&ConversationId> = self
+            .views
+            .iter()
+            .filter(|(id, view)| !ids.contains(id) && view.running_commands() > 0)
+            .map(|(id, _)| id)
+            .collect();
+        others.sort();
+        ids.extend(others);
+        ids.into_iter()
+            .filter_map(|id| Some((id, self.views.get(id)?)))
+            .collect()
+    }
+
     pub(super) fn commands_panel(&self) -> Option<Element<'_, Message>> {
         if self.commands_room() == 0.0 {
             return None;
         }
-        let id = self.focused()?;
-        let view = self.views.get(id)?;
         let size = 13.0 * self.zoom;
-        let texts = Texts {
-            conversation: id,
-            selection: self.selection.as_ref(),
-        };
-        let (running, done): (Vec<_>, Vec<_>) = view
-            .commands()
-            .partition(|(_, call)| running(call, view.streaming));
+        let groups = self.command_groups();
+        let running: usize = groups.iter().map(|(_, v)| v.running_commands()).sum();
         let mut rows: Vec<Element<Message>> = Vec::new();
-        if running.is_empty() && done.is_empty() {
-            rows.push(
-                widget::text("The commands Claude runs in this conversation show here.")
-                    .size(size)
-                    .class(dim())
-                    .into(),
-            );
+        for (id, view) in groups {
+            rows.push(self.command_group(id, view, size));
         }
-        for (heading, list) in [("Running", running), ("History", done)] {
-            if list.is_empty() {
-                continue;
-            }
-            rows.push(
-                widget::text(heading)
-                    .size(size * 0.9)
-                    .font(cosmic::font::semibold())
-                    .class(dim())
-                    .into(),
-            );
-            rows.extend(
-                list.into_iter()
-                    .map(|(idx, call)| self.command_row(id, view, idx, call, texts, size)),
-            );
-        }
-        let title = self
-            .info(id)
-            .map_or("New conversation", |c| c.title.as_str());
+        let status = match running {
+            0 => "Nothing running".to_string(),
+            1 => "1 running".to_string(),
+            n => format!("{n} running"),
+        };
         let header = widget::Row::with_children(vec![
             widget::Column::with_children(vec![
                 widget::text::heading("Commands").into(),
-                widget::text(title)
-                    .size(size * 0.9)
-                    .class(dim())
-                    .wrapping(text::Wrapping::None)
-                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
-                    .into(),
+                widget::text(status).size(size * 0.9).class(dim()).into(),
             ])
             .width(Length::Fill)
             .into(),
@@ -166,7 +154,7 @@ impl ClaudoApp {
         ])
         .align_y(Alignment::Center);
         let list = widget::scrollable(
-            widget::container(widget::Column::with_children(rows).spacing(6))
+            widget::container(widget::Column::with_children(rows).spacing(16))
                 .padding([0, 12, 12, 0]),
         )
         .height(Length::Fill);
@@ -179,6 +167,80 @@ impl ClaudoApp {
             .height(Length::Fill)
             .into(),
         )
+    }
+
+    /// One conversation's commands under its title, running ones first; the title folds them.
+    fn command_group<'a>(
+        &'a self,
+        id: &'a ConversationId,
+        view: &'a ConversationView,
+        size: f32,
+    ) -> Element<'a, Message> {
+        let running_count = view.running_commands();
+        let chevron = if view.commands_collapsed {
+            "go-next-symbolic"
+        } else {
+            "go-down-symbolic"
+        };
+        let title = self
+            .info(id)
+            .map_or("New conversation", |c| c.title.as_str());
+        let mut header = vec![
+            widget::icon::from_name(chevron).size(16).into(),
+            widget::text(title)
+                .size(size)
+                .font(cosmic::font::semibold())
+                .wrapping(text::Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                .width(Length::Fill)
+                .into(),
+        ];
+        if running_count > 0 {
+            header.push(
+                widget::text(format!("{running_count} running"))
+                    .size(size * 0.9)
+                    .class(dim())
+                    .into(),
+            );
+        }
+        let header = widget::button::custom(
+            widget::Row::with_children(header)
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .on_press(Message::ToggleCommandGroup(id.clone()))
+        .class(cosmic::theme::Button::Text)
+        .width(Length::Fill);
+        let mut rows: Vec<Element<Message>> = vec![header.into()];
+        if view.commands_collapsed {
+            return widget::Column::with_children(rows).into();
+        }
+
+        let texts = Texts {
+            conversation: id,
+            selection: self.selection.as_ref(),
+        };
+        let (running, done): (Vec<_>, Vec<_>) = view
+            .commands()
+            .partition(|(_, call)| running(call, view.streaming));
+        if running.is_empty() && done.is_empty() {
+            rows.push(
+                widget::container(
+                    widget::text("No commands yet")
+                        .size(size * 0.9)
+                        .class(dim()),
+                )
+                .padding([0, 0, 0, 26])
+                .into(),
+            );
+        }
+        rows.extend(
+            running
+                .into_iter()
+                .chain(done)
+                .map(|(idx, call)| self.command_row(id, view, idx, call, texts, size)),
+        );
+        widget::Column::with_children(rows).spacing(4).into()
     }
 
     fn command_row<'a>(

@@ -170,8 +170,10 @@ mod app {
         recalled: usize,
         /// The user's own draft while a recalled prompt replaces it.
         stash: String,
-        /// Items whose row in the Commands drawer is expanded.
+        /// Items whose row in the Commands panel is expanded.
         commands_open: std::collections::HashSet<usize>,
+        /// The Commands panel shows only this conversation's title.
+        commands_collapsed: bool,
     }
 
     impl ConversationView {
@@ -188,6 +190,7 @@ mod app {
                 recalled: 0,
                 stash: String::new(),
                 commands_open: Default::default(),
+                commands_collapsed: false,
             }
         }
 
@@ -622,8 +625,10 @@ mod app {
         /// Open or close the Commands panel.
         ShowCommands(bool),
         StartCommandsDrag,
-        /// Expand or collapse a command in the Commands drawer.
+        /// Expand or collapse a command in the Commands panel.
         ToggleCommand(ConversationId, usize),
+        /// Fold or unfold a conversation's commands in the Commands panel.
+        ToggleCommandGroup(ConversationId),
         /// Up or Down at the message box's edge: an earlier or later prompt.
         Recall {
             conversation: ConversationId,
@@ -2834,6 +2839,11 @@ mod app {
                     self.persist();
                 }
                 Message::StartCommandsDrag => self.drag = Some(Drag::Commands { offset: None }),
+                Message::ToggleCommandGroup(id) => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.commands_collapsed = !view.commands_collapsed;
+                    }
+                }
                 Message::ToggleCommand(id, idx) => {
                     if let Some(view) = self.views.get_mut(&id)
                         && !view.commands_open.remove(&idx)
