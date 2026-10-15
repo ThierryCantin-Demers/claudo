@@ -266,6 +266,11 @@ pub enum Command {
         id: ConversationId,
         overrides: Overrides,
     },
+    /// Give a conversation a title of the user's own; its agent takes it as its name.
+    Rename {
+        id: ConversationId,
+        title: String,
+    },
     /// `request` is echoed in the `Created` that answers it, so the client knows where it goes.
     NewScratch {
         request: u64,

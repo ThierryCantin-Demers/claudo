@@ -94,6 +94,15 @@ impl Backend {
 
             Command::OpenConversation { id } => self.open(id),
 
+            Command::Rename { id, title } => {
+                let title = title.trim().to_string();
+                if !title.is_empty() {
+                    self.store.lock().unwrap().rename(&id, title.clone());
+                    self.live.rename(&id, &title);
+                }
+                self.emit(conversations_event(&self.store));
+            }
+
             Command::SetOverrides { id, overrides } => {
                 self.store.lock().unwrap().set_overrides(&id, overrides);
                 self.emit(conversations_event(&self.store));
@@ -160,6 +169,7 @@ impl Backend {
                     let mut store = self.store.lock().unwrap();
                     if let Some(meta) = store.get_mut(&id)
                         && !meta.attached
+                        && !meta.renamed
                         && meta.title != title
                     {
                         meta.title = title.clone();

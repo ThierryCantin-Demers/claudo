@@ -1,4 +1,4 @@
-//! Smoke test: per-conversation overrides persist and ride along in
+//! Smoke test: per-conversation overrides and titles persist and ride along in
 //! ConversationInfo. Usage: cargo run -p claudo-core --example overrides_probe
 
 use claudo_core::backend::Backend;
@@ -28,9 +28,21 @@ fn main() {
     backend.handle(Command::ListConversations);
     print_overrides(&mut rx, "after SetOverrides");
 
+    backend.handle(Command::Rename {
+        id: id.clone(),
+        title: "  Research agent ".to_string(),
+    });
+    backend.handle(Command::Rename {
+        id: id.clone(),
+        title: "   ".to_string(),
+    });
+    print_titles(&mut rx, "after renaming, then a blank rename");
+
     // Fresh backend loads it from disk.
     let (tx2, mut rx2) = unbounded_channel::<ServerEvent>();
     let backend2 = Backend::new(tx2);
+    backend2.handle(Command::ListConversations);
+    print_titles(&mut rx2, "reloaded");
     backend2.handle(Command::ListConversations);
     print_overrides(&mut rx2, "reloaded");
 
@@ -58,6 +70,16 @@ fn print_overrides(rx: &mut UnboundedReceiver<ServerEvent>, label: &str) {
                     "{label}: model={:?} effort={:?} profile={:?}",
                     c.overrides.model, c.overrides.effort, c.overrides.profile
                 );
+            }
+        }
+    }
+}
+
+fn print_titles(rx: &mut UnboundedReceiver<ServerEvent>, label: &str) {
+    while let Ok(ev) = rx.try_recv() {
+        if let ServerEvent::Conversations { list } = ev {
+            for c in list {
+                println!("{label}: title={:?}", c.title);
             }
         }
     }

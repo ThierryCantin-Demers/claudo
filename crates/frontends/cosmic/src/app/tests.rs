@@ -172,6 +172,19 @@ fn button(pressed: bool) -> Event {
     })
 }
 
+fn escape() -> Event {
+    use keyboard::key::{Code, Named, Physical};
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Named(Named::Escape),
+        modified_key: keyboard::Key::Named(Named::Escape),
+        physical_key: Physical::Code(Code::Escape),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::empty(),
+        text: None,
+        repeat: false,
+    })
+}
+
 fn wheel(lines: f32) -> Event {
     Event::Mouse(mouse::Event::WheelScrolled {
         delta: mouse::ScrollDelta::Lines { x: 0.0, y: lines },
@@ -335,4 +348,45 @@ fn selection_snapshot() {
     h.send(vec![button(false)]);
     let _ = h.app.update(Message::DragEnd);
     println!("{:?}", h.selected());
+}
+
+#[test]
+fn clicking_a_title_renames_the_conversation() {
+    let mut h = Harness::new(two_tiles());
+    let title = |h: &Harness| h.app.info(ALPHA).map(|c| c.title.clone()).expect("Alpha");
+
+    h.move_to(300.0, 20.0);
+    h.send(vec![button(true), button(false)]);
+    assert_eq!(
+        h.app.renaming,
+        Some((ALPHA.to_string(), "Alpha".to_string()))
+    );
+
+    let _ = h
+        .app
+        .update(Message::RenameText("  Research agent ".to_string()));
+    let _ = h.app.update(Message::CommitRename);
+    assert_eq!(h.app.renaming, None);
+    assert_eq!(title(&h), "Research agent", "kept, trimmed");
+
+    h.move_to(300.0, 20.0);
+    h.send(vec![button(true), button(false)]);
+    let _ = h
+        .app
+        .update(Message::RenameText("Something else".to_string()));
+    h.send(vec![escape()]);
+    assert_eq!(h.app.renaming, None);
+    assert_eq!(title(&h), "Research agent", "Escape leaves it");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn rename_snapshot() {
+    let mut h = Harness::new(two_tiles());
+    h.move_to(300.0, 20.0);
+    h.send(vec![button(true), button(false)]);
+    let _ = h
+        .app
+        .update(Message::RenameText("Research agent".to_string()));
+    h.snapshot("rename");
 }

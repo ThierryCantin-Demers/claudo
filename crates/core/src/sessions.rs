@@ -46,6 +46,9 @@ pub struct ConversationMeta {
     /// True once a project folder was attached (vs a scratch dir we own).
     #[serde(default)]
     pub attached: bool,
+    /// The user chose the title, so a generated one never replaces it.
+    #[serde(default)]
+    pub renamed: bool,
     pub session_id: Option<String>,
     #[serde(default)]
     pub overrides: Overrides,
@@ -127,6 +130,7 @@ impl Store {
             title,
             cwd,
             attached,
+            renamed: false,
             session_id: None,
             overrides: Overrides::default(),
             context: ContextUsage::default(),
@@ -157,6 +161,14 @@ impl Store {
             if let Some(sid) = session_id {
                 c.session_id = Some(sid.to_string());
             }
+        }
+        self.save();
+    }
+
+    pub fn rename(&mut self, id: &str, title: String) {
+        if let Some(c) = self.get_mut(id) {
+            c.title = title;
+            c.renamed = true;
         }
         self.save();
     }

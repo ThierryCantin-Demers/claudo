@@ -381,6 +381,8 @@ mod app {
         compact: bool,
         /// Being dragged; it shows where it would land.
         lifted: bool,
+        /// Its width, as far as the window's size tells.
+        pixels: f32,
     }
 
     /// Where an opened or created conversation goes.
@@ -416,6 +418,8 @@ mod app {
         drag: Option<Drag>,
         /// Text selected in a transcript; one at a time, as in a browser.
         selection: Option<Selection>,
+        /// The conversation whose title is being edited, and the text so far.
+        renaming: Option<(ConversationId, String)>,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
         /// The tiles to reopen, with the focused one, once the conversation list arrives.
@@ -506,6 +510,13 @@ mod app {
         /// A double or triple click selected a word or a block.
         SelectRange(ConversationId, Mark, Mark),
         Copy,
+        /// A click on a conversation's title, to edit it.
+        StartRename(ConversationId),
+        RenameText(String),
+        /// Enter, or a click elsewhere, keeps the edited title.
+        CommitRename,
+        /// Escape leaves the title as it was.
+        CancelRename,
         /// The selected text, for the clipboard; `primary` for the one middle click pastes.
         Copied {
             text: String,
@@ -834,6 +845,59 @@ mod app {
             }
             self.layout.focused = focused.min(self.layout.tiles.len().saturating_sub(1));
             self.focus_composer = self.focused().cloned();
+        }
+
+        fn rename(&mut self, id: ConversationId, title: String) {
+            let Some(info) = self.conversations.iter_mut().find(|c| c.id == id) else {
+                return;
+            };
+            if title.is_empty() || info.title == title {
+                return;
+            }
+            info.title = title.clone();
+            self.cmd(Command::Rename { id, title });
+        }
+
+        /// The title being edited, in place of the conversation's name.
+        fn rename_input(&self, width: Length) -> Element<'_, Message> {
+            let text = self
+                .renaming
+                .as_ref()
+                .map_or("", |(_, title)| title.as_str());
+            Intercept {
+                on_escape: Some(Message::CancelRename),
+                ..Intercept::new(
+                    widget::inline_input("Conversation title", text)
+                        .id(rename_id())
+                        .on_input(Message::RenameText)
+                        .on_submit(|_| Message::CommitRename)
+                        .on_unfocus(Message::CommitRename)
+                        .width(width),
+                )
+            }
+            .into()
+        }
+
+        /// A conversation's title, which a click turns into a text field.
+        fn title_button<'a>(
+            &'a self,
+            id: &'a ConversationId,
+            title: &'a str,
+        ) -> widget::Button<'a, Message> {
+            widget::button::custom(
+                widget::text::heading(title)
+                    .wrapping(text::Wrapping::None)
+                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
+            )
+            .class(title_style())
+            .padding([2, 6])
+            .on_press(Message::StartRename(id.clone()))
+        }
+
+        fn renaming(&self, id: &str) -> bool {
+            self.renaming
+                .as_ref()
+                .is_some_and(|(renaming, _)| renaming == id)
         }
 
         /// Copies the selected transcript text, gathered from the blocks on screen.
@@ -1207,6 +1271,7 @@ mod app {
                     focused: several && i == self.layout.focused,
                     compact: pixels < COMPACT_TILE,
                     lifted: lifted.is_some_and(|(from, ..)| from == i),
+                    pixels,
                 };
                 row.push(self.tile(&tile.conversation, view, tile_view, width(tile.share)));
             }
@@ -1321,7 +1386,7 @@ mod app {
         ) -> Element<'a, Message> {
             let body = self.conversation(id, view, tile.compact);
             let content: Element<Message> = if tile.several {
-                widget::Column::with_children(vec![self.tile_header(id), body]).into()
+                widget::Column::with_children(vec![self.tile_header(id, tile.pixels), body]).into()
             } else {
                 body
             };
@@ -1329,10 +1394,10 @@ mod app {
             // editor state back wherever it moves. The name sits below the row's direct
             // child: between siblings, libcosmic finds a moved state by name but leaves it
             // at its old index.
-            let named = CtrlPress {
-                id: widget::Id::new(format!("tile-{id}")),
-                content,
-                on_press: Message::StartMove(id.clone()),
+            let named = Intercept {
+                id: Some(widget::Id::new(format!("tile-{id}"))),
+                on_ctrl_press: Some(Message::StartMove(id.clone())),
+                ..Intercept::new(content)
             };
             let framed = widget::container(named)
                 .width(width)
@@ -1343,15 +1408,24 @@ mod app {
                 .into()
         }
 
-        fn tile_header<'a>(&'a self, id: &'a ConversationId) -> Element<'a, Message> {
+        fn tile_header<'a>(&'a self, id: &'a ConversationId, width: f32) -> Element<'a, Message> {
             let info = self.info(id);
-            let mut row = vec![
-                widget::text::heading(info.map_or("New conversation", |c| c.title.as_str()))
-                    .wrapping(text::Wrapping::None)
-                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
-                    .width(Length::Fill)
-                    .into(),
-            ];
+            let mut row =
+                if self.renaming(id) {
+                    vec![self.rename_input(Length::Fill)]
+                } else {
+                    // The title stays as wide as its text, so the rest of the header can be
+                    // dragged; past the room it has, it ellipsizes.
+                    vec![
+                        widget::container(self.title_button(
+                            id,
+                            info.map_or("New conversation", |c| c.title.as_str()),
+                        ))
+                        .max_width((width - 220.0).max(80.0))
+                        .into(),
+                        widget::space::horizontal().into(),
+                    ]
+                };
             if let Some(label) = info.and_then(|c| context_label(&c.context)) {
                 row.push(widget::text(label).size(12.0).class(dim()).into());
             }
@@ -1683,14 +1757,27 @@ mod app {
             .into()
     }
 
-    /// Takes left presses made with Ctrl before its content sees them, so Ctrl+dragging
-    /// over a button or the message box moves the tile instead of pressing them. It also
-    /// carries the tile's id: libcosmic matches a widget's state to it by the id it
-    /// reports, and a container reports its content's, not its own.
-    struct CtrlPress<'a> {
-        id: widget::Id,
+    /// Takes some input before its content sees it: a left press made with Ctrl, so
+    /// Ctrl+dragging over a button or the message box moves a tile instead of pressing
+    /// them, and Escape, which a text input would take as losing focus. It can also carry
+    /// an id: libcosmic matches a widget's state to it by the id it reports, and a
+    /// container reports its content's, not its own.
+    struct Intercept<'a> {
+        id: Option<widget::Id>,
         content: Element<'a, Message>,
-        on_press: Message,
+        on_ctrl_press: Option<Message>,
+        on_escape: Option<Message>,
+    }
+
+    impl<'a> Intercept<'a> {
+        fn new(content: impl Into<Element<'a, Message>>) -> Self {
+            Self {
+                id: None,
+                content: content.into(),
+                on_ctrl_press: None,
+                on_escape: None,
+            }
+        }
     }
 
     #[derive(Default)]
@@ -1698,7 +1785,7 @@ mod app {
         ctrl: bool,
     }
 
-    impl Widget<Message, cosmic::Theme, cosmic::Renderer> for CtrlPress<'_> {
+    impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Intercept<'_> {
         fn tag(&self) -> tree::Tag {
             tree::Tag::of::<CtrlState>()
         }
@@ -1716,11 +1803,11 @@ mod app {
         }
 
         fn id(&self) -> Option<widget::Id> {
-            Some(self.id.clone())
+            self.id.clone()
         }
 
         fn set_id(&mut self, id: widget::Id) {
-            self.id = id;
+            self.id = Some(id);
         }
 
         fn size(&self) -> cosmic::iced::Size<Length> {
@@ -1774,9 +1861,21 @@ mod app {
                 Event::Mouse(Mouse::ButtonPressed(Button::Left))
                     if state.ctrl && cursor.is_over(layout.bounds()) =>
                 {
-                    shell.publish(self.on_press.clone());
-                    shell.capture_event();
-                    return;
+                    if let Some(message) = &self.on_ctrl_press {
+                        shell.publish(message.clone());
+                        shell.capture_event();
+                        return;
+                    }
+                }
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => {
+                    if let Some(message) = &self.on_escape {
+                        shell.publish(message.clone());
+                        shell.capture_event();
+                        return;
+                    }
                 }
                 _ => {}
             }
@@ -1800,7 +1899,10 @@ mod app {
             viewport: &cosmic::iced::Rectangle,
             renderer: &cosmic::Renderer,
         ) -> cosmic::iced::mouse::Interaction {
-            if tree.state.downcast_ref::<CtrlState>().ctrl && cursor.is_over(layout.bounds()) {
+            if self.on_ctrl_press.is_some()
+                && tree.state.downcast_ref::<CtrlState>().ctrl
+                && cursor.is_over(layout.bounds())
+            {
                 return cosmic::iced::mouse::Interaction::Grab;
             }
             self.content.as_widget().mouse_interaction(
@@ -1866,9 +1968,9 @@ mod app {
         }
     }
 
-    impl<'a> From<CtrlPress<'a>> for Element<'a, Message> {
-        fn from(press: CtrlPress<'a>) -> Self {
-            Element::new(press)
+    impl<'a> From<Intercept<'a>> for Element<'a, Message> {
+        fn from(intercept: Intercept<'a>) -> Self {
+            Element::new(intercept)
         }
     }
 
@@ -2097,6 +2199,28 @@ mod app {
         widget::Column::with_children(rows).spacing(4).into()
     }
 
+    /// A text button in the plain text color, since the title is not a link.
+    fn title_style() -> cosmic::theme::Button {
+        use cosmic::widget::button::{Catalog, Style};
+        let plain = |mut style: Style, theme: &cosmic::Theme| {
+            style.text_color = Some(theme.cosmic().on_bg_color().into());
+            style
+        };
+        let text = || cosmic::theme::Button::Text;
+        cosmic::theme::Button::Custom {
+            active: Box::new(move |focused, theme| {
+                plain(theme.active(focused, false, &text()), theme)
+            }),
+            disabled: Box::new(move |theme| theme.disabled(&text())),
+            hovered: Box::new(move |focused, theme| {
+                plain(theme.hovered(focused, false, &text()), theme)
+            }),
+            pressed: Box::new(move |focused, theme| {
+                plain(theme.pressed(focused, false, &text()), theme)
+            }),
+        }
+    }
+
     /// libcosmic's list item, with the title taking the accent color on hover. `Custom`
     /// closures are not told whether the button is selected, so it is captured here.
     fn conversation_style(radius: [f32; 4], selected: bool) -> cosmic::theme::Button {
@@ -2210,6 +2334,10 @@ mod app {
         cosmic::theme::Text::Color(cosmic::theme::active().cosmic().destructive_color().into())
     }
 
+    fn rename_id() -> widget::Id {
+        widget::Id::new("rename")
+    }
+
     fn composer_id(conversation: &str) -> widget::Id {
         widget::Id::new(format!("composer-{conversation}"))
     }
@@ -2292,6 +2420,7 @@ mod app {
                 modifiers: keyboard::Modifiers::empty(),
                 drag: None,
                 selection: None,
+                renaming: None,
                 drafts: ui.drafts,
                 restore: Some((ui.tiles, ui.focused)),
                 focus_composer: None,
@@ -2427,6 +2556,25 @@ mod app {
                     return self.collect_selection(true);
                 }
                 Message::Copy => return self.collect_selection(false),
+                Message::StartRename(id) => {
+                    let title = self.info(&id).map(|c| c.title.clone()).unwrap_or_default();
+                    self.renaming = Some((id, title));
+                    return Task::batch([
+                        widget::text_input::focus(rename_id()),
+                        widget::text_input::select_all(rename_id()),
+                    ]);
+                }
+                Message::RenameText(text) => {
+                    if let Some((_, title)) = &mut self.renaming {
+                        *title = text;
+                    }
+                }
+                Message::CommitRename => {
+                    if let Some((id, title)) = self.renaming.take() {
+                        self.rename(id, title.trim().to_string());
+                    }
+                }
+                Message::CancelRename => self.renaming = None,
                 Message::Copied { text, primary } => {
                     return if primary {
                         cosmic::iced::clipboard::write_primary(text)
@@ -2638,17 +2786,23 @@ mod app {
 
         /// With several tiles each names its own conversation, so the window names none.
         fn header_center(&self) -> Vec<Element<'_, Message>> {
-            let title = match self.page {
-                Page::Settings => Some("Settings".to_string()),
-                Page::Chat if self.layout.tiles.len() == 1 => {
-                    self.focused_info().map(|c| truncate(&c.title, 60))
-                }
+            let title: Option<Element<Message>> = match self.page {
+                Page::Settings => Some(widget::text::heading("Settings").into()),
+                Page::Chat if self.layout.tiles.len() == 1 => self.focused().map(|id| {
+                    if self.renaming(id) {
+                        self.rename_input(Length::Fixed(360.0))
+                    } else {
+                        let title = self
+                            .info(id)
+                            .map_or("New conversation", |c| c.title.as_str());
+                        widget::container(self.title_button(id, title))
+                            .max_width(480.0)
+                            .into()
+                    }
+                }),
                 Page::Chat => None,
             };
-            title
-                .map(|t| widget::text::heading(t).into())
-                .into_iter()
-                .collect()
+            title.into_iter().collect()
         }
 
         fn header_end(&self) -> Vec<Element<'_, Message>> {

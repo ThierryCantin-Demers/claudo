@@ -182,17 +182,17 @@ in a thread-local, and a hot patch gets its own copy of every thread-local, so p
 would not see the states the unpatched event loop stored. The vendored `iced_core` moves them
 to a plain static behind its `hot` feature, which only `claudo-cosmic/hot` enables. When the
 libcosmic rev changes, refresh the copy from that rev's `iced/core` and reapply the change in
-`src/widget/tree.rs`.
+`src/widget/tree.rs`. `cargo hot` only reacts to in-place writes, so `sed -i`, which replaces
+the file, does not trigger a patch. New COSMIC subscriptions go through `named(...)`, not
+`Subscription::run`: iced identifies a `run` subscription by its function's address, which
+every patch changes, so it would restart (for the backend, mid-reply).
 
 **Named widget state.** libcosmic gives a widget with a custom id (`widget::Id::new`) its
 state back by name every frame, wherever it moved. Two traps: a container reports its
 content's id, not its own, and a scrollable reports a compound one, so neither name works;
 and between direct siblings libcosmic finds a moved state by name but leaves it at its old
 index, so the named widget must sit below the reordered parent's direct child. Tiles do
-both through `CtrlPress`; `src/app/tests.rs` checks a dragged tile keeps its scroll. `cargo hot` only reacts to in-place writes, so `sed -i`, which replaces
-the file, does not trigger a patch. New COSMIC subscriptions go through `named(...)`, not
-`Subscription::run`: iced identifies a `run` subscription by its function's address, which
-every patch changes, so it would restart (for the backend, mid-reply).
+both through `Intercept`; `src/app/tests.rs` checks a dragged tile keeps its scroll.
 
 **Dev builds optimize dependencies** (`[profile.dev.package."*"] opt-level = 3`) because
 unoptimized text shaping made the cosmic frontend feel like it had a one second delay.

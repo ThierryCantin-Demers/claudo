@@ -71,6 +71,7 @@ The COSMIC frontend cannot attach a project folder yet.
 | Move a tile | Drag its title or Ctrl+drag anywhere in it, right-click its title for Move left/right, or Alt+Shift+Left/Right |
 | Focus the previous or next tile | Alt+Left/Right |
 | Close a tile | Its ✕, or Ctrl+W |
+| Rename a conversation | Click its title; Enter keeps it, Escape cancels |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
 shows pulsing dots beside each agent still working, and an Approve badge beside one waiting
@@ -87,7 +88,7 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 
 - Everyone logs in with their own subscription. Turns use the same limits as Claude Code.
 - Opening an issue or a pull request (`gh` or GitHub's MCP server) always waits for your approval, in every permission profile. Everything else follows the profile.
-- Each agent is named after its conversation's title, so your agents, and Claude Code sessions, can find each other with `ListAgents` and talk with `SendMessage`. A message one receives shows as "From <agent>" and runs a turn as if you had sent it. Only a conversation with a running `claude` process (used in the last 30 minutes) can receive one.
+- Each agent is named after its conversation's title, and renaming the conversation renames it, so your agents, and Claude Code sessions, can find each other with `ListAgents` and talk with `SendMessage`. A message one receives shows as "From <agent>" and runs a turn as if you had sent it. Only a conversation with a running `claude` process (used in the last 30 minutes) can receive one.
 - claudo keeps its data in `~/.local/share/claudo/`. Message history stays in `~/.claude/projects/`.
 
 ## Development
