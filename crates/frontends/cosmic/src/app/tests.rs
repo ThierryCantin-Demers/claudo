@@ -384,7 +384,7 @@ fn snapshots() {
     let main = app.main_window();
     let _ = app.update(Message::In(
         main,
-        Box::new(Message::OpenWindow(BRAVO.to_string())),
+        Box::new(moved(BRAVO, carry::Destination::NewWindow)),
     ));
     let (second, _) = app.tile_of(BRAVO).unwrap();
     let mut h = Harness::new(app);
@@ -762,7 +762,7 @@ fn a_conversation_moves_to_a_window_of_its_own() {
     let main = app.main_window();
     let _ = app.update(Message::In(
         main,
-        Box::new(Message::OpenWindow(BRAVO.to_string())),
+        Box::new(moved(BRAVO, carry::Destination::NewWindow)),
     ));
     assert_eq!(app.windows.len(), 2);
     let (second, _) = app.tile_of(BRAVO).expect("Bravo is shown");
@@ -791,7 +791,7 @@ fn a_conversation_moves_to_a_window_of_its_own() {
     // Closing the main window hands its place to another.
     let _ = app.update(Message::In(
         main,
-        Box::new(Message::OpenWindow(BRAVO.to_string())),
+        Box::new(moved(BRAVO, carry::Destination::NewWindow)),
     ));
     let (second, _) = app.tile_of(BRAVO).unwrap();
     let _ = app.update(Message::WindowClosed(main));
@@ -803,13 +803,18 @@ fn a_conversation_moves_to_a_window_of_its_own() {
     assert!(app.tile_of(ALPHA).is_none() && app.tile_of(BRAVO).is_some());
 }
 
+/// A tile's move to another window, as it arrives once its transcript's scroll is read.
+fn moved(conversation: &str, to: carry::Destination) -> Message {
+    Message::Carried(conversation.to_string(), to, None)
+}
+
 /// Alpha in the main window and Bravo in a second one, both the test window's size.
 fn two_windows() -> (ClaudoApp, window::Id, window::Id) {
     let mut app = two_tiles();
     let main = app.main_window();
     let _ = app.update(Message::In(
         main,
-        Box::new(Message::OpenWindow(BRAVO.to_string())),
+        Box::new(moved(BRAVO, carry::Destination::NewWindow)),
     ));
     let (second, _) = app.tile_of(BRAVO).unwrap();
     app.windows.get_mut(&second).unwrap().size = Some((WINDOW.width, WINDOW.height));
@@ -829,6 +834,46 @@ fn each_window_has_its_own_color_once_there_are_several() {
 }
 
 #[test]
+fn a_tile_keeps_its_scroll_when_it_moves_to_another_window() {
+    let mut h = Harness::new(two_tiles());
+    h.move_to(560.0, 400.0);
+    h.send(vec![wheel(10.0)]);
+    let scrolled = h.offsets()[0];
+
+    use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
+    let mut read = carry::read_scroll(ALPHA);
+    h.frame(|ui, renderer| ui.operate(renderer, &mut black_box(&mut read)));
+    let Outcome::Some(Some(from_bottom)) = read.finish() else {
+        panic!("Alpha's transcript is found by its tile");
+    };
+    assert!(from_bottom > 0.0, "scrolled up from the bottom");
+
+    // The new window starts the transcript over at the bottom; the restore puts it back.
+    h.send(vec![wheel(-1000.0)]);
+    assert_ne!(h.offsets()[0], scrolled);
+    let mut back = carry::scroll_back(ALPHA, from_bottom);
+    h.frame(|ui, renderer| ui.operate(renderer, &mut black_box(&mut back)));
+    assert!((h.offsets()[0] - scrolled).abs() < 1.0, "back where it was");
+
+    // The move itself waits for the restore until the window has drawn the tile.
+    let main = h.app.main_window();
+    let _ = h.app.update(Message::In(
+        main,
+        Box::new(Message::Carried(
+            ALPHA.to_string(),
+            carry::Destination::NewWindow,
+            Some(from_bottom),
+        )),
+    ));
+    assert!(h.app.tile_of(ALPHA).is_some_and(|(w, _)| w != main));
+    assert_eq!(h.app.carried_scroll.get(ALPHA), Some(&from_bottom));
+    let _ = h
+        .app
+        .update(Message::ScrollRestored(ALPHA.to_string(), true));
+    assert!(h.app.carried_scroll.is_empty());
+}
+
+#[test]
 fn tiles_move_to_windows_already_open() {
     let (mut app, main, second) = two_windows();
     let names: Vec<String> = app
@@ -840,7 +885,7 @@ fn tiles_move_to_windows_already_open() {
 
     let _ = app.update(Message::In(
         main,
-        Box::new(Message::MoveToWindow(ALPHA.to_string(), second)),
+        Box::new(moved(ALPHA, carry::Destination::Window(second))),
     ));
     let ids = |app: &ClaudoApp, w| -> Vec<String> {
         app.window(w)
@@ -866,17 +911,11 @@ fn a_tile_dropped_on_another_window_lands_where_it_is_dropped() {
     ));
     let _ = app.update(Message::In(
         second,
-        Box::new(Message::OpenWindow(ALPHA.to_string())),
+        Box::new(moved(ALPHA, carry::Destination::NewWindow)),
     ));
     // Alpha alone in a third window now; drop it at the left edge of Bravo's window.
     let x = app.tile_room(second).0 + 10.0;
-    let _ = app.update(Message::In(
-        second,
-        Box::new(Message::TileDropped {
-            conversation: ALPHA.to_string(),
-            x,
-        }),
-    ));
+    let _ = app.update(moved(ALPHA, carry::Destination::Drop { window: second, x }));
     let ids: Vec<&str> = app
         .window(second)
         .tiles
@@ -938,6 +977,7 @@ fn a_tile_dropped_outside_every_window_gets_its_own() {
         Box::new(Message::TileDroppedOutside(BRAVO.to_string())),
     ));
     assert!(app.window(main).drag.is_none());
+    let _ = app.update(moved(BRAVO, carry::Destination::NewWindow));
     assert!(app.tile_of(BRAVO).is_some_and(|(w, _)| w != main));
 }
 

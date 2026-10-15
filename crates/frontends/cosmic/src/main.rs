@@ -571,6 +571,9 @@ mod app {
         quota: Option<Quota>,
         /// Minutes since launch, counted to refresh `quota`.
         minutes: u32,
+        /// How far from the bottom tiles moved to another window were scrolled, until the
+        /// window they went to has drawn them.
+        carried_scroll: HashMap<ConversationId, f32>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -756,6 +759,9 @@ mod app {
         OpenWindow(ConversationId),
         /// A conversation in a new tile of another open window, moved there if shown.
         MoveToWindow(ConversationId, window::Id),
+        /// A tile's transcript scroll was read before it moves to another window.
+        Carried(ConversationId, carry::Destination, Option<f32>),
+        ScrollRestored(ConversationId, bool),
         NewChat(Placement),
         /// A new chat in a new window.
         NewWindow,
@@ -1092,6 +1098,18 @@ mod app {
                     (*id, format!("window {} · {}", n + 1, truncate(title, 40)))
                 })
                 .collect()
+        }
+
+        /// Show a conversation in a new tile of another open window, taking it from its own.
+        fn move_to_window(&mut self, id: ConversationId, w: window::Id) {
+            if !self.windows.contains_key(&w) {
+                return;
+            }
+            self.take_out(&id);
+            self.current = w;
+            self.layout_mut().page = Page::Chat;
+            self.open(id, Placement::Right);
+            self.tasks.push(window::gain_focus(w));
         }
 
         /// Show a conversation in a window of its own, taking it from where it was.
@@ -2098,7 +2116,7 @@ mod app {
             // child: between siblings, libcosmic finds a moved state by name but leaves it
             // at its old index.
             let named = Intercept {
-                id: Some(widget::Id::new(format!("tile-{id}"))),
+                id: Some(carry::tile_id(id)),
                 on_ctrl_press: Some(Message::StartMove(id.clone())),
                 ..Intercept::new(content)
             };
@@ -2592,6 +2610,7 @@ mod app {
                 .layout(&mut tree.children[0], renderer, limits)
         }
 
+        // Reported as a container, so an operation can find what a tile holds by its id.
         fn operate(
             &mut self,
             tree: &mut Tree,
@@ -2599,12 +2618,15 @@ mod app {
             renderer: &cosmic::Renderer,
             operation: &mut dyn Operation,
         ) {
-            self.content.as_widget_mut().operate(
-                &mut tree.children[0],
-                layout,
-                renderer,
-                operation,
-            );
+            operation.container(self.id.as_ref(), layout.bounds());
+            operation.traverse(&mut |operation| {
+                self.content.as_widget_mut().operate(
+                    &mut tree.children[0],
+                    layout,
+                    renderer,
+                    operation,
+                );
+            });
         }
 
         fn update(
@@ -3254,6 +3276,7 @@ mod app {
                 focus_composer: None,
                 quota: None,
                 minutes: 0,
+                carried_scroll: HashMap::new(),
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -3408,14 +3431,28 @@ mod app {
                     self.layout_mut().page = Page::Chat;
                     self.open(id, Placement::Right);
                 }
-                Message::OpenWindow(id) => self.open_in_new_window(id),
+                Message::OpenWindow(id) => {
+                    if self.tile_of(&id).is_some() {
+                        return self.carry(id, carry::Destination::NewWindow);
+                    }
+                    self.open_in_new_window(id);
+                }
                 Message::MoveToWindow(id, w) => {
-                    if self.windows.contains_key(&w) {
-                        self.take_out(&id);
-                        self.current = w;
-                        self.layout_mut().page = Page::Chat;
-                        self.open(id, Placement::Right);
-                        self.tasks.push(window::gain_focus(w));
+                    if self.tile_of(&id).is_some_and(|(from, _)| from != w) {
+                        return self.carry(id, carry::Destination::Window(w));
+                    }
+                    self.move_to_window(id, w);
+                }
+                Message::Carried(id, to, from_bottom) => {
+                    self.arrive(id.clone(), to);
+                    if let Some(from_bottom) = from_bottom.filter(|d| *d >= 1.0) {
+                        self.carried_scroll.insert(id.clone(), from_bottom);
+                        self.tasks.push(self.restore_scroll(&id));
+                    }
+                }
+                Message::ScrollRestored(id, done) => {
+                    if done {
+                        self.carried_scroll.remove(&id);
                     }
                 }
                 Message::NewChat(placement) => {
@@ -3442,14 +3479,26 @@ mod app {
                 Message::TileLanded => self.layout_mut().drag = None,
                 Message::TileDroppedOutside(id) => {
                     self.layout_mut().drag = None;
-                    self.open_in_new_window(id);
+                    return self.carry(id, carry::Destination::NewWindow);
                 }
                 Message::DropHover(x) => {
                     let start = self.tile_room(self.current).0;
                     self.layout_mut().drop_at = Some(x - start);
                 }
                 Message::DropLeave => self.layout_mut().drop_at = None,
-                Message::TileDropped { conversation, x } => self.drop_tile(conversation, x),
+                Message::TileDropped { conversation, x } => {
+                    if self
+                        .tile_of(&conversation)
+                        .is_some_and(|(w, _)| w != self.current)
+                    {
+                        let to = carry::Destination::Drop {
+                            window: self.current,
+                            x,
+                        };
+                        return self.carry(conversation, to);
+                    }
+                    self.drop_tile(conversation, x);
+                }
                 Message::WindowDrag => return window::drag(self.current),
                 Message::WindowMaximize => return window::toggle_maximize(self.current),
                 Message::WindowMinimize => return window::minimize(self.current, true),
@@ -3638,6 +3687,16 @@ mod app {
                 Message::Resized(id, size) => {
                     if let Some(layout) = self.windows.get_mut(&id) {
                         layout.size = Some((size.width, size.height));
+                    }
+                    // A new window reports its size once it has drawn, the tile it took too.
+                    let pending: Vec<ConversationId> = self
+                        .carried_scroll
+                        .keys()
+                        .filter(|c| self.tile_of(c).is_some_and(|(w, _)| w == id))
+                        .cloned()
+                        .collect();
+                    for conversation in pending {
+                        self.tasks.push(self.restore_scroll(&conversation));
                     }
                 }
                 Message::Surface(action) => {
@@ -4086,6 +4145,7 @@ mod app {
         .then_some(Message::DragEnd)
     }
 
+    mod carry;
     mod commands;
     mod selectable;
     #[cfg(test)]
