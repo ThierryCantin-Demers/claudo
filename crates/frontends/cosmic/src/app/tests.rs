@@ -391,6 +391,21 @@ fn snapshots() {
     let window = h.app.view_window(second);
     render_alone(&mut h.renderer, window, "second-window");
 
+    let (mut app, main, second) = two_windows();
+    app.conversations.push(ConversationInfo {
+        id: "ccccc333-0000-4000-8000-000000000000".to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let mut h = Harness::new(app);
+    h.snapshot("windows-main");
+    let window = h.app.view_window(second);
+    render_alone(&mut h.renderer, window, "windows-second");
+
     let mut app = two_tiles();
     let main = app.main_window();
     let x = app.tile_room(main).0 + 560.0;
@@ -799,6 +814,18 @@ fn two_windows() -> (ClaudoApp, window::Id, window::Id) {
     let (second, _) = app.tile_of(BRAVO).unwrap();
     app.windows.get_mut(&second).unwrap().size = Some((WINDOW.width, WINDOW.height));
     (app, main, second)
+}
+
+#[test]
+fn each_window_has_its_own_color_once_there_are_several() {
+    let app = two_tiles();
+    assert!(
+        app.window_color(app.main_window()).is_none(),
+        "one window needs none"
+    );
+    let (app, main, second) = two_windows();
+    let (a, b) = (app.window_color(main), app.window_color(second));
+    assert!(a.is_some() && b.is_some() && a != b);
 }
 
 #[test]

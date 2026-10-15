@@ -1049,12 +1049,39 @@ mod app {
             self.persist();
         }
 
+        /// The open windows in the order they opened, which numbers and colors them.
+        fn window_order(&self) -> Vec<window::Id> {
+            let mut ids: Vec<window::Id> = self.windows.keys().copied().collect();
+            ids.sort();
+            ids
+        }
+
+        /// A window's color, which marks the conversations it shows, once there are several.
+        fn window_color(&self, w: window::Id) -> Option<Color> {
+            if self.windows.len() < 2 {
+                return None;
+            }
+            let n = self.window_order().iter().position(|id| *id == w)?;
+            let theme = cosmic::theme::active();
+            let palette = &theme.cosmic().palette;
+            let colors = [
+                palette.accent_blue,
+                palette.accent_green,
+                palette.accent_orange,
+                palette.accent_purple,
+                palette.accent_pink,
+                palette.accent_yellow,
+                palette.accent_red,
+                palette.accent_indigo,
+            ];
+            Some(colors[n % colors.len()].into())
+        }
+
         /// Every open window but `w`, named by its number and focused conversation, for
         /// the menus that move a conversation there.
         fn other_windows(&self, w: window::Id) -> Vec<(window::Id, String)> {
-            let mut ids: Vec<window::Id> = self.windows.keys().copied().collect();
-            ids.sort();
-            ids.iter()
+            self.window_order()
+                .iter()
                 .enumerate()
                 .filter(|(_, id)| **id != w)
                 .map(|(n, id)| {
@@ -1784,13 +1811,22 @@ mod app {
             if c.archived {
                 title = title.class(dim());
             }
-            let mut row = vec![title.into()];
+            // With several windows each row says which one shows it, and only this
+            // window's conversations are highlighted.
+            let tiled = self.tile_of(&c.id);
+            let mut row = Vec::new();
+            if self.windows.len() > 1 {
+                row.push(window_mark(
+                    tiled.and_then(|(at, _)| self.window_color(at)),
+                    3.0,
+                    16.0,
+                ));
+            }
+            row.push(title.into());
             if let Some(badge) = self.views.get(&c.id).and_then(|v| self.badge(v, size)) {
                 row.push(badge);
             }
-            let shown = self
-                .tile_of(&c.id)
-                .is_some_and(|(w, _)| self.window(w).page == Page::Chat);
+            let shown = tiled.is_some_and(|(at, _)| at == w && self.window(at).page == Page::Chat);
             let item = widget::button::custom(
                 widget::Row::with_children(row)
                     .spacing(8)
@@ -2423,6 +2459,25 @@ mod app {
         menu::Tree::from(Element::from(
             menu::menu_button(vec![widget::text(label.into()).into()]).on_press(message),
         ))
+    }
+
+    /// A window's color, as a bar beside a conversation in the sidebar or a dot in the
+    /// window's header bar; empty space for a conversation no window shows.
+    fn window_mark<'a>(color: Option<Color>, width: f32, height: f32) -> Element<'a, Message> {
+        widget::container(widget::space::horizontal())
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(height))
+            .class(cosmic::theme::Container::custom(move |_| {
+                container::Style {
+                    background: color.map(Into::into),
+                    border: Border {
+                        radius: (width.min(height) / 2.0).into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }
+            }))
+            .into()
     }
 
     /// Where a tile dragged from another window would land.
@@ -3676,12 +3731,17 @@ mod app {
 
         fn header_start(&self) -> Vec<Element<'_, Message>> {
             let main = self.main_window();
-            vec![
+            let mut start = vec![
                 widget::nav_bar_toggle()
                     .active(self.window(main).sidebar_open)
                     .on_toggle(Message::In(main, Box::new(Message::ToggleSidebar)))
                     .into(),
-            ]
+            ];
+            start.extend(
+                self.window_color(main)
+                    .map(|color| window_mark(Some(color), 10.0, 10.0)),
+            );
+            start
         }
 
         fn header_center(&self) -> Vec<Element<'_, Message>> {
@@ -3718,6 +3778,9 @@ mod app {
                         .active(layout.sidebar_open)
                         .on_toggle(Message::ToggleSidebar),
                 );
+            if let Some(color) = self.window_color(id) {
+                header = header.start(window_mark(Some(color), 10.0, 10.0));
+            }
             for element in self.header_center_of(id) {
                 header = header.center(element);
             }
