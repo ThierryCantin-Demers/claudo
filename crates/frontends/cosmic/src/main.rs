@@ -2453,28 +2453,46 @@ mod app {
             view: &'a ConversationView,
             compact: bool,
         ) -> Element<'a, Message> {
+            // What comes and goes above the message box, such as the `/` menu, sits in one
+            // child that is always there: the box moving among its siblings would rebuild
+            // its editor, and lose its focus.
+            let mut above: Vec<Element<Message>> = view
+                .approvals
+                .iter()
+                .map(|approval| self.approval_card(id, approval))
+                .collect();
+            above.extend(self.compact_offer(id, view));
+            above.extend(self.command_menu(id, view));
+            let gap = if above.is_empty() { 0.0 } else { 8.0 };
+            let above = widget::Column::with_children(above)
+                .spacing(8)
+                .padding(Padding {
+                    bottom: gap,
+                    ..Padding::ZERO
+                })
+                .into();
             if view.items.is_empty() && !view.streaming {
                 let greeting =
                     widget::text::title2("How can I help you today?").size(26.0 * self.zoom);
-                let mut column = vec![
+                return widget::Column::with_children(vec![
                     widget::space::vertical().into(),
-                    widget::container(greeting).center_x(Length::Fill).into(),
-                ];
-                column.extend(self.command_menu(id, view));
-                column.push(self.composer(id, view, compact));
-                column.push(widget::space::vertical().into());
-                return widget::Column::with_children(column).spacing(24).into();
+                    widget::container(greeting)
+                        .center_x(Length::Fill)
+                        .padding([0, 0, 24, 0])
+                        .into(),
+                    above,
+                    self.composer(id, view, compact),
+                    widget::space::vertical().into(),
+                ])
+                .into();
             }
-            let mut column = vec![self.transcript(id, view)];
-            column.extend(
-                view.approvals
-                    .iter()
-                    .map(|approval| self.approval_card(id, approval)),
-            );
-            column.extend(self.compact_offer(id, view));
-            column.extend(self.command_menu(id, view));
-            column.push(self.composer(id, view, compact));
-            widget::Column::with_children(column).spacing(8).into()
+            widget::Column::with_children(vec![
+                self.transcript(id, view),
+                widget::space::vertical().height(Length::Fixed(8.0)).into(),
+                above,
+                self.composer(id, view, compact),
+            ])
+            .into()
         }
 
         /// What Claude wants to run, and the answers. The turn waits on it.

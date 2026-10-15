@@ -226,6 +226,22 @@ fn key(
     })
 }
 
+/// Typing one character, as a keyboard sends it.
+fn typed(c: char) -> Event {
+    let text = c.to_string();
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Character(text.clone().into()),
+        modified_key: keyboard::Key::Character(text.clone().into()),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::empty(),
+        text: Some(text.into()),
+        repeat: false,
+    })
+}
+
 fn escape() -> Event {
     use keyboard::key::{Code, Named};
     key(Named::Escape, Code::Escape, keyboard::Modifiers::empty())
@@ -1141,6 +1157,27 @@ fn cli_command(name: &str, hint: &str) -> CliCommand {
 }
 
 #[test]
+fn the_message_box_keeps_focus_while_typing() {
+    for words in ["hello there", "/compact now"] {
+        let mut app = two_tiles();
+        app.cli_commands = vec![cli_command(
+            "compact",
+            "<optional custom summarization instructions>",
+        )];
+        let mut h = Harness::new(app);
+        h.focus(composer_id(ALPHA));
+        for c in words.chars() {
+            h.send(vec![typed(c)]);
+        }
+        assert_eq!(
+            h.app.views[ALPHA].draft.text(),
+            words,
+            "every key reached the message box"
+        );
+    }
+}
+
+#[test]
 fn the_slash_menu_lists_commands_and_runs_claudos_own() {
     use keyboard::key::{Code, Named};
     let mut app = two_tiles();
@@ -1167,6 +1204,10 @@ fn the_slash_menu_lists_commands_and_runs_claudos_own() {
         "starting with it first; /fast is hidden"
     );
     h.snapshot("slash-menu");
+    h.app.views.get_mut(BRAVO).unwrap().items.clear();
+    h.app.views.get_mut(BRAVO).unwrap().draft = text_editor::Content::with_text("/co");
+    h.snapshot("slash-menu-new-chat");
+    h.app.views.get_mut(BRAVO).unwrap().draft = text_editor::Content::new();
 
     let none = keyboard::Modifiers::empty();
     h.send(vec![key(Named::ArrowDown, Code::ArrowDown, none)]);
