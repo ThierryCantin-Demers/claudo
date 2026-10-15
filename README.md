@@ -129,4 +129,4 @@ crate still needs a restart. On Linux it needs a system `lld` (Fedora: `sudo dnf
 
 ## License
 
-MIT. The bundled font is BIZ UDPGothic, under the SIL Open Font License (`assets/fonts/OFL.txt`).
+MIT, see [LICENSE](LICENSE). The bundled font is BIZ UDPGothic, under the SIL Open Font License (`assets/fonts/OFL.txt`).
