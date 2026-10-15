@@ -790,6 +790,8 @@ mod app {
         CloseWindow,
         WindowClosed(window::Id),
         WindowOpened(window::Id),
+        /// The system theme changed; libcosmic has applied it to the main window.
+        ThemeChanged,
         Focus(ConversationId),
         Close(ConversationId),
         CloseFocused,
@@ -3553,6 +3555,8 @@ mod app {
                 Message::WindowMinimize => return window::minimize(self.current, true),
                 Message::CloseWindow => return window::close(self.current),
                 Message::WindowClosed(w) => self.window_closed(w),
+                // `update` ends by bringing the other windows' blur in line.
+                Message::ThemeChanged => {}
                 Message::WindowOpened(w) => {
                     if let Some(layout) = self.windows.get_mut(&w) {
                         layout.opened = true;
@@ -3949,6 +3953,24 @@ mod app {
             self.windows
                 .contains_key(&id)
                 .then_some(Message::WindowClosed(id))
+        }
+
+        // libcosmic sets the frosted state only after these return, so the other windows
+        // follow it in a message after.
+        fn system_theme_update(
+            &mut self,
+            _keys: &[&'static str],
+            _new_theme: &cosmic::cosmic_theme::Theme,
+        ) -> Task<Message> {
+            cosmic::task::message(cosmic::Action::App(Message::ThemeChanged))
+        }
+
+        fn system_theme_mode_update(
+            &mut self,
+            _keys: &[&'static str],
+            _new_theme: &cosmic::cosmic_theme::ThemeMode,
+        ) -> Task<Message> {
+            cosmic::task::message(cosmic::Action::App(Message::ThemeChanged))
         }
 
         /// The main window's close button: the app ends only with its last window.
