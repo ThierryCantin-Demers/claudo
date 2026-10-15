@@ -52,7 +52,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - Permission profiles: Safe, Accept edits, Full auto.
-- Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a star marks a choice that differs from them.
+- Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.
 - Context usage for the last turn.
 - COSMIC: your plan's usage at the foot of the sidebar, the five-hour session and the week, with when each resets.
 - A scratch working directory per conversation, or an attached project folder.
