@@ -391,7 +391,7 @@ fn snapshots() {
     let window = h.app.view_window(second);
     render_alone(&mut h.renderer, window, "second-window");
 
-    let (mut app, main, second) = two_windows();
+    let (mut app, _, second) = two_windows();
     app.conversations.push(ConversationInfo {
         id: "ccccc333-0000-4000-8000-000000000000".to_string(),
         title: "Charlie".to_string(),
