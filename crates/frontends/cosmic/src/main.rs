@@ -49,6 +49,11 @@ mod app {
     const BUBBLE_WIDTH: f32 = 560.0;
     const TOOL_OUTPUT_LINES: usize = 40;
     const PREVIEW_CHARS: usize = 100;
+    const SIDEBAR_WIDTH: f32 = 260.0;
+    const SIDEBAR_MIN: f32 = 180.0;
+    const SIDEBAR_MAX: f32 = 480.0;
+    /// Dragged narrower than this, the sidebar collapses instead of stopping at its minimum.
+    const SIDEBAR_COLLAPSE: f32 = 120.0;
     const PULSE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
     /// A transcript row. Replies keep their parsed markdown so a frame only
@@ -134,6 +139,11 @@ mod app {
         error: Option<String>,
         page: Page,
         sidebar_open: bool,
+        sidebar_width: f32,
+        /// Set while the sidebar's edge is dragged.
+        dragging: bool,
+        /// The cursor's distance from the sidebar's edge, taken from the drag's first move.
+        drag_offset: Option<f32>,
         window: Option<(f32, f32)>,
         drafts: HashMap<String, String>,
         /// The conversation to reopen once the list first arrives.
@@ -151,6 +161,7 @@ mod app {
     #[serde(default)]
     pub struct UiState {
         sidebar_open: bool,
+        sidebar_width: f32,
         page: Page,
         conversation: Option<String>,
         zoom: f32,
@@ -163,6 +174,7 @@ mod app {
         fn default() -> Self {
             Self {
                 sidebar_open: true,
+                sidebar_width: SIDEBAR_WIDTH,
                 page: Page::Chat,
                 conversation: None,
                 zoom: 1.0,
@@ -221,6 +233,9 @@ mod app {
         },
         SetPage(Page),
         ToggleSidebar,
+        StartSidebarDrag,
+        DragSidebar(f32),
+        EndSidebarDrag,
         Resized(cosmic::iced::window::Id, cosmic::iced::Size),
         /// The main window is closing.
         Quit,
@@ -367,6 +382,7 @@ mod app {
             self.stash_draft();
             UiState {
                 sidebar_open: self.sidebar_open,
+                sidebar_width: self.sidebar_width,
                 page: self.page,
                 conversation: self.current.clone(),
                 zoom: self.zoom,
@@ -658,7 +674,8 @@ mod app {
                 ])
                 .spacing(8),
             )
-            .width(Length::Fixed(260.0))
+            .width(Length::Fixed(self.sidebar_width))
+            .clip(true)
             .height(Length::Fill)
             .padding(8)
             .into()
@@ -1163,6 +1180,9 @@ mod app {
                 error: None,
                 page: ui.page,
                 sidebar_open: ui.sidebar_open,
+                sidebar_width: ui.sidebar_width,
+                dragging: false,
+                drag_offset: None,
                 window: ui.window,
                 drafts: ui.drafts,
                 restore: ui.conversation,
@@ -1174,6 +1194,9 @@ mod app {
             let mut subscriptions = vec![named("backend", backend_worker), window_events()];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
+            if self.dragging {
+                subscriptions.push(cosmic::iced::event::listen_with(sidebar_drag_events));
+            }
             // Timers run only while something animates; idle stays event-driven.
             if self.revealing() {
                 subscriptions.push(
@@ -1240,6 +1263,26 @@ mod app {
                 }
                 Message::ToggleSidebar => {
                     self.sidebar_open = !self.sidebar_open;
+                    self.persist();
+                }
+                Message::StartSidebarDrag => {
+                    self.dragging = true;
+                    self.drag_offset = None;
+                }
+                Message::DragSidebar(x) => {
+                    let edge = if self.sidebar_open {
+                        self.sidebar_width
+                    } else {
+                        0.0
+                    };
+                    let width = x - *self.drag_offset.get_or_insert(x - edge);
+                    self.sidebar_open = width >= SIDEBAR_COLLAPSE;
+                    if self.sidebar_open {
+                        self.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                    }
+                }
+                Message::EndSidebarDrag => {
+                    self.dragging = false;
                     self.persist();
                 }
                 // Popups are windows too; only the main one's size is worth restoring.
@@ -1332,7 +1375,16 @@ mod app {
             let mut columns = Vec::new();
             if self.sidebar_open {
                 columns.push(self.sidebar());
-                columns.push(widget::divider::vertical::default().into());
+                columns.push(
+                    widget::mouse_area(
+                        widget::container(widget::divider::vertical::default())
+                            .center_x(Length::Fixed(8.0))
+                            .height(Length::Fill),
+                    )
+                    .on_press(Message::StartSidebarDrag)
+                    .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
+                    .into(),
+                );
             }
             columns.push(main);
             widget::Row::with_children(columns)
@@ -1449,6 +1501,25 @@ mod app {
             }
             _ => None,
         })
+    }
+
+    /// Cursor moves and the release ending a drag of the sidebar's edge; subscribed only
+    /// during the drag, so ordinary mouse movement produces no messages.
+    fn sidebar_drag_events(
+        event: cosmic::iced::Event,
+        _status: cosmic::iced::event::Status,
+        _id: cosmic::iced::window::Id,
+    ) -> Option<Message> {
+        use cosmic::iced::mouse::{Button, Event as Mouse};
+        match event {
+            cosmic::iced::Event::Mouse(Mouse::CursorMoved { position }) => {
+                Some(Message::DragSidebar(position.x))
+            }
+            cosmic::iced::Event::Mouse(Mouse::ButtonReleased(Button::Left)) => {
+                Some(Message::EndSidebarDrag)
+            }
+            _ => None,
+        }
     }
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its
