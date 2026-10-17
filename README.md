@@ -99,6 +99,7 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 - Opening an issue or a pull request (`gh` or GitHub's MCP server) always waits for your approval, in every permission profile, until you allow it always for that conversation. Everything else follows the profile.
 - Each agent is named after its conversation's title, and renaming the conversation renames it, so your agents, and Claude Code sessions, can find each other with `ListAgents` and talk with `SendMessage`. A message one receives shows as "From <agent>" and runs a turn as if you had sent it. Only a conversation with a running `claude` process (used in the last 30 minutes) can receive one.
 - claudo keeps its data in `~/.local/share/claudo/`. Message history stays in `~/.claude/projects/`.
+- Two claudo windows at once, such as the installed app and a dev build, keep each other's conversations, but each runs its own agents: send to a conversation from one of them only.
 
 ## Development
 

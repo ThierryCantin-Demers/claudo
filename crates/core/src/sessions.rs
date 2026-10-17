@@ -92,6 +92,9 @@ pub struct Store {
     /// Which one-time migrations the file has had; see `STORE_VERSION`.
     #[serde(default)]
     pub version: u32,
+    /// Conversations deleted here, which a save must not take back from the file.
+    #[serde(skip)]
+    removed: HashSet<String>,
 }
 
 /// 1: conversations that followed the defaults keep them as they were, now that the
@@ -122,7 +125,67 @@ impl Store {
             store.version = STORE_VERSION;
             store.save();
         }
+        let scratch = data_root().join("conversations");
+        if readable
+            && let Some(projects) = claude_projects_dir()
+            && store.recover(&projects, &scratch)
+        {
+            store.save();
+        }
         store
+    }
+
+    /// Take back the scratch conversations missing from the list whose folder and transcript
+    /// are still there. Returns whether there were any.
+    fn recover(&mut self, projects: &Path, scratch: &Path) -> bool {
+        let mut recovered = false;
+        for project in fs::read_dir(projects).into_iter().flatten().flatten() {
+            let Some((modified, transcript)) = newest_transcript(&project.path()) else {
+                continue;
+            };
+            let Some(cwd) = transcript_cwd(&transcript) else {
+                continue;
+            };
+            let id = match cwd.strip_prefix(scratch).ok().and_then(Path::to_str) {
+                Some(id) if !id.is_empty() && !id.contains('/') => id.to_string(),
+                _ => continue,
+            };
+            if self.get(&id).is_some() || self.removed.contains(&id) || !cwd.is_dir() {
+                continue;
+            }
+            let Some(session_id) = transcript.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let (items, ai_title) = parse_transcript(&transcript);
+            let prompt = items.iter().find_map(|item| match item {
+                Item::User(text) => Some(title_from_prompt(text)),
+                _ => None,
+            });
+            let updated = modified
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let mut overrides = Overrides::default();
+            fill(&mut overrides, &crate::settings::load());
+            self.conversations.push(ConversationMeta {
+                id,
+                title: ai_title
+                    .or(prompt)
+                    .unwrap_or_else(|| "New conversation".to_string()),
+                cwd,
+                attached: false,
+                renamed: false,
+                archived: false,
+                always_allowed: Vec::new(),
+                session_id: Some(session_id.to_string()),
+                imported_from: None,
+                overrides,
+                context: ContextUsage::default(),
+                created: updated,
+                updated,
+            });
+            recovered = true;
+        }
+        recovered
     }
 
     /// Give every conversation the defaults it follows today as its own.
@@ -132,12 +195,29 @@ impl Store {
         }
     }
 
-    pub fn save(&self) {
-        if let Some(parent) = Self::path().parent() {
+    /// Write the list, keeping what another claudo added to the file since: each writes the
+    /// whole list, so neither may drop the other's conversations.
+    pub fn save(&mut self) {
+        let path = Self::path();
+        if let Some(on_disk) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Store>(&s).ok())
+        {
+            self.adopt(on_disk.conversations);
+        }
+        if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(Self::path(), json);
+            let _ = fs::write(path, json);
+        }
+    }
+
+    fn adopt(&mut self, conversations: Vec<ConversationMeta>) {
+        for c in conversations {
+            if self.get(&c.id).is_none() && !self.removed.contains(&c.id) {
+                self.conversations.push(c);
+            }
         }
     }
 
@@ -279,6 +359,7 @@ impl Store {
     pub fn remove(&mut self, id: &str) -> Option<ConversationMeta> {
         let index = self.conversations.iter().position(|c| c.id == id)?;
         let removed = self.conversations.remove(index);
+        self.removed.insert(removed.id.clone());
         self.save();
         Some(removed)
     }
@@ -440,16 +521,21 @@ pub fn recent_folders(mut known: Vec<(u64, PathBuf)>) -> Vec<String> {
         .flatten()
         .flatten();
     known.extend(projects.filter_map(|project| {
-        let (modified, newest) = fs::read_dir(project.path())
-            .ok()?
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
-            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
-            .max()?;
+        let (modified, newest) = newest_transcript(&project.path())?;
         let seconds = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
         Some((seconds, transcript_cwd(&newest)?))
     }));
     rank_folders(known, &[data_root(), std::env::temp_dir()])
+}
+
+/// A project's most recently written transcript.
+fn newest_transcript(project: &Path) -> Option<(SystemTime, PathBuf)> {
+    fs::read_dir(project)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .max()
 }
 
 /// The folder a transcript's session started in, from the first line that names one.
@@ -841,7 +927,7 @@ mod tests {
                     ..Overrides::default()
                 }),
             ],
-            version: 0,
+            ..Store::default()
         };
         let settings = Settings {
             model: "opus".to_string(),
@@ -993,6 +1079,7 @@ mod tests {
         let store = Store {
             conversations: vec![imported],
             version: STORE_VERSION,
+            ..Store::default()
         };
         assert!(store.session_ids().contains("desktop"), "not offered again");
     }
@@ -1015,6 +1102,74 @@ mod tests {
         let expected = [crate_dir.join("src"), crate_dir, workspace];
         let expected: Vec<String> = expected.iter().map(|f| f.display().to_string()).collect();
         assert_eq!(ranked, expected);
+    }
+
+    fn scratch_conversation(id: &str) -> ConversationMeta {
+        ConversationMeta {
+            id: id.to_string(),
+            title: id.to_string(),
+            cwd: PathBuf::new(),
+            attached: false,
+            renamed: false,
+            archived: false,
+            always_allowed: Vec::new(),
+            session_id: None,
+            imported_from: None,
+            overrides: Overrides::default(),
+            context: ContextUsage::default(),
+            created: 0,
+            updated: 0,
+        }
+    }
+
+    #[test]
+    fn a_save_keeps_the_conversations_another_claudo_added() {
+        let mut store = Store {
+            conversations: vec![scratch_conversation("mine")],
+            ..Store::default()
+        };
+        store.removed.insert("deleted here".to_string());
+        store.adopt(
+            ["mine", "theirs", "deleted here"]
+                .map(scratch_conversation)
+                .to_vec(),
+        );
+        let ids: Vec<&str> = store.conversations.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["mine", "theirs"]);
+    }
+
+    #[test]
+    fn a_scratch_conversation_missing_from_the_list_comes_back() {
+        let root = std::env::temp_dir().join(format!("claudo-recover-{}", Uuid::new_v4()));
+        let (projects, scratch) = (root.join("projects"), root.join("conversations"));
+        let transcript = |project: &str, cwd: &Path| {
+            let dir = projects.join(project);
+            fs::create_dir_all(&dir).unwrap();
+            let line = serde_json::json!({
+                "type": "user", "cwd": cwd, "timestamp": "2026-10-17T21:31:33.835Z",
+                "message": {"content": "listen for dibs friction reports"},
+            });
+            fs::write(dir.join("s1.jsonl"), line.to_string()).unwrap();
+        };
+        for id in ["lost", "listed", "deleted"] {
+            transcript(id, &scratch.join(id));
+        }
+        transcript("project", &root);
+        fs::create_dir_all(scratch.join("lost")).unwrap();
+        fs::create_dir_all(scratch.join("listed")).unwrap();
+        let mut store = Store {
+            conversations: vec![scratch_conversation("listed")],
+            ..Store::default()
+        };
+
+        let recovered = store.recover(&projects, &scratch);
+        let _ = fs::remove_dir_all(&root);
+        assert!(recovered);
+        let ids: Vec<&str> = store.conversations.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["listed", "lost"], "a deleted one stays deleted");
+        let lost = &store.conversations[1];
+        assert_eq!(lost.session_id.as_deref(), Some("s1"));
+        assert_eq!(lost.title, "listen for dibs friction reports");
     }
 
     #[test]
