@@ -933,6 +933,7 @@ mod tests {
             model: "opus".to_string(),
             effort: Effort::High,
             profile: Profile::FullAuto,
+            remote_control: false,
         };
         store.keep_defaults(&settings);
         let [following, own] = &store.conversations[..] else {

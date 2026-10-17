@@ -3,6 +3,7 @@
 //! with `--resume`, so closing one loses nothing but startup time.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,6 +23,8 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub struct LiveSessions {
     sessions: Arc<Mutex<HashMap<ConversationId, Session>>>,
     incoming: Option<IncomingSender>,
+    /// Each process turns Remote Control on as it starts.
+    remote_control: AtomicBool,
     _stop_reaper: mpsc::Sender<()>,
 }
 
@@ -45,7 +48,17 @@ impl LiveSessions {
         Self {
             sessions,
             incoming,
+            remote_control: AtomicBool::new(false),
             _stop_reaper: stop_reaper,
+        }
+    }
+
+    /// Turn Remote Control on or off for every process, and for those started from now on;
+    /// `name` gives each conversation's.
+    pub fn set_remote_control(&self, enabled: bool, name: impl Fn(&str) -> String) {
+        self.remote_control.store(enabled, Ordering::Relaxed);
+        for (conversation_id, session) in self.sessions.lock().unwrap().iter() {
+            let _ = session.remote_control(enabled, &name(conversation_id));
         }
     }
 
@@ -90,6 +103,9 @@ impl LiveSessions {
             .map_err(|e| format!("failed to launch `{}`: {e}", claude_bin()))?;
         for scope in always {
             session.allow_always(scope);
+        }
+        if self.remote_control.load(Ordering::Relaxed) {
+            let _ = session.remote_control(true, name);
         }
         let turn = session
             .send(message)

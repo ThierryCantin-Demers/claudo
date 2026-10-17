@@ -20,6 +20,7 @@ fn main() {
             model: "opus".to_string(),
             effort: Effort::Low,
             profile: Profile::Safe,
+            remote_control: false,
         },
     });
     backend.handle(Command::NewScratch { request: 0 });
@@ -29,6 +30,7 @@ fn main() {
             model: "haiku".to_string(),
             effort: Effort::Max,
             profile: Profile::FullAuto,
+            remote_control: false,
         },
     });
     backend.handle(Command::ListConversations);

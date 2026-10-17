@@ -52,6 +52,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - COSMIC: send a message while Claude works. It waits under the reply and reaches Claude at its next step, as in the terminal, or starts the next turn if Claude is already finishing.
 - COSMIC: tool calls made one after another fold into one row ("6 calls · Bash ×6"), which opens to each call; while it runs, its newest call shows below it.
 - Permission profiles: Safe, Accept edits, Full auto.
+- Remote Control (COSMIC: Settings): your agents also show in the Claude app and on claude.ai/code, where you can follow them and message them.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.
 - Each turn ends with when it started and how long it took; while one runs, COSMIC shows its time so far and says when the API is being retried.
 - Context usage for the last turn. Past 500k tokens of context, COSMIC offers to compact the conversation; compactions, automatic or asked for, show where they happened with their summary.

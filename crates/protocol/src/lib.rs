@@ -376,6 +376,9 @@ pub struct Settings {
     pub effort: Effort,
     #[serde(default)]
     pub profile: Profile,
+    /// Every agent is also reachable from the Claude app and claude.ai/code.
+    #[serde(default)]
+    pub remote_control: bool,
 }
 
 fn default_model() -> String {
@@ -388,6 +391,7 @@ impl Default for Settings {
             model: default_model(),
             effort: Effort::default(),
             profile: Profile::default(),
+            remote_control: false,
         }
     }
 }

@@ -1008,6 +1008,7 @@ mod app {
         ModelText(String),
         SetEffort(usize),
         SetProfile(usize),
+        SetRemoteControl(bool),
         OvModel(ConversationId, usize),
         OvEffort(ConversationId, usize),
         OvProfile(ConversationId, usize),
@@ -2060,6 +2061,10 @@ mod app {
                         Message::SetProfile,
                     ),
                 ));
+            let remote = widget::settings::section().add(widget::settings::item(
+                "Remote Control",
+                widget::toggler(self.settings.remote_control).on_toggle(Message::SetRemoteControl),
+            ));
 
             let page = widget::Column::with_children(vec![
                 widget::button::text("Back to chat")
@@ -2075,6 +2080,14 @@ mod app {
                     "New conversations start with these. Changing them leaves the conversations \
                      you have as they are; a * in a message box marks a choice that differs \
                      from these.",
+                )
+                .class(dim())
+                .into(),
+                remote.into(),
+                widget::text(
+                    "Your agents also show in the Claude app and on claude.ai/code, where you \
+                     can follow them and send them messages, while their conversation's \
+                     claude process runs.",
                 )
                 .class(dim())
                 .into(),
@@ -4717,6 +4730,10 @@ mod app {
                         self.settings.profile = *p;
                         self.save_settings();
                     }
+                }
+                Message::SetRemoteControl(enabled) => {
+                    self.settings.remote_control = enabled;
+                    self.save_settings();
                 }
                 Message::OvModel(id, i) => {
                     if let Some(model) = self.models.get(i).map(|m| m.value.clone()) {

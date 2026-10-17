@@ -23,6 +23,7 @@ fn main() {
             model: "claude-sonnet-5-5".to_string(),
             effort: Effort::High,
             profile: Profile::FullAuto,
+            remote_control: false,
         },
     });
     show(&mut rx, "after update");

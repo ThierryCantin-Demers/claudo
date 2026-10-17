@@ -112,6 +112,11 @@ which the loader turns back into what was typed, a reply and a compaction. The
 `initialize` response lists every command (`commands`: `name`, `description`,
 `argumentHint`) for the message box's `/` menu.
 
+A `remote_control` control request (`enabled`, `name`) puts the session on claude.ai/code
+and in the Claude app, from print mode too and in a folder never trusted; its answer
+carries `session_url`, and `system` / `bridge_state` lines (`ready`, `connected`, `failed`)
+follow the connection. The Remote Control setting sends it to every process.
+
 A `get_usage` control request answers with `rate_limits.five_hour` and `.seven_day`
 (`utilization` in percent, `resets_at` as RFC 3339) without a turn, so it costs no tokens;
 `cli::usage` asks a short-lived process for it.

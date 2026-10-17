@@ -42,11 +42,15 @@ impl Backend {
                     .event(ev);
             }
         });
-        Self {
+        let backend = Self {
             store,
             live: LiveSessions::new(IDLE_TIMEOUT, Some(incoming)),
             events,
+        };
+        if crate::settings::load().remote_control {
+            backend.live.set_remote_control(true, |_| String::new());
         }
+        backend
     }
 
     fn emit(&self, event: ServerEvent) {
@@ -90,6 +94,12 @@ impl Backend {
             }
 
             Command::UpdateSettings { settings } => {
+                if settings.remote_control != crate::settings::load().remote_control {
+                    let store = self.store.lock().unwrap();
+                    self.live.set_remote_control(settings.remote_control, |id| {
+                        store.get(id).map(|c| c.title.clone()).unwrap_or_default()
+                    });
+                }
                 crate::settings::save(&settings);
                 self.emit(ServerEvent::Settings(settings));
             }

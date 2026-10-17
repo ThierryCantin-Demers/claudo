@@ -656,6 +656,16 @@ impl Session {
         }))
     }
 
+    /// Make the session reachable from the Claude app and claude.ai/code under `name`
+    /// through Remote Control, or no longer.
+    pub fn remote_control(&self, enabled: bool, name: &str) -> io::Result<()> {
+        self.shared.write(&json!({
+            "type": "control_request",
+            "request_id": Uuid::new_v4().to_string(),
+            "request": { "subtype": "remote_control", "enabled": enabled, "name": name },
+        }))
+    }
+
     /// Stop the running turn; it still ends with `Completed`, and the process
     /// stays up for the next one.
     pub fn interrupt(&self) -> io::Result<()> {
