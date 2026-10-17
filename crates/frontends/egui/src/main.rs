@@ -309,6 +309,7 @@ impl ClaudoApp {
                 }
 
                 ServerEvent::Sessions { list } => self.sessions = Some(list),
+                ServerEvent::Folders { .. } => {}
 
                 ServerEvent::History {
                     conversation_id,

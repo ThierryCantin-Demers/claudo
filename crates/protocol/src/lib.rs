@@ -429,6 +429,14 @@ pub enum Command {
         path: String,
         request: u64,
     },
+    /// Move a conversation that has not started into a project folder, or with `None` back
+    /// into a scratch one. Once it has, its session belongs to the folder it started in.
+    SetFolder {
+        id: ConversationId,
+        path: Option<String>,
+    },
+    /// Answered by `Folders`.
+    ListFolders,
     /// Answered by `Sessions`.
     ListSessions,
     /// Continue a session from `Sessions` as a conversation, answered by `Created`. Its first
@@ -482,6 +490,10 @@ pub enum ServerEvent {
     /// Answers `ListSessions`, newest first.
     Sessions {
         list: Vec<SessionInfo>,
+    },
+    /// Answers `ListFolders`: project folders claudo or Claude Code ran in, newest first.
+    Folders {
+        list: Vec<String>,
     },
     /// Reconstructed history for a conversation the client opened.
     History {

@@ -151,7 +151,7 @@ impl Store {
     /// Create a scratch conversation with a dedicated working directory we own.
     pub fn create_scratch(&mut self) -> String {
         let id = Uuid::new_v4().to_string();
-        let cwd = data_root().join("conversations").join(&id);
+        let cwd = scratch_dir(&id);
         let _ = fs::create_dir_all(&cwd);
         self.push_new(id.clone(), cwd, false, "New conversation".to_string());
         id
@@ -160,13 +160,42 @@ impl Store {
     /// Create a conversation whose working directory is an existing project folder.
     pub fn create_attached(&mut self, folder: PathBuf) -> String {
         let id = Uuid::new_v4().to_string();
-        let title = folder
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| format!("📁 {n}"))
-            .unwrap_or_else(|| "New conversation".to_string());
-        self.push_new(id.clone(), folder, true, title);
+        self.push_new(id.clone(), folder, true, "New conversation".to_string());
         id
+    }
+
+    /// Move a conversation that has not started into `folder`, or back into its scratch one.
+    pub fn set_folder(&mut self, id: &str, folder: Option<PathBuf>) -> Result<(), String> {
+        let c = self.get_mut(id).ok_or("that conversation is gone")?;
+        if c.session_id.is_some() {
+            return Err("a conversation stays in the folder it started in".to_string());
+        }
+        let scratch = scratch_dir(id);
+        match folder {
+            Some(folder) => {
+                if !c.attached {
+                    let _ = fs::remove_dir(&scratch);
+                }
+                c.cwd = folder;
+                c.attached = true;
+            }
+            None => {
+                let _ = fs::create_dir_all(&scratch);
+                c.cwd = scratch;
+                c.attached = false;
+            }
+        }
+        self.save();
+        Ok(())
+    }
+
+    /// The project folders conversations ran in, with when each last did.
+    pub fn folders(&self) -> Vec<(u64, PathBuf)> {
+        self.conversations
+            .iter()
+            .filter(|c| c.attached)
+            .map(|c| (c.updated, c.cwd.clone()))
+            .collect()
     }
 
     fn push_new(&mut self, id: String, cwd: PathBuf, attached: bool, title: String) {
@@ -298,6 +327,10 @@ impl Store {
     }
 }
 
+fn scratch_dir(id: &str) -> PathBuf {
+    data_root().join("conversations").join(id)
+}
+
 fn title_from_prompt(prompt: &str) -> String {
     let line = prompt.lines().next().unwrap_or("").trim();
     let truncated: String = line.chars().take(48).collect();
@@ -341,6 +374,58 @@ pub fn load_transcript(session_id: &str) -> (Vec<Item>, Option<String>) {
         return (Vec::new(), None);
     };
     parse_transcript(&path)
+}
+
+/// How many folders `recent_folders` lists.
+const RECENT_FOLDERS: usize = 8;
+
+/// Folders to start a conversation in, newest first: `known`, which conversations ran in,
+/// and those Claude Code sessions ran in, whichever app started them.
+pub fn recent_folders(mut known: Vec<(u64, PathBuf)>) -> Vec<String> {
+    let projects = claude_projects_dir()
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten();
+    known.extend(projects.filter_map(|project| {
+        let (modified, newest) = fs::read_dir(project.path())
+            .ok()?
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
+            .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+            .max()?;
+        let seconds = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Some((seconds, transcript_cwd(&newest)?))
+    }));
+    rank_folders(known, &[data_root(), std::env::temp_dir()])
+}
+
+/// The folder a transcript's session started in, from the first line that names one.
+fn transcript_cwd(path: &Path) -> Option<PathBuf> {
+    use std::io::BufRead;
+    std::io::BufReader::new(fs::File::open(path).ok()?)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| line.contains("\"cwd\""))
+        .find_map(|line| {
+            let v: Value = serde_json::from_str(&line).ok()?;
+            Some(PathBuf::from(v.get("cwd")?.as_str()?))
+        })
+}
+
+/// Existing folders newest first, once each, leaving out those under `excluded`: claudo's
+/// scratch folders and temporary ones are nobody's project.
+fn rank_folders(mut folders: Vec<(u64, PathBuf)>, excluded: &[PathBuf]) -> Vec<String> {
+    folders.sort_by_key(|(when, _)| Reverse(*when));
+    let mut seen = HashSet::new();
+    folders
+        .into_iter()
+        .map(|(_, folder)| folder)
+        .filter(|folder| !excluded.iter().any(|root| folder.starts_with(root)))
+        .filter(|folder| folder.is_dir() && seen.insert(folder.clone()))
+        .take(RECENT_FOLDERS)
+        .map(|folder| folder.display().to_string())
+        .collect()
 }
 
 /// How many sessions `discover` lists.
@@ -858,5 +943,39 @@ mod tests {
             version: STORE_VERSION,
         };
         assert!(store.session_ids().contains("desktop"), "not offered again");
+    }
+
+    #[test]
+    fn recent_folders_are_existing_projects_newest_first_once_each() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = crate_dir.parent().unwrap().to_path_buf();
+        let ranked = rank_folders(
+            vec![
+                (1, workspace.clone()),
+                (5, crate_dir.join("src")),
+                (3, crate_dir.clone()),
+                (4, PathBuf::from("/no/such/folder")),
+                (9, crate_dir.join("src")),
+                (8, std::env::temp_dir()),
+            ],
+            &[std::env::temp_dir()],
+        );
+        let expected = [crate_dir.join("src"), crate_dir, workspace];
+        let expected: Vec<String> = expected.iter().map(|f| f.display().to_string()).collect();
+        assert_eq!(ranked, expected);
+    }
+
+    #[test]
+    fn a_transcript_names_the_folder_its_session_started_in() {
+        let path = std::env::temp_dir().join(format!("claudo-cwd-{}.jsonl", Uuid::new_v4()));
+        let lines = [
+            r#"{"type":"summary","summary":"x"}"#,
+            r#"{"type":"user","cwd":"/home/me/project","message":{"content":"hi"}}"#,
+            r#"{"type":"user","cwd":"/home/me/elsewhere"}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let cwd = transcript_cwd(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(cwd, Some(PathBuf::from("/home/me/project")));
     }
 }

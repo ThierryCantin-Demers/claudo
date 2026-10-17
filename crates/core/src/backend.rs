@@ -7,6 +7,7 @@
 //! `try_recv` (native, no runtime) or `recv().await` (the daemon).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
@@ -104,6 +105,29 @@ impl Backend {
             Command::NewAttached { path, request } => {
                 let id = self.store.lock().unwrap().create_attached(path.into());
                 self.created(id, request);
+            }
+
+            Command::SetFolder { id, path } => {
+                // Its first turn may still be waiting for the session id.
+                let moved = if self.live.pid(&id).is_some() {
+                    Err("a conversation stays in the folder it started in".to_string())
+                } else {
+                    let folder = path.map(PathBuf::from);
+                    self.store.lock().unwrap().set_folder(&id, folder)
+                };
+                match moved {
+                    Ok(()) => self.emit(conversations_event(&self.store)),
+                    Err(detail) => self.error(id, detail),
+                }
+            }
+
+            Command::ListFolders => {
+                let known = self.store.lock().unwrap().folders();
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let list = crate::sessions::recent_folders(known);
+                    let _ = events.send(ServerEvent::Folders { list });
+                });
             }
 
             Command::ListSessions => {
@@ -238,7 +262,7 @@ impl Backend {
                 if let Some(title) = ai_title {
                     let mut store = self.store.lock().unwrap();
                     if let Some(meta) = store.get_mut(&id)
-                        && !meta.attached
+                        && meta.imported_from.is_none()
                         && !meta.renamed
                         && meta.title != title
                     {

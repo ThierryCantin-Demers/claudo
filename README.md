@@ -56,13 +56,11 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Context usage for the last turn. Past 500k tokens of context, COSMIC offers to compact the conversation; compactions, automatic or asked for, show where they happened with their summary.
 - COSMIC: a `/` menu of the CLI's slash commands (built in, skills, plugins) as you type one; `/clear`, `/rename`, `/model` and `/effort` act on claudo's own conversation, title and settings.
 - COSMIC: your plan's usage at the foot of the sidebar, the five-hour session and the week, with when each resets.
-- A scratch working directory per conversation, or an attached project folder.
+- A scratch working directory per conversation, or a project folder. COSMIC offers the folders you worked in lately, Claude Code's included, under the message box until the first message, and names the folder there after; right-click New chat for New chat in folder…. egui: Folder….
 - Zoom with Ctrl+scroll or Ctrl+`+`/`-`/`0`.
 - COSMIC: several agents side by side in tiles (below).
 - COSMIC: the Commands panel (terminal button in the header bar; drag its edge to resize) lists the shell commands of every open agent, grouped by conversation, running ones first and background ones included, plus any agent still running one after its tile closed; a row expands to the whole command and its output.
 - COSMIC: select any text in a conversation, across messages, and copy it with Ctrl+C; double-click selects a word, triple-click a paragraph, and a selection also fills the primary selection for middle-click paste.
-
-The COSMIC frontend cannot attach a project folder yet.
 
 ### Tiles (COSMIC)
 

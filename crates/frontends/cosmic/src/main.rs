@@ -680,6 +680,8 @@ mod app {
         cli_commands: Vec<CliCommand>,
         /// What the sessions page lists; `None` while they are being found.
         sessions: Option<Vec<SessionInfo>>,
+        /// Project folders worked in lately, offered to a conversation before it starts.
+        folders: Vec<String>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -891,6 +893,12 @@ mod app {
         NewChat(Placement),
         /// A new chat in a new window.
         NewWindow,
+        /// A new chat in a project folder the user picks.
+        NewChatIn,
+        /// Where a conversation that has not started works.
+        MoveTo(ConversationId, folder::Choice),
+        /// A folder picked for a conversation, or for a new one with `None`.
+        FolderPicked(Option<ConversationId>, Result<Option<String>, String>),
         /// The page of Claude Code sessions to continue, found anew.
         ShowSessions,
         /// Continue a Claude Code session in the focused tile.
@@ -1496,6 +1504,7 @@ mod app {
         fn new_conversation(&mut self, placement: Placement) {
             let request = self.request(placement);
             self.cmd(Command::NewScratch { request });
+            self.cmd(Command::ListFolders);
         }
 
         /// An id for a conversation the backend will create, which goes where `placement` says.
@@ -1844,6 +1853,7 @@ mod app {
                     }
                 }
                 ServerEvent::Sessions { list } => self.sessions = Some(list),
+                ServerEvent::Folders { list } => self.folders = list,
                 ServerEvent::Error {
                     conversation_id: None,
                     detail,
@@ -2094,6 +2104,7 @@ mod app {
                 Some(vec![
                     menu_item("New chat in new tile", Message::NewChat(Placement::Right)),
                     menu_item("New chat in new window", Message::NewWindow),
+                    menu_item("New chat in folder…", Message::NewChatIn),
                     menu_item("Continue a session…", Message::ShowSessions),
                 ]),
             )
@@ -2794,7 +2805,14 @@ mod app {
                     ..container::Style::default()
                 }
             }));
-            widget::container(widget::container(boxed).max_width(COLUMN_WIDTH * self.zoom))
+            let column = widget::Column::with_children(
+                std::iter::once(boxed.into())
+                    .chain(self.folder_row(id, view))
+                    .collect::<Vec<_>>(),
+            )
+            .spacing(6)
+            .max_width(COLUMN_WIDTH * self.zoom);
+            widget::container(column)
                 .center_x(Length::Fill)
                 .padding(if compact {
                     [0, 8, 8, 8]
@@ -3855,6 +3873,7 @@ mod app {
                 blurred: false,
                 cli_commands: Vec::new(),
                 sessions: None,
+                folders: Vec::new(),
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -4115,6 +4134,44 @@ mod app {
                         && index < view.attachments.len()
                     {
                         view.attachments.remove(index);
+                    }
+                }
+                Message::NewChatIn => {
+                    return cosmic::task::future(async move {
+                        Message::FolderPicked(None, folder::pick().await)
+                    });
+                }
+                Message::MoveTo(id, choice) => {
+                    let path = match choice {
+                        folder::Choice::Scratch => None,
+                        folder::Choice::Folder(path) => Some(path),
+                        folder::Choice::Pick => {
+                            return cosmic::task::future(async move {
+                                Message::FolderPicked(Some(id), folder::pick().await)
+                            });
+                        }
+                    };
+                    self.cmd(Command::SetFolder { id, path });
+                    self.cmd(Command::ListFolders);
+                }
+                Message::FolderPicked(_, Ok(None)) => {}
+                Message::FolderPicked(Some(id), Ok(Some(path))) => {
+                    self.cmd(Command::SetFolder {
+                        id,
+                        path: Some(path),
+                    });
+                    self.cmd(Command::ListFolders);
+                }
+                Message::FolderPicked(None, Ok(Some(path))) => {
+                    self.layout_mut().page = Page::Chat;
+                    let request = self.request(Placement::Focused);
+                    self.cmd(Command::NewAttached { path, request });
+                    self.cmd(Command::ListFolders);
+                }
+                Message::FolderPicked(id, Err(error)) => {
+                    let id = id.or_else(|| self.focused(self.current).cloned());
+                    if let Some(view) = id.and_then(|id| self.views.get_mut(&id)) {
+                        view.fail(error);
                     }
                 }
                 Message::ShowSessions => {
@@ -4878,6 +4935,7 @@ mod app {
     mod carry;
     mod commands;
     mod compaction;
+    mod folder;
     mod frozen;
     mod selectable;
     mod sessions;
@@ -4942,6 +5000,7 @@ mod app {
                 commands.send(Command::GetCapabilities);
                 commands.send(Command::GetUsage);
                 commands.send(Command::ListConversations);
+                commands.send(Command::ListFolders);
                 let _ = output.send(Message::Connected(commands)).await;
                 while let Some(ev) = events.recv().await {
                     // Coalesce any already-queued events into one render.

@@ -464,6 +464,22 @@ fn snapshots() {
     Harness::new(app).snapshot("sessions");
 
     Harness::new(with_runs(6, 3)).snapshot("tool-groups");
+
+    let mut app = two_tiles();
+    app.folders = ["prog/claudo", "prog/burn", "dotfiles"]
+        .map(|folder| format!("{home}/{folder}"))
+        .to_vec();
+    for (info, folder) in app
+        .conversations
+        .iter_mut()
+        .zip(["prog/cubek", "prog/claudo"])
+    {
+        info.cwd = format!("{home}/{folder}");
+        info.attached = true;
+    }
+    app.views
+        .insert(BRAVO.to_string(), ConversationView::new(""));
+    Harness::new(app).snapshot("folders");
 }
 
 /// Alpha with a finished run of `done` calls, then a running one whose last call is going.

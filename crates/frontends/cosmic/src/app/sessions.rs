@@ -1,9 +1,9 @@
 //! Claude Code sessions started in Claude Desktop or a terminal, which a click continues
 //! as a conversation here.
 
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::folder::home_relative;
 use super::*;
 
 impl ClaudoApp {
@@ -70,13 +70,5 @@ impl ClaudoApp {
         .padding([6, 10])
         .width(Length::Fill)
         .into()
-    }
-}
-
-fn home_relative(path: &str) -> String {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    match Path::new(path).strip_prefix(&home) {
-        Ok(rest) if !home.is_empty() => Path::new("~").join(rest).display().to_string(),
-        _ => path.to_string(),
     }
 }
