@@ -811,6 +811,7 @@ fn permission_prompt(v: &Value, bypass: bool) -> Option<Prompt> {
         is_error: false,
         background: None,
         parent: None,
+        agent: false,
     };
     Some(Prompt::Ask {
         request_id,
@@ -1287,9 +1288,12 @@ pub(crate) fn tool_call(block: &Value) -> ToolCall {
     let field = |key| block.get(key).and_then(Value::as_str);
     let input = block.get("input");
     let input_field = |key| input.and_then(|i| i.get(key)).and_then(Value::as_str);
+    let name = field("name").unwrap_or("tool");
     ToolCall {
         call_id: field("id").unwrap_or("").to_string(),
-        name: field("name").unwrap_or("tool").to_string(),
+        name: name.to_string(),
+        // `Task` is the Agent tool's earlier name, still in older transcripts.
+        agent: matches!(name, "Agent" | "Task"),
         summary: input.map(summarize).unwrap_or_default(),
         description: input_field("description").unwrap_or("").to_string(),
         command: input_field("command").map(str::to_owned),

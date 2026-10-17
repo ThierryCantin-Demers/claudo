@@ -285,6 +285,9 @@ pub struct ToolCall {
     /// The Agent call whose subagent made this one.
     #[serde(default)]
     pub parent: Option<CallId>,
+    /// It starts a subagent, whose calls name it as their `parent`.
+    #[serde(default)]
+    pub agent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

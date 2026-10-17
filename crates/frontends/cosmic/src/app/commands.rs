@@ -42,14 +42,35 @@ pub(super) fn call_status<'a>(
 }
 
 impl ConversationView {
-    /// Shell commands, newest first, with their item's index.
+    /// What the Commands panel lists, newest first, with their item's index: the agent's
+    /// shell commands, and its subagents, whose own calls show under them.
     pub(super) fn commands(&self) -> impl Iterator<Item = (usize, &ToolCall)> {
         self.items
             .iter()
             .enumerate()
             .rev()
             .filter_map(|(idx, entry)| match entry {
-                Entry::Tool { call, .. } if call.command.is_some() => Some((idx, call)),
+                Entry::Tool { call, .. }
+                    if call.parent.is_none() && (call.command.is_some() || call.agent) =>
+                {
+                    Some((idx, call))
+                }
+                _ => None,
+            })
+    }
+
+    /// The calls a subagent made, in order, with their item's index.
+    pub(super) fn made_by<'a>(
+        &'a self,
+        agent: &'a str,
+    ) -> impl Iterator<Item = (usize, &'a ToolCall)> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(move |(idx, entry)| match entry {
+                Entry::Tool { call, .. } if call.parent.as_deref() == Some(agent) => {
+                    Some((idx, call))
+                }
                 _ => None,
             })
     }
@@ -266,9 +287,116 @@ impl ClaudoApp {
             running
                 .into_iter()
                 .chain(done)
-                .map(|(idx, call)| self.command_row(id, view, idx, call, texts, size)),
+                .map(|(idx, call)| self.panel_row(id, view, idx, call, texts, size)),
         );
         widget::Column::with_children(rows).spacing(4).into()
+    }
+
+    fn panel_row<'a>(
+        &'a self,
+        id: &'a ConversationId,
+        view: &'a ConversationView,
+        idx: usize,
+        call: &'a ToolCall,
+        texts: Texts<'a>,
+        size: f32,
+    ) -> Element<'a, Message> {
+        if call.agent {
+            self.agent_row(id, view, idx, call, texts, size)
+        } else {
+            self.command_row(id, view, idx, call, texts, size)
+        }
+    }
+
+    /// A subagent, for as long as it works: what it does and how far it got; opened, its
+    /// calls newest first and what it reported.
+    fn agent_row<'a>(
+        &'a self,
+        id: &'a ConversationId,
+        view: &'a ConversationView,
+        idx: usize,
+        agent: &'a ToolCall,
+        texts: Texts<'a>,
+        size: f32,
+    ) -> Element<'a, Message> {
+        let small = size * 0.9;
+        let running = view.running(agent);
+        let made: Vec<(usize, &ToolCall)> = view.made_by(&agent.call_id).collect();
+        let mut about = vec!["Subagent".to_string()];
+        if agent.background.is_some() {
+            about.push("in the background".to_string());
+        }
+        about.push(match made.len() {
+            1 => "1 call".to_string(),
+            n => format!("{n} calls"),
+        });
+        if running && let Some((_, latest)) = made.last() {
+            about.push(format!("{} {}", latest.name, latest.summary));
+        }
+        let lines = vec![
+            widget::text(truncate(&agent.summary, PREVIEW_CHARS))
+                .size(size)
+                .wrapping(text::Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                .width(Length::Fill)
+                .into(),
+            widget::text(about.join(" · "))
+                .size(small)
+                .class(dim())
+                .wrapping(text::Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                .into(),
+        ];
+        let header = widget::button::custom(
+            widget::Row::with_children(vec![
+                widget::Column::with_children(lines)
+                    .spacing(2)
+                    .width(Length::Fill)
+                    .into(),
+                call_status(agent, running, self.pulse, small),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ToggleCommand(id.clone(), idx))
+        .class(cosmic::theme::Button::Text)
+        .width(Length::Fill);
+        if !view.commands_open.contains(&idx) {
+            return header.into();
+        }
+
+        let mut rows: Vec<Element<Message>> = made
+            .iter()
+            .rev()
+            .map(|&(idx, call)| self.panel_row(id, view, idx, call, texts, size))
+            .collect();
+        let report = match &agent.background {
+            Some(background) => background.output.as_deref(),
+            None => agent.result.as_deref(),
+        };
+        if let Some(report) = report.filter(|r| !r.trim().is_empty()) {
+            rows.push(
+                widget::container(tool_text(
+                    texts,
+                    (idx, OUTPUT_BLOCK),
+                    "Report",
+                    report,
+                    small,
+                ))
+                .padding(10)
+                .width(Length::Fill)
+                .class(cosmic::theme::Container::Card)
+                .into(),
+            );
+        }
+        widget::Column::with_children(vec![
+            header.into(),
+            widget::container(widget::Column::with_children(rows).spacing(4))
+                .padding([0, 0, 0, 16])
+                .into(),
+        ])
+        .spacing(4)
+        .into()
     }
 
     fn command_row<'a>(
@@ -282,9 +410,12 @@ impl ClaudoApp {
     ) -> Element<'a, Message> {
         let small = size * 0.9;
         let open = view.commands_open.contains(&idx);
-        let command = call.command.as_deref().unwrap_or_default();
+        let title = match call.command {
+            Some(_) => call.summary.clone(),
+            None => format!("{} {}", call.name, call.summary),
+        };
         let mut lines = vec![
-            widget::text(truncate(&call.summary, PREVIEW_CHARS))
+            widget::text(truncate(&title, PREVIEW_CHARS))
                 .size(size)
                 .font(cosmic::font::mono())
                 .wrapping(text::Wrapping::None)
@@ -293,17 +424,12 @@ impl ClaudoApp {
                 .into(),
         ];
         let mut about = call.description.clone();
-        for (applies, note) in [
-            (call.background.is_some(), "in the background"),
-            (call.parent.is_some(), "by a subagent"),
-        ] {
-            if applies {
-                about = if about.is_empty() {
-                    note.to_string()
-                } else {
-                    format!("{about} · {note}")
-                };
-            }
+        if call.background.is_some() {
+            about = if about.is_empty() {
+                "in the background".to_string()
+            } else {
+                format!("{about} · in the background")
+            };
         }
         if !about.is_empty() {
             lines.push(
@@ -336,13 +462,12 @@ impl ClaudoApp {
             Some(background) => background.output.as_deref(),
             None => call.result.as_deref(),
         };
-        let mut details = vec![tool_text(
-            texts,
-            (idx, COMMAND_BLOCK),
-            "Command",
-            command,
-            small,
-        )];
+        // A subagent's row lists its other calls too, which run no command.
+        let (label, input) = match &call.command {
+            Some(command) => ("Command", command),
+            None => ("Input", &call.input),
+        };
+        let mut details = vec![tool_text(texts, (idx, COMMAND_BLOCK), label, input, small)];
         if let Some(output) = output.filter(|o| !o.trim().is_empty()) {
             details.push(tool_text(
                 texts,

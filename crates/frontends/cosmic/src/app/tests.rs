@@ -370,6 +370,7 @@ fn snapshots() {
             is_error: false,
             background: None,
             parent: None,
+            agent: false,
         },
         scope: "gh issue create".to_string(),
     });
@@ -492,6 +493,18 @@ fn snapshots() {
     Harness::new(app).snapshot("queued");
 
     Harness::new(with_subagent()).snapshot("subagent");
+
+    let mut app = with_subagent();
+    app.layout_mut().sidebar_open = false;
+    let _ = app.update(Message::ShowCommands(true));
+    Harness::new(app).snapshot("commands-subagent");
+
+    let mut app = with_subagent();
+    app.layout_mut().sidebar_open = false;
+    let _ = app.update(Message::ShowCommands(true));
+    let idx = app.views[ALPHA].commands().next().unwrap().0;
+    let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
+    Harness::new(app).snapshot("commands-subagent-open");
 }
 
 /// Alpha with a finished run of `done` calls, then a running one whose last call is going.
@@ -831,6 +844,7 @@ fn bash(id: &str, command: &str, description: &str) -> ToolCall {
         is_error: false,
         background: None,
         parent: None,
+        agent: false,
     }
 }
 
@@ -841,6 +855,7 @@ fn with_subagent() -> ClaudoApp {
     let view = app.views.get_mut(ALPHA).unwrap();
     let mut agent = bash("agent", "", "");
     agent.name = "Agent".to_string();
+    agent.agent = true;
     agent.summary = "Verify the review's findings".to_string();
     agent.command = None;
     agent.result = Some("Async agent launched".to_string());
@@ -1694,21 +1709,26 @@ fn a_message_sent_while_claude_works_waits_then_lands_where_claude_took_it() {
 }
 
 #[test]
-fn a_background_subagents_calls_run_after_its_turn_and_nest_under_it() {
+fn a_background_subagent_works_on_after_its_turn_as_one_panel_row() {
     let mut app = with_subagent();
     let view = &app.views[ALPHA];
     assert!(!view.streaming, "the turn that started it ended");
-    let running: Vec<&str> = view
+    let listed: Vec<&str> = view
         .commands()
+        .map(|(_, call)| call.call_id.as_str())
+        .collect();
+    assert_eq!(
+        listed,
+        ["agent"],
+        "one row in the Commands panel, not one per call"
+    );
+    assert_eq!(view.running_commands(), 1);
+    let running: Vec<&str> = view
+        .made_by("agent")
         .filter(|(_, call)| view.running(call))
         .map(|(_, call)| call.call_id.as_str())
         .collect();
     assert_eq!(running, ["s2"], "its last command runs on");
-    assert_eq!(
-        view.commands().count(),
-        3,
-        "every one is in the Commands panel"
-    );
     assert!(
         matches!(&view.items[view.items.len() - 4], Entry::Reply(reply) if reply.text.contains("report")),
         "the reply stays whole"
