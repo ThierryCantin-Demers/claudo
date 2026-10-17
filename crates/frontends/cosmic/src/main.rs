@@ -205,6 +205,8 @@ mod app {
         retrying: Option<String>,
         /// Files the next message sends.
         attachments: Vec<attach::Shown>,
+        /// Runs of calls opened, by their first entry.
+        groups_open: std::collections::HashSet<usize>,
     }
 
     impl ConversationView {
@@ -230,6 +232,7 @@ mod app {
                 since: None,
                 retrying: None,
                 attachments: Vec::new(),
+                groups_open: Default::default(),
             }
         }
 
@@ -386,6 +389,7 @@ mod app {
                     self.generation += 1;
                     self.assistant_idx = None;
                     self.commands_open.clear();
+                    self.groups_open.clear();
                 }
                 ServerEvent::Background {
                     call_id,
@@ -811,6 +815,8 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        /// Open or fold the run of calls that starts at this entry.
+        ToggleGroup(ConversationId, usize),
         Minute,
         /// Open or close the Commands panel.
         ShowCommands(bool),
@@ -2810,8 +2816,7 @@ mod app {
                 conversation: id,
                 selection: self.selection.as_ref(),
             };
-            let mut rows: Vec<Element<Message>> = Vec::new();
-            for (idx, entry) in view.items.iter().enumerate() {
+            let row = |idx: usize, entry: &'a Entry| -> Element<'a, Message> {
                 let toggle = || Message::Toggle(id.clone(), idx);
                 let last = idx + 1 == view.items.len();
                 let key = frozen::key(view, idx, entry, last && live.is_some(), self.zoom);
@@ -2866,7 +2871,28 @@ mod app {
                         size,
                     ),
                 };
-                rows.push(frozen::Frozen::new(key, row).into());
+                frozen::Frozen::new(key, row).into()
+            };
+            let mut rows: Vec<Element<Message>> = Vec::new();
+            let mut idx = 0;
+            while idx < view.items.len() {
+                let work = view.items[idx..]
+                    .iter()
+                    .take_while(|entry| {
+                        matches!(entry, Entry::Tool { .. } | Entry::Thinking { .. })
+                    })
+                    .count();
+                let calls = view.items[idx..idx + work]
+                    .iter()
+                    .filter(|entry| matches!(entry, Entry::Tool { .. }))
+                    .count();
+                if calls < 2 {
+                    rows.push(row(idx, &view.items[idx]));
+                    idx += 1;
+                } else {
+                    rows.push(self.tool_group(id, view, idx..idx + work, &row, size));
+                    idx += work;
+                }
             }
             if let Some(label) = view.activity() {
                 rows.push(activity_row(label, self.pulse, size));
@@ -2888,6 +2914,104 @@ mod app {
                 .anchor_bottom()
                 .height(Length::Fill)
                 .into()
+        }
+    }
+
+    impl ClaudoApp {
+        /// Calls made one after another, folded into one row. While they are the running
+        /// turn's latest, the newest shows below it, so the work stays visible.
+        fn tool_group<'a>(
+            &'a self,
+            id: &'a ConversationId,
+            view: &'a ConversationView,
+            run: std::ops::Range<usize>,
+            row: &impl Fn(usize, &'a Entry) -> Element<'a, Message>,
+            size: f32,
+        ) -> Element<'a, Message> {
+            let calls: Vec<&ToolCall> = view.items[run.clone()]
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Tool { call, .. } => Some(call),
+                    _ => None,
+                })
+                .collect();
+            let mut tools: Vec<(&str, usize)> = Vec::new();
+            for call in &calls {
+                match tools.iter_mut().find(|(name, _)| *name == call.name) {
+                    Some((_, count)) => *count += 1,
+                    None => tools.push((&call.name, 1)),
+                }
+            }
+            let tools = tools
+                .iter()
+                .map(|(name, count)| match count {
+                    1 => name.to_string(),
+                    _ => format!("{name} ×{count}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let small = size * 0.85;
+            let failed = calls.iter().filter(|call| call.is_error).count();
+            let status = match calls
+                .iter()
+                .find(|call| commands::running(call, view.streaming))
+            {
+                Some(call) => commands::call_status(call, view.streaming, self.pulse, small),
+                None if failed > 0 => widget::text(format!("{failed} failed"))
+                    .size(small)
+                    .class(destructive())
+                    .into(),
+                None => commands::call_status(calls[calls.len() - 1], false, self.pulse, small),
+            };
+            let open = view.groups_open.contains(&run.start);
+            let chevron = if open {
+                "go-down-symbolic"
+            } else {
+                "go-next-symbolic"
+            };
+            let header = widget::button::custom(
+                widget::Row::with_children(vec![
+                    widget::icon::from_name(chevron).size(16).into(),
+                    widget::text(format!("{} calls", calls.len()))
+                        .size(size)
+                        .font(cosmic::font::semibold())
+                        .into(),
+                    widget::text(tools)
+                        .size(size)
+                        .class(dim())
+                        .wrapping(text::Wrapping::None)
+                        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                        .width(Length::Fill)
+                        .into(),
+                    status,
+                ])
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::ToggleGroup(id.clone(), run.start))
+            .class(cosmic::theme::Button::Text)
+            .width(Length::Fill);
+            let latest = run.end == view.items.len() && view.streaming;
+            let shown: Vec<usize> = match (open, latest) {
+                (true, _) => run.collect(),
+                (false, true) => vec![run.end - 1],
+                (false, false) => Vec::new(),
+            };
+            if shown.is_empty() {
+                return header.into();
+            }
+            let members = shown
+                .into_iter()
+                .map(|idx| row(idx, &view.items[idx]))
+                .collect::<Vec<_>>();
+            widget::Column::with_children(vec![
+                header.into(),
+                widget::container(widget::Column::with_children(members).spacing(12.0 * self.zoom))
+                    .padding([0, 0, 0, 24])
+                    .into(),
+            ])
+            .spacing(8)
+            .into()
         }
     }
 
@@ -3893,6 +4017,13 @@ mod app {
                 }
                 #[cfg(feature = "hot")]
                 Message::Hotpatched => {}
+                Message::ToggleGroup(id, first) => {
+                    if let Some(view) = self.views.get_mut(&id)
+                        && !view.groups_open.remove(&first)
+                    {
+                        view.groups_open.insert(first);
+                    }
+                }
                 Message::Toggle(id, idx) => {
                     if let Some(
                         Entry::Tool { open, .. }

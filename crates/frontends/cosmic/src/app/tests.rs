@@ -462,6 +462,36 @@ fn snapshots() {
         ),
     ]);
     Harness::new(app).snapshot("sessions");
+
+    Harness::new(with_runs(6, 3)).snapshot("tool-groups");
+}
+
+/// Alpha with a finished run of `done` calls, then a running one whose last call is going.
+fn with_runs(done: usize, running: usize) -> ClaudoApp {
+    let mut app = two_tiles();
+    let view = app.views.get_mut(ALPHA).unwrap();
+    let commands = [
+        "git status",
+        "cat crates/cubecl-runtime/src/tune.rs",
+        "rg 'fn remove'",
+    ];
+    for n in 0..done {
+        let mut call = bash(&format!("d{n}"), commands[n % 3], "Look");
+        call.result = Some("ok".to_string());
+        view.items.push(Entry::Tool { call, open: false });
+    }
+    view.items.push(Entry::Reply(Box::new(Reply::complete(
+        "Now the tests.".to_string(),
+    ))));
+    for n in 0..running {
+        let mut call = bash(&format!("r{n}"), commands[n % 3], "Look");
+        if n + 1 < running {
+            call.result = Some("ok".to_string());
+        }
+        view.items.push(Entry::Tool { call, open: false });
+    }
+    view.streaming = true;
+    app
 }
 
 fn session(title: &str, source: &str, cwd: &str, updated: u64) -> SessionInfo {
@@ -472,6 +502,20 @@ fn session(title: &str, source: &str, cwd: &str, updated: u64) -> SessionInfo {
         source: source.to_string(),
         updated,
     }
+}
+
+#[test]
+fn calls_made_one_after_another_fold_into_one_row_that_opens() {
+    let app = with_runs(6, 3);
+    let first = app.views[ALPHA].items.len() - 3 - 1 - 6;
+    let mut h = Harness::new(app);
+    h.move_to(560.0, 400.0);
+    let _ = h.app.update(Message::ToggleGroup(ALPHA.to_string(), first));
+    assert!(h.app.views[ALPHA].groups_open.contains(&first));
+    h.move_to(561.0, 400.0);
+    let _ = h.app.update(Message::ToggleGroup(ALPHA.to_string(), first));
+    assert!(h.app.views[ALPHA].groups_open.is_empty());
+    h.move_to(562.0, 400.0);
 }
 
 #[test]
