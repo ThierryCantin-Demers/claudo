@@ -232,7 +232,10 @@ state back by name every frame, wherever it moved. Two traps: a container report
 content's id, not its own, and a scrollable reports a compound one, so neither name works;
 and between direct siblings libcosmic finds a moved state by name but leaves it at its old
 index, so the named widget must sit below the reordered parent's direct child. Tiles do
-both through `Intercept`; `src/app/tests.rs` checks a dragged tile keeps its scroll.
+both through `Intercept`; `src/app/tests.rs` checks a dragged tile keeps its scroll. Inside a
+tile, a named widget whose index changes gets an empty state and panics ("Downcast on
+stateless state") even wrapped in a container, so keep its index fixed: the message box puts
+attachments after the editor, not before.
 
 **Several windows.** Each window has a `WindowLayout` keyed by its `window::Id`; messages
 from a window's view and keys pressed in it arrive as `Message::In(window, ..)`. libcosmic

@@ -2764,10 +2764,12 @@ mod app {
             .align_y(Alignment::Center);
 
             let boxed = widget::container(
+                // The editor's state is restored by name only while it keeps its index, so
+                // attachments go after it rather than before.
                 widget::Column::with_children(
-                    attach::pending(id, &view.attachments, size, self.zoom)
-                        .into_iter()
-                        .chain([editor.into(), controls.into()])
+                    std::iter::once(editor.into())
+                        .chain(attach::pending(id, &view.attachments, size, self.zoom))
+                        .chain([controls.into()])
                         .collect::<Vec<_>>(),
                 )
                 .spacing(if compact { 6 } else { 10 }),
