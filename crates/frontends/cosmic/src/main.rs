@@ -122,7 +122,7 @@ mod app {
 
         fn complete(text: String) -> Self {
             Self {
-                markdown: markdown::Content::parse(&furigana::annotate(&text)),
+                markdown: markdown::Content::parse(&furigana::annotate(&text, 0..text.len())),
                 parsed: text.len(),
                 text,
             }
@@ -140,7 +140,7 @@ mod app {
 
         fn parse_to(&mut self, end: usize) {
             if end > self.parsed {
-                let chunk = furigana::annotate(&self.text[self.parsed..end]);
+                let chunk = furigana::annotate(&self.text, self.parsed..end);
                 self.markdown.push_str(&chunk);
                 self.parsed = end;
             }

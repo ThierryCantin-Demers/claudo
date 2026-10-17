@@ -608,13 +608,13 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
 }
 
 /// A reading's size, relative to its words'.
-const READING: f32 = 0.5;
+const READING: f32 = 0.6;
 
 /// Lines tall enough for readings over them, in a block that has any.
 fn line_height(rubies: &[Ruby]) -> LineHeight {
     match rubies.is_empty() {
         true => LineHeight::default(),
-        false => LineHeight::Relative(2.1),
+        false => LineHeight::Relative(2.3),
     }
 }
 

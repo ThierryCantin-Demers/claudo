@@ -225,7 +225,8 @@ draws furigana (`src/app/furigana.rs`): a reply's `<ruby>` elements reach it as 
 interlinear annotation characters, the only form the markdown parser keeps, and it lays out
 the words alone and draws each reading over them. cosmic-text has one line height per
 paragraph, so every line of a paragraph with readings is spaced for them, and a copied
-selection holds the words without their readings.
+selection holds the words without their readings. Ruby inside code, inline or fenced, stays
+as written.
 
 **Fonts**: egui bundles Latin glyphs only, so the Japanese font is embedded via
 `include_bytes!` and registered as a fallback. Do not switch to loading system fonts; that
