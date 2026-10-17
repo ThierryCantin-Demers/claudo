@@ -402,6 +402,8 @@ fn snapshots() {
         five_hour: Some(window(0.42, 2)),
         seven_day: Some(window(0.86, 61)),
     });
+    app.quota_asked = false;
+    app.quota_at = Some(now - 180);
     Harness::new(app).snapshot("usage");
 
     let mut app = two_tiles();
@@ -1770,4 +1772,28 @@ fn the_end_of_a_conversation_counts_its_background_commands() {
         app.views[ALPHA].in_background().as_deref(),
         Some("Running 1 command in the background")
     );
+}
+
+#[test]
+fn the_usage_says_when_it_was_updated_and_refreshes_on_demand() {
+    let mut app = two_tiles();
+    assert!(app.quota_asked, "the first report is asked for at launch");
+    let quota = claudo_protocol::Quota {
+        five_hour: Some(claudo_protocol::QuotaWindow {
+            used: 0.4,
+            resets_at: usage::now() + 3600,
+        }),
+        seven_day: None,
+    };
+    let _ = app.update(Message::Events(vec![ServerEvent::Quota(quota)]));
+    assert!(!app.quota_asked);
+    assert!(app.quota_at.is_some());
+
+    let _ = app.update(Message::RefreshUsage);
+    assert!(app.quota_asked);
+    let _ = app.update(Message::Events(vec![ServerEvent::QuotaUnavailable(
+        "claude exited".to_string(),
+    )]));
+    assert!(!app.quota_asked, "a refresh that failed can be tried again");
+    assert_eq!(app.quota_error.as_deref(), Some("claude exited"));
 }

@@ -701,6 +701,12 @@ mod app {
         focus_composer: Option<ConversationId>,
         /// The subscription's usage windows, as last reported.
         quota: Option<Quota>,
+        /// When `quota` was last reported, in Unix seconds.
+        quota_at: Option<u64>,
+        /// A report is on its way; the first goes out at launch.
+        quota_asked: bool,
+        /// Why the last request for one failed.
+        quota_error: Option<String>,
         /// Minutes since launch, counted to refresh `quota`.
         minutes: u32,
         /// How far from the bottom tiles moved to another window were scrolled, until the
@@ -852,6 +858,8 @@ mod app {
         /// Open or fold the run of calls that starts at this entry.
         ToggleGroup(ConversationId, usize),
         Minute,
+        /// Ask for the usage windows now.
+        RefreshUsage,
         /// Open or close the Commands panel.
         ShowCommands(bool),
         StartCommandsDrag,
@@ -1864,7 +1872,16 @@ mod app {
                 ServerEvent::Settings(s) => self.settings = s,
                 ServerEvent::Models(models) => self.models = models,
                 ServerEvent::Commands(commands) => self.cli_commands = commands,
-                ServerEvent::Quota(quota) => self.quota = Some(usage::merged(self.quota, quota)),
+                ServerEvent::Quota(quota) => {
+                    self.quota = Some(usage::merged(self.quota, quota));
+                    self.quota_at = Some(usage::now());
+                    self.quota_asked = false;
+                    self.quota_error = None;
+                }
+                ServerEvent::QuotaUnavailable(error) => {
+                    self.quota_asked = false;
+                    self.quota_error = Some(error);
+                }
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
                     self.restore_tiles();
@@ -4044,6 +4061,9 @@ mod app {
                 restore: vec![(main, ui.tiles.clone(), ui.focused)],
                 focus_composer: None,
                 quota: None,
+                quota_at: None,
+                quota_asked: true,
+                quota_error: None,
                 minutes: 0,
                 carried_scroll: HashMap::new(),
                 blurred: false,
@@ -4100,6 +4120,12 @@ mod app {
                 Message::Minute => {
                     self.minutes += 1;
                     if self.minutes.is_multiple_of(usage::USAGE_REFRESH_MINUTES) {
+                        return self.update(Message::RefreshUsage);
+                    }
+                }
+                Message::RefreshUsage => {
+                    if !self.quota_asked {
+                        self.quota_asked = true;
                         self.cmd(Command::GetUsage);
                     }
                 }

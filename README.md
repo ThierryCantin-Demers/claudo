@@ -56,7 +56,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Each turn ends with when it started and how long it took; while one runs, COSMIC shows its time so far and says when the API is being retried.
 - Context usage for the last turn. Past 500k tokens of context, COSMIC offers to compact the conversation; compactions, automatic or asked for, show where they happened with their summary.
 - COSMIC: a `/` menu of the CLI's slash commands (built in, skills, plugins) as you type one; `/clear`, `/rename`, `/model` and `/effort` act on claudo's own conversation, title and settings.
-- COSMIC: your plan's usage at the foot of the sidebar, the five-hour session and the week, with when each resets.
+- COSMIC: your plan's usage at the foot of the sidebar, the five-hour session and the week, with when each resets, when it was last updated, and a button to refresh it.
 - A scratch working directory per conversation, or a project folder. COSMIC offers the folders you worked in lately, Claude Code's included, under the message box until the first message, and names the folder there after; right-click New chat for New chat in folder…. egui: Folder….
 - Zoom with Ctrl+scroll or Ctrl+`+`/`-`/`0`.
 - COSMIC: several agents side by side in tiles (below).

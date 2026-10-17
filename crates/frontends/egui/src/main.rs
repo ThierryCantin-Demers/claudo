@@ -441,7 +441,7 @@ impl ClaudoApp {
                     }
                 }
 
-                ServerEvent::Quota(_) => {}
+                ServerEvent::Quota(_) | ServerEvent::QuotaUnavailable(_) => {}
 
                 ServerEvent::Error {
                     conversation_id,

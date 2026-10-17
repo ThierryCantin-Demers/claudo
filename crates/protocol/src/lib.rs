@@ -589,6 +589,8 @@ pub enum ServerEvent {
         time: Option<TurnTime>,
     },
     Quota(Quota),
+    /// Asking for the usage windows failed, for this reason.
+    QuotaUnavailable(String),
     Error {
         /// The conversation it concerns, or `None` for the connection or the app.
         #[serde(default)]

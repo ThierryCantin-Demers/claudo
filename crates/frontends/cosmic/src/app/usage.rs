@@ -17,22 +17,67 @@ pub(super) fn merged(old: Option<Quota>, new: Quota) -> Quota {
     }
 }
 
+pub(super) fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 impl ClaudoApp {
     pub(super) fn usage(&self) -> Option<Element<'_, Message>> {
-        let quota = self.quota?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = now();
         let size = 12.0 * self.zoom;
-        let rows: Vec<Element<Message>> = [("Session", quota.five_hour), ("Week", quota.seven_day)]
+        let windows = self
+            .quota
+            .map_or([None, None], |quota| [quota.five_hour, quota.seven_day]);
+        let mut rows: Vec<Element<Message>> = ["Session", "Week"]
             .into_iter()
+            .zip(windows)
             .filter_map(|(label, window)| Some(usage_row(label, window?, now, size)))
             .collect();
-        (!rows.is_empty()).then(|| {
+        if rows.is_empty() && self.quota_error.is_none() {
+            return None;
+        }
+        rows.push(self.freshness(now, size));
+        Some(
             widget::container(widget::Column::with_children(rows).spacing(10))
                 .padding([4, 8])
-                .into()
-        })
+                .into(),
+        )
+    }
+
+    /// When the windows were last reported, and a button to ask again.
+    fn freshness(&self, now: u64, size: f32) -> Element<'_, Message> {
+        let status = match (self.quota_asked, &self.quota_error, self.quota_at) {
+            (true, ..) => "Updating…".to_string(),
+            (false, Some(_), _) => "Could not update".to_string(),
+            (false, None, Some(at)) => format!("Updated {}", time::ago(now.saturating_sub(at))),
+            (false, None, None) => String::new(),
+        };
+        let status = widget::text(status).size(size * 0.9).class(dim());
+        let status: Element<Message> = match &self.quota_error {
+            Some(error) if !self.quota_asked => widget::tooltip(
+                status,
+                widget::text(error.as_str()),
+                widget::tooltip::Position::Top,
+            )
+            .into(),
+            _ => status.into(),
+        };
+        widget::Row::with_children(vec![
+            status,
+            widget::space::horizontal().into(),
+            widget::tooltip(
+                widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                    .extra_small()
+                    .on_press_maybe((!self.quota_asked).then_some(Message::RefreshUsage)),
+                widget::text("Refresh"),
+                widget::tooltip::Position::Top,
+            )
+            .into(),
+        ])
+        .align_y(Alignment::Center)
+        .into()
     }
 }
 

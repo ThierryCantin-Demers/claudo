@@ -82,9 +82,10 @@ impl Backend {
             Command::GetUsage => {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
-                    if let Ok(quota) = crate::engine::cli::usage() {
-                        let _ = events.send(ServerEvent::Quota(quota));
-                    }
+                    let _ = events.send(match crate::engine::cli::usage() {
+                        Ok(quota) => ServerEvent::Quota(quota),
+                        Err(error) => ServerEvent::QuotaUnavailable(error.to_string()),
+                    });
                 });
             }
 
