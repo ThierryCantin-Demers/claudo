@@ -778,7 +778,8 @@ fn ended_notice(v: &Value) -> Option<String> {
 pub(crate) fn incoming(v: &Value) -> Option<(String, String)> {
     let origin = v.get("origin")?;
     let field = |key| origin.get(key).and_then(Value::as_str);
-    if field("kind") == Some("task-notification") {
+    // The interactive CLI marks what the user typed as `human`.
+    if matches!(field("kind"), Some("task-notification" | "human")) {
         return None;
     }
     let from = field("name").or(field("kind")).unwrap_or("another session");
@@ -1496,6 +1497,11 @@ mod tests {
             r#"{"type":"user","isReplay":true,"uuid":"1111","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         assert!(decode(&own).is_empty());
+
+        let typed = line(
+            r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"hi"}}"#,
+        );
+        assert!(incoming(&typed).is_none(), "the user's own, typed in a terminal");
     }
 
     #[test]
