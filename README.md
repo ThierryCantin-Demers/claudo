@@ -12,6 +12,9 @@ subscription:
 claude auth login
 ```
 
+On a new machine, `cargo xtask setup` installs the tools the commands below need and prints
+the system packages still missing. Every command checks for what it needs before it starts.
+
 ### COSMIC
 
 ```bash
@@ -30,14 +33,7 @@ cargo xtask egui
 
 ### Browser
 
-Once:
-
-```bash
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.126   # must match Cargo.lock
-```
-
-Then build the bundle and serve it:
+Build the bundle and serve it:
 
 ```bash
 cargo xtask web
@@ -116,7 +112,6 @@ cargo xtask probe live_probe # probes hit the real CLI and cost tokens
 ### Live reload (COSMIC)
 
 ```bash
-cargo install cargo-hot --version 0.1.1 --locked   # once
 cargo xtask cosmic --hot
 ```
 
@@ -125,7 +120,7 @@ view code, which the optimizer inlined into callers the patch does not replace.
 
 Saving a file in `crates/frontends/cosmic/src/` patches the running window in about two
 seconds, keeping its state. Changing a type (a new `Message` variant or field) or another
-crate still needs a restart. On Linux it needs a system `lld` (Fedora: `sudo dnf install lld`).
+crate still needs a restart.
 
 ## License
 

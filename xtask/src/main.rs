@@ -1,11 +1,14 @@
 //! The project's commands: `cargo xtask --help`.
 
+mod need;
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
+use need::Need;
 
 const APP_ID: &str = "com.claudo.Cosmic";
 const COSMIC_BIN: &str = "claudo-cosmic";
@@ -20,6 +23,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Task {
+    /// Install the tools the other commands need, and say which system packages are missing.
+    Setup,
     /// Install the COSMIC app into cargo's bin directory, with a launcher entry and icon.
     Install,
     /// Remove what `install` put in place.
@@ -66,11 +71,30 @@ fn main() -> ExitCode {
     }
 }
 
+impl Task {
+    fn needs(&self) -> &'static [Need] {
+        match self {
+            Task::Install | Task::Cosmic { hot: false, .. } => &[Need::Xkbcommon, Need::Claude],
+            Task::Cosmic { hot: true, .. } => {
+                &[Need::Xkbcommon, Need::Claude, Need::CargoHot, Need::Lld]
+            }
+            Task::Egui => &[Need::Claude],
+            Task::Daemon => &[Need::WebBundle, Need::Claude],
+            Task::Web => &[Need::WasmTarget, Need::WasmBindgen],
+            Task::Lint | Task::Test { .. } => &[Need::Xkbcommon],
+            Task::Probe { name: Some(_) } => &[Need::Claude],
+            Task::Setup | Task::Uninstall | Task::Probe { name: None } => &[],
+        }
+    }
+}
+
 fn run(task: Task) -> Result<(), String> {
+    need::require(task.needs())?;
     match task {
+        Task::Setup => need::setup(),
         Task::Install => install(),
         Task::Uninstall => uninstall(),
-        Task::Cosmic { hot: true, .. } => cargo(&["hot", "-p", COSMIC_BIN, "--features", "hot"]),
+        Task::Cosmic { hot: true, .. } => hot(),
         Task::Cosmic { release, .. } => {
             let mut args = vec!["run", "-p", COSMIC_BIN, "--features", "cosmic"];
             if release {
@@ -153,6 +177,20 @@ fn uninstall() -> Result<(), String> {
     Ok(())
 }
 
+fn hot() -> Result<(), String> {
+    let mut command = Command::new("cargo");
+    command.args(["hot", "-p", COSMIC_BIN, "--features", "hot"]);
+    // cargo-hot links patches with `cc -fuse-ld=lld` but drops the `-B` rustc passes to point
+    // that at its own lld, so without this a system lld must be installed.
+    if let Some(lld) = need::bundled_lld() {
+        let path = env::var_os("PATH").unwrap_or_default();
+        let path = env::join_paths([lld.clone()].into_iter().chain(env::split_paths(&path)))
+            .map_err(|e| format!("cannot put {} on PATH: {e}", lld.display()))?;
+        command.env("PATH", path);
+    }
+    status(&mut command)
+}
+
 fn web() -> Result<(), String> {
     cargo(&[
         "build",
@@ -167,12 +205,7 @@ fn web() -> Result<(), String> {
         .args(["--out-name", "claudo"])
         .arg("target/wasm32-unknown-unknown/release/claudo.wasm")
         .status()
-        .map_err(|e| {
-            format!(
-                "cannot run wasm-bindgen ({e}); install the version Cargo.lock names: \
-                 cargo install wasm-bindgen-cli --version <version>"
-            )
-        })?;
+        .map_err(|e| format!("cannot run wasm-bindgen: {e}"))?;
     if !status.success() {
         return Err(format!("wasm-bindgen failed: {status}"));
     }
@@ -187,14 +220,23 @@ fn web() -> Result<(), String> {
 
 /// Plain `cargo` from PATH rather than `$CARGO`, so a wrapper there still sees the build.
 fn cargo(args: &[&str]) -> Result<(), String> {
-    let status = Command::new("cargo")
-        .args(args)
+    status(Command::new("cargo").args(args))
+}
+
+fn status(command: &mut Command) -> Result<(), String> {
+    let line = [command.get_program()]
+        .into_iter()
+        .chain(command.get_args())
+        .map(|word| word.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let status = command
         .status()
-        .map_err(|e| format!("cannot run cargo: {e}"))?;
+        .map_err(|e| format!("cannot run {line}: {e}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("cargo {} failed: {status}", args.join(" ")))
+        Err(format!("{line} failed: {status}"))
     }
 }
 
