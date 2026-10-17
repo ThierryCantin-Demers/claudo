@@ -28,7 +28,7 @@ fn main() {
     };
     let name = store.title_for(&id, prompt).expect("the new conversation");
     let mut session = Session::spawn(config, None, &name, None).expect("spawn claude");
-    for ev in session.send(prompt).expect("send turn") {
+    for ev in session.send(prompt.into()).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
             EngineEvent::Completed {
@@ -58,6 +58,7 @@ fn main() {
                 clip(&c.summary)
             ),
             Item::Thinking(t) => println!("  THINKING: {}", clip(t)),
+            Item::File(file) => println!("  FILE {} ({})", file.name, file.media_type),
             Item::Ended(time) => println!("  ENDED {} -> {}", time.started, time.ended),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
             Item::Tool(tc) => println!(

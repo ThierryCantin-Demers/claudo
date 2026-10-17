@@ -52,6 +52,7 @@ async fn main() {
                         profile: Profile::Safe,
                         model: String::new(),
                         effort: Effort::Default,
+                        attachments: Vec::new(),
                     };
                     write.send(Message::Text(json(&cmd).into())).await.unwrap();
                     println!("(sent message over websocket)");

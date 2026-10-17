@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use claudo_protocol::{
-    Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides, Profile,
+    Attachment, Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides, Profile,
     ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
@@ -75,6 +75,8 @@ struct ClaudoApp {
     items: Vec<Item>,
 
     input: String,
+    /// Files the next message sends.
+    attachments: Vec<Attachment>,
     /// Persisted global defaults (model, thinking, permissions) used for turns.
     settings: Settings,
     /// The CLI's model families, with the versions their aliases run today.
@@ -112,6 +114,7 @@ impl ClaudoApp {
             current: None,
             items: Vec::new(),
             input: String::new(),
+            attachments: Vec::new(),
             settings: Settings::default(),
             models: Vec::new(),
             overrides: Overrides::default(),
@@ -206,11 +209,16 @@ impl ClaudoApp {
         let Some(current) = self.current.clone() else {
             return;
         };
-        if text.is_empty() || self.streaming {
+        if (text.is_empty() && self.attachments.is_empty()) || self.streaming {
             return;
         }
         self.error = None;
-        self.items.push(Item::User(text.clone()));
+        if !text.is_empty() {
+            self.items.push(Item::User(text.clone()));
+        }
+        let attachments = std::mem::take(&mut self.attachments);
+        self.items
+            .extend(attachments.iter().cloned().map(Item::File));
         self.assistant_idx = None;
         self.streaming = true;
         let (model, effort, profile) = self.effective();
@@ -220,6 +228,7 @@ impl ClaudoApp {
             profile,
             model,
             effort,
+            attachments,
         });
         self.input.clear();
     }
@@ -937,8 +946,41 @@ impl ClaudoApp {
                     }
                 });
 
+                let mut detached = None;
+                ui.horizontal_wrapped(|ui| {
+                    for (index, file) in self.attachments.iter().enumerate() {
+                        ui.weak(format!("📎 {}", file.name));
+                        if ui.small_button("✕").clicked() {
+                            detached = Some(index);
+                        }
+                    }
+                });
+                if let Some(index) = detached {
+                    self.attachments.remove(index);
+                }
+
                 ui.horizontal(|ui| {
-                    let can_send = !streaming && !self.input.trim().is_empty();
+                    let can_send = !streaming
+                        && !(self.input.trim().is_empty() && self.attachments.is_empty());
+                    // rfd's blocking dialog does not exist in the browser.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button("📎 Attach…").clicked()
+                        && let Some(paths) = rfd::FileDialog::new().pick_files()
+                    {
+                        for path in paths {
+                            let name = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let file = std::fs::read(&path)
+                                .map_err(|e| format!("cannot read {name}: {e}"))
+                                .and_then(|bytes| Attachment::file(name, &bytes));
+                            match file {
+                                Ok(file) => self.attachments.push(file),
+                                Err(error) => self.error = Some(error),
+                            }
+                        }
+                    }
                     if ui
                         .add_enabled(can_send, egui::Button::new("Send"))
                         .clicked()
@@ -1020,6 +1062,9 @@ impl ClaudoApp {
                                     "Conversation compacted: {} → {} tokens",
                                     c.before, c.after
                                 ));
+                            }
+                            Item::File(file) => {
+                                ui.weak(format!("📎 {}", file.name));
                             }
                             Item::Ended(time) => {
                                 let seconds = time.ended.saturating_sub(time.started);

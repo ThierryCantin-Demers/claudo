@@ -91,6 +91,7 @@ fn send(backend: &Backend, id: &str, text: &str) {
         profile: Profile::FullAuto,
         model: "haiku".to_string(),
         effort: Effort::Default,
+        attachments: Vec::new(),
     });
 }
 

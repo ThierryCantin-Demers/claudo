@@ -1104,6 +1104,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 name = "claudo-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "claudo-protocol",
  "serde",
  "serde_json",
@@ -1159,6 +1160,7 @@ dependencies = [
 name = "claudo-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
 ]
 

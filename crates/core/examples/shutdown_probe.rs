@@ -34,7 +34,7 @@ fn main() {
     let mut busy = Session::spawn(config(), None, "claudo shutdown probe", None).expect("spawn");
     let pid = busy.pid();
     let turn = busy
-        .send("Write a 500 word essay about rivers.")
+        .send("Write a 500 word essay about rivers.".into())
         .expect("send");
     for event in &turn {
         if matches!(event, EngineEvent::Delta { .. }) {

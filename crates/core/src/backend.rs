@@ -14,7 +14,7 @@ use claudo_protocol::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{EngineEvent, Resume, SessionConfig};
+use crate::engine::{EngineEvent, Resume, SessionConfig, UserMessage};
 use crate::live::{IDLE_TIMEOUT, LiveSessions};
 use crate::sessions::{Store, load_transcript};
 
@@ -178,7 +178,8 @@ impl Backend {
                 profile,
                 model,
                 effort,
-            } => self.send(conversation_id, text, profile, model, effort),
+                attachments,
+            } => self.send(conversation_id, text, profile, model, effort, attachments),
 
             Command::Stop { conversation_id } => {
                 if let Err(detail) = self.live.interrupt(&conversation_id) {
@@ -266,6 +267,7 @@ impl Backend {
         profile: claudo_protocol::Profile,
         model: String,
         effort: claudo_protocol::Effort,
+        attachments: Vec<claudo_protocol::Attachment>,
     ) {
         let (cwd, session_id, borrowed, name, always) = {
             let mut store = self.store.lock().unwrap();
@@ -297,17 +299,23 @@ impl Backend {
             session_id,
             fork: borrowed,
         });
-        let turn =
-            match self
-                .live
-                .send_turn(&conversation_id, config, resume, &name, &always, &text)
-            {
-                Ok(turn) => turn,
-                Err(detail) => {
-                    self.error(conversation_id, detail);
-                    return;
-                }
-            };
+        let turn = match self.live.send_turn(
+            &conversation_id,
+            config,
+            resume,
+            &name,
+            &always,
+            UserMessage {
+                text: &text,
+                attachments: &attachments,
+            },
+        ) {
+            Ok(turn) => turn,
+            Err(detail) => {
+                self.error(conversation_id, detail);
+                return;
+            }
+        };
 
         let mut forward = Forward::new(
             self.events.clone(),

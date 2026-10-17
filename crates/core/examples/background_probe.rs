@@ -38,6 +38,7 @@ fn main() {
         profile: Profile::FullAuto,
         model: "haiku".to_string(),
         effort: Effort::Default,
+        attachments: Vec::new(),
     });
 
     let (mut started, mut ended, mut completed_first) = (false, None, false);

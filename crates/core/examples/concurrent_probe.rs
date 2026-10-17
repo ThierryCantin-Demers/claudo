@@ -72,6 +72,7 @@ fn main() {
         profile: Profile::Safe,
         model: "haiku".to_string(),
         effort: Effort::Default,
+        attachments: Vec::new(),
     });
     let refused = loop {
         if let Some(ServerEvent::Error {
@@ -93,6 +94,7 @@ fn main() {
             profile: Profile::Safe,
             model: "haiku".to_string(),
             effort: Effort::Default,
+            attachments: Vec::new(),
         });
     }
 

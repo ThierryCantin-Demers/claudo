@@ -11,7 +11,7 @@ use std::time::Duration;
 use claudo_protocol::{ConversationId, Decision};
 
 use crate::claude_bin;
-use crate::engine::{EngineEvent, Resume, Session, SessionConfig};
+use crate::engine::{EngineEvent, Resume, Session, SessionConfig, UserMessage};
 
 /// Events of turns a conversation's process started on its own, such as for another
 /// agent's message, with the conversation they belong to.
@@ -57,14 +57,14 @@ impl LiveSessions {
         resume: Option<Resume>,
         name: &str,
         always: &[String],
-        prompt: &str,
+        message: UserMessage,
     ) -> Result<Receiver<EngineEvent>, String> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(conversation_id)
             && session.is_alive()
         {
             if *session.config() == config
-                && let Ok(turn) = session.send(prompt)
+                && let Ok(turn) = session.send(message)
             {
                 return Ok(turn);
             }
@@ -88,7 +88,7 @@ impl LiveSessions {
             session.allow_always(scope);
         }
         let turn = session
-            .send(prompt)
+            .send(message)
             .map_err(|e| format!("claude exited before the turn was sent: {e}"))?;
         sessions.insert(conversation_id.to_owned(), session);
         Ok(turn)

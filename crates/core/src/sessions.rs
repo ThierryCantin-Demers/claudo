@@ -19,8 +19,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::engine::cli::{
-    backgrounded, command_echo, command_output, compaction, incoming, task_notification, tool_call,
-    unix_seconds,
+    attachment, backgrounded, command_echo, command_output, compaction, incoming,
+    task_notification, tool_call, unix_seconds,
 };
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
@@ -540,6 +540,9 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                                     items.push(Item::User(t.to_string()));
                                 }
                             }
+                            Some("image" | "document") => {
+                                items.extend(attachment(b).map(Item::File));
+                            }
                             Some("tool_result") => attach_result(
                                 &mut items,
                                 b.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
@@ -588,7 +591,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
         let starts_turn = items[pushed..].iter().any(|item| {
             matches!(
                 item,
-                Item::User(_) | Item::Incoming { .. } | Item::Notice(_)
+                Item::User(_) | Item::Incoming { .. } | Item::Notice(_) | Item::File(_)
             )
         });
         if starts_turn {

@@ -13,9 +13,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use claudo_protocol::{
-    Background, CliCommand, Compaction, ContextUsage, Decision, ModelOption, Profile, Quota,
-    QuotaWindow, TaskStatus, ToolCall,
+    Attachment, Background, CliCommand, Compaction, ContextUsage, Decision, ModelOption, Profile,
+    Quota, QuotaWindow, TaskStatus, ToolCall,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -232,6 +233,22 @@ pub struct SessionConfig {
     pub profile: Profile,
     pub model: Option<String>,
     pub effort: Option<String>,
+}
+
+/// What a turn is sent: the user's text and the files that go with it.
+#[derive(Debug, Clone, Copy)]
+pub struct UserMessage<'a> {
+    pub text: &'a str,
+    pub attachments: &'a [Attachment],
+}
+
+impl<'a> From<&'a str> for UserMessage<'a> {
+    fn from(text: &'a str) -> Self {
+        Self {
+            text,
+            attachments: &[],
+        }
+    }
 }
 
 /// The session a new process continues.
@@ -522,7 +539,7 @@ impl Session {
     /// Start a turn, or queue it behind the running one. Its events arrive on the
     /// returned receiver, which closes after `Completed` or `Error`. Fails if the
     /// process has exited.
-    pub fn send(&mut self, prompt: &str) -> io::Result<Receiver<EngineEvent>> {
+    pub fn send(&mut self, message: UserMessage) -> io::Result<Receiver<EngineEvent>> {
         let (tx, rx) = mpsc::channel();
         let id = Uuid::new_v4().to_string();
         {
@@ -534,10 +551,16 @@ impl Session {
         }
         self.shared.touch();
 
+        let text =
+            (!message.text.is_empty()).then(|| json!({ "type": "text", "text": message.text }));
+        let content: Vec<Value> = text
+            .into_iter()
+            .chain(message.attachments.iter().map(attachment_block))
+            .collect();
         let message = json!({
             "type": "user",
             "uuid": id,
-            "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] },
+            "message": { "role": "user", "content": content },
         });
         if let Err(e) = self.shared.write(&message) {
             self.shared
@@ -947,6 +970,58 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
     }
 }
 
+/// An attachment as the API takes it: images and PDFs as they are, anything else as text.
+fn attachment_block(attachment: &Attachment) -> Value {
+    let Attachment {
+        name,
+        media_type,
+        data,
+    } = attachment;
+    if attachment.is_image() {
+        json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": data } })
+    } else if media_type == "application/pdf" {
+        json!({
+            "type": "document",
+            "title": name,
+            "source": { "type": "base64", "media_type": media_type, "data": data },
+        })
+    } else {
+        let text = attachment
+            .bytes()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        json!({
+            "type": "document",
+            "title": name,
+            "source": { "type": "text", "media_type": "text/plain", "data": text },
+        })
+    }
+}
+
+/// An image or document block of a transcript's user message, back to what was attached.
+pub(crate) fn attachment(block: &Value) -> Option<Attachment> {
+    let source = block.get("source")?;
+    fn field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+        v.get(key).and_then(Value::as_str)
+    }
+    let media_type = field(source, "media_type").unwrap_or("text/plain");
+    let name = match field(block, "type")? {
+        "image" => "image",
+        "document" => field(block, "title").unwrap_or("document"),
+        _ => return None,
+    };
+    let data = match field(source, "type")? {
+        "base64" => field(source, "data")?.to_string(),
+        "text" => BASE64_STANDARD.encode(field(source, "data")?),
+        _ => return None,
+    };
+    Some(Attachment {
+        name: name.to_string(),
+        media_type: media_type.to_string(),
+        data,
+    })
+}
+
 /// A compaction's trigger and sizes, from stream-json's `compact_metadata` or the
 /// transcript's `compactMetadata`, which name the sizes differently.
 pub(crate) fn compaction(
@@ -1235,6 +1310,26 @@ mod tests {
     }
 
     #[test]
+    fn attachments_go_out_as_the_api_takes_them_and_come_back_from_transcripts() {
+        let image = Attachment::new("shot.png".to_string(), "image/png", &[1, 2, 3]);
+        let notes = Attachment::new("notes.txt".to_string(), "text/plain", b"hello");
+        let block = attachment_block(&image);
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["data"], image.data);
+        let block = attachment_block(&notes);
+        assert_eq!(block["source"]["data"], "hello", "text goes as text");
+        let back = attachment(&block).unwrap();
+        assert_eq!(
+            (back.name.as_str(), back.bytes()),
+            ("notes.txt", Some(b"hello".to_vec()))
+        );
+        assert_eq!(
+            attachment(&attachment_block(&image)).unwrap().media_type,
+            "image/png"
+        );
+    }
+
+    #[test]
     fn a_retried_request_says_why() {
         let retry = line(
             r#"{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":4000,"error_status":529,"error":"overloaded"}"#,
@@ -1501,7 +1596,10 @@ mod tests {
         let typed = line(
             r#"{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"hi"}}"#,
         );
-        assert!(incoming(&typed).is_none(), "the user's own, typed in a terminal");
+        assert!(
+            incoming(&typed).is_none(),
+            "the user's own, typed in a terminal"
+        );
     }
 
     #[test]

@@ -47,7 +47,7 @@ fn turn(
         None,
     )
     .expect("spawn claude");
-    for ev in session.send(prompt).expect("send turn") {
+    for ev in session.send(prompt.into()).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),
             EngineEvent::Delta { text: t } => text.push_str(&t),

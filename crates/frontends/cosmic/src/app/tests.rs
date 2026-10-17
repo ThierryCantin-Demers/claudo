@@ -475,6 +475,33 @@ fn session(title: &str, source: &str, cwd: &str, updated: u64) -> SessionInfo {
 }
 
 #[test]
+fn attached_files_go_with_the_next_message_even_without_text() {
+    let mut app = two_tiles();
+    let image = claudo_protocol::Attachment::new("pasted.png".to_string(), "image/png", &[1, 2, 3]);
+    let _ = app.update(Message::Attach(ALPHA.to_string(), Ok(vec![image])));
+    assert!(app.views[ALPHA].can_send(), "an image alone is a message");
+    let before = app.views[ALPHA].items.len();
+    let _ = app.update(Message::Send(ALPHA.to_string()));
+    let view = &app.views[ALPHA];
+    assert!(view.attachments.is_empty());
+    assert_eq!(
+        view.items.len(),
+        before + 1,
+        "no empty bubble for the missing text"
+    );
+    assert!(matches!(view.items.last(), Some(Entry::File(_))));
+
+    let _ = app.update(Message::Attach(
+        BRAVO.to_string(),
+        Err("blob.bin is not an image, a PDF or text".to_string()),
+    ));
+    assert!(
+        app.views[BRAVO].error.is_some(),
+        "the reason shows in its tile"
+    );
+}
+
+#[test]
 fn a_session_continued_from_the_sessions_page_opens_with_its_history() {
     let mut app = two_tiles();
     let _ = app.update(Message::ShowSessions);

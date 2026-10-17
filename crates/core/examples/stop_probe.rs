@@ -117,6 +117,7 @@ fn turn(
         profile: Profile::Safe,
         model: "haiku".to_string(),
         effort: Effort::Default,
+        attachments: Vec::new(),
     });
     let stop = || {
         backend.handle(Command::Stop {

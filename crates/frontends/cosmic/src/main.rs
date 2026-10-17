@@ -99,6 +99,7 @@ mod app {
             call: ToolCall,
             open: bool,
         },
+        File(attach::Shown),
         /// The turn before it ended.
         Ended(TurnTime),
     }
@@ -152,6 +153,7 @@ mod app {
                 Item::Assistant(text) => Entry::Reply(Box::new(Reply::complete(text))),
                 Item::Thinking(text) => Entry::Thinking { text, open: false },
                 Item::Tool(call) => Entry::Tool { call, open: false },
+                Item::File(file) => Entry::File(attach::Shown::new(file)),
                 Item::Ended(time) => Entry::Ended(time),
             }
         }
@@ -201,6 +203,8 @@ mod app {
         since: Option<std::time::Instant>,
         /// Why the API is being asked again, while it waits to be.
         retrying: Option<String>,
+        /// Files the next message sends.
+        attachments: Vec<attach::Shown>,
     }
 
     impl ConversationView {
@@ -225,6 +229,7 @@ mod app {
                 generation: 0,
                 since: None,
                 retrying: None,
+                attachments: Vec::new(),
             }
         }
 
@@ -299,7 +304,7 @@ mod app {
         }
 
         fn can_send(&self) -> bool {
-            !self.streaming && !self.draft.text().trim().is_empty()
+            !self.streaming && !(self.draft.text().trim().is_empty() && self.attachments.is_empty())
         }
 
         fn push_assistant(&mut self, text: &str) {
@@ -884,6 +889,15 @@ mod app {
         ShowSessions,
         /// Continue a Claude Code session in the focused tile.
         Import(SessionId),
+        /// Ctrl+V in a message box: an image on the clipboard is attached too.
+        PasteImage(ConversationId),
+        PickFiles(ConversationId),
+        /// Files for a conversation's next message, or why they could not be read.
+        Attach(
+            ConversationId,
+            Result<Vec<claudo_protocol::Attachment>, String>,
+        ),
+        Detach(ConversationId, usize),
         /// The dragged tile left its window.
         TileAway,
         /// Another window, or this one, took the tile that left.
@@ -1705,7 +1719,7 @@ mod app {
                 return;
             };
             let text = view.draft.text().trim().to_string();
-            if text.is_empty() || view.streaming {
+            if !view.can_send() {
                 return;
             }
             if let Some(view) = self.views.get_mut(&id) {
@@ -1730,7 +1744,12 @@ mod app {
             }
             view.error = None;
             view.finish_reply();
-            view.items.push(Entry::User(text.clone()));
+            let files = std::mem::take(&mut view.attachments);
+            let attachments = files.iter().map(|file| file.attachment.clone()).collect();
+            if !text.is_empty() {
+                view.items.push(Entry::User(text.clone()));
+            }
+            view.items.extend(files.into_iter().map(Entry::File));
             view.streaming = true;
             view.since = Some(std::time::Instant::now());
             self.cmd(Command::SendMessage {
@@ -1739,6 +1758,7 @@ mod app {
                 profile,
                 model,
                 effort,
+                attachments,
             });
             self.focus_composer = Some(id);
         }
@@ -2726,7 +2746,14 @@ mod app {
             let small = |dropdown: widget::Dropdown<'a, String, Message, Message>| {
                 dropdown.text_size(13.0 * self.zoom).padding([4, 8])
             };
+            let attach = widget::tooltip(
+                widget::button::icon(widget::icon::from_name("mail-attachment-symbolic"))
+                    .on_press(Message::PickFiles(id.clone())),
+                widget::text("Attach files, or paste an image"),
+                widget::tooltip::Position::Top,
+            );
             let controls = widget::Row::with_children(vec![
+                attach.into(),
                 small(profile).into(),
                 small(effort).into(),
                 widget::space::horizontal().into(),
@@ -2737,8 +2764,13 @@ mod app {
             .align_y(Alignment::Center);
 
             let boxed = widget::container(
-                widget::Column::with_children(vec![editor.into(), controls.into()])
-                    .spacing(if compact { 6 } else { 10 }),
+                widget::Column::with_children(
+                    attach::pending(id, &view.attachments, size, self.zoom)
+                        .into_iter()
+                        .chain([editor.into(), controls.into()])
+                        .collect::<Vec<_>>(),
+                )
+                .spacing(if compact { 6 } else { 10 }),
             )
             .padding(if compact { [10, 10] } else { [14, 16] })
             .width(Length::Fill)
@@ -2787,6 +2819,7 @@ mod app {
                         self.zoom,
                     ),
                     Entry::Notice(text) => notice_row(text, size),
+                    Entry::File(file) => attach::sent(file, size, self.zoom),
                     Entry::Ended(turn) => widget::text(time::turn_label(*turn))
                         .size(size * 0.8)
                         .class(dim())
@@ -3566,6 +3599,15 @@ mod app {
         if arrow && modifiers.alt() {
             return None;
         }
+        if focused
+            && modifiers.control()
+            && matches!(press.key.as_ref(), keyboard::Key::Character("v" | "V"))
+        {
+            return Some(Binding::Sequence(vec![
+                Binding::Paste,
+                Binding::Custom(Message::PasteImage(conversation.clone())),
+            ]));
+        }
         if enter && focused && !modifiers.shift() {
             return Some(Binding::Custom(Message::Send(conversation.clone())));
         }
@@ -3911,6 +3953,36 @@ mod app {
                 Message::NewChat(placement) => {
                     self.layout_mut().page = Page::Chat;
                     self.new_conversation(placement);
+                }
+                Message::PasteImage(id) => {
+                    return cosmic::iced::clipboard::read_data::<attach::ClipboardImage>().map(
+                        move |image| {
+                            let files = image.map(|image| image.0).into_iter().collect();
+                            cosmic::Action::App(Message::Attach(id.clone(), Ok(files)))
+                        },
+                    );
+                }
+                Message::PickFiles(id) => {
+                    return cosmic::task::future(async move {
+                        Message::Attach(id, attach::pick().await)
+                    });
+                }
+                Message::Attach(id, files) => {
+                    if let Some(view) = self.views.get_mut(&id) {
+                        match files {
+                            Ok(files) => view
+                                .attachments
+                                .extend(files.into_iter().map(attach::Shown::new)),
+                            Err(error) => view.error = Some(error),
+                        }
+                    }
+                }
+                Message::Detach(id, index) => {
+                    if let Some(view) = self.views.get_mut(&id)
+                        && index < view.attachments.len()
+                    {
+                        view.attachments.remove(index);
+                    }
                 }
                 Message::ShowSessions => {
                     self.sessions = None;
@@ -4669,6 +4741,7 @@ mod app {
         .then_some(Message::DragEnd)
     }
 
+    mod attach;
     mod carry;
     mod commands;
     mod compaction;

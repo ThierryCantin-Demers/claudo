@@ -30,6 +30,7 @@ fn main() {
         profile: Profile::Safe,
         model: String::new(),
         effort: Effort::Default,
+        attachments: Vec::new(),
     });
 
     // Poll until the turn completes (worker thread streams events in).

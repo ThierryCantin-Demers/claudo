@@ -2,6 +2,7 @@
 //! Frontends render these; they never contain logic. Also the wire format for
 //! the WebSocket transport, so everything here is `serde`-serializable.
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change so the web client and backend can negotiate.
@@ -139,6 +140,52 @@ impl ContextUsage {
     }
 }
 
+/// A file sent with a message: an image, a PDF, or text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    /// Such as `image/png`; `text/plain` for any text.
+    pub media_type: String,
+    /// The file's bytes in base64, as the API takes them.
+    pub data: String,
+}
+
+impl Attachment {
+    pub fn new(name: String, media_type: &str, bytes: &[u8]) -> Self {
+        Self {
+            name,
+            media_type: media_type.to_string(),
+            data: BASE64_STANDARD.encode(bytes),
+        }
+    }
+
+    /// A file named `name` as it can be sent, or why it cannot be.
+    pub fn file(name: String, bytes: &[u8]) -> Result<Self, String> {
+        let extension = name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .unwrap_or_default();
+        let media_type = match extension.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "pdf" => "application/pdf",
+            _ if std::str::from_utf8(bytes).is_ok() => "text/plain",
+            _ => return Err(format!("{name} is not an image, a PDF or text")),
+        };
+        Ok(Self::new(name, media_type, bytes))
+    }
+
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        BASE64_STANDARD.decode(&self.data).ok()
+    }
+
+    pub fn is_image(&self) -> bool {
+        self.media_type.starts_with("image/")
+    }
+}
+
 /// When a turn started and ended, in Unix seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TurnTime {
@@ -209,6 +256,8 @@ pub enum Item {
     /// What started a turn Claude Code began by itself, such as a background command ending.
     Notice(String),
     Compacted(Compaction),
+    /// A file sent with the message before it.
+    File(Attachment),
     /// The turn before it ended.
     Ended(TurnTime),
 }
@@ -395,6 +444,8 @@ pub enum Command {
         /// `--model` value; empty means use the CLI's configured model.
         model: String,
         effort: Effort,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
     },
     /// Stop the conversation's running turn. It still ends with `Completed`.
     Stop {
@@ -521,4 +572,26 @@ pub enum ServerEvent {
         conversation_id: Option<ConversationId>,
         detail: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_sent_as_what_its_name_and_contents_say() {
+        let file = |name: &str, bytes: &[u8]| Attachment::file(name.to_string(), bytes);
+        assert_eq!(
+            file("shot.PNG", &[0x89, 0x50]).unwrap().media_type,
+            "image/png"
+        );
+        assert_eq!(
+            file("paper.pdf", b"%PDF").unwrap().media_type,
+            "application/pdf"
+        );
+        let notes = file("notes.md", b"# hi").unwrap();
+        assert_eq!(notes.media_type, "text/plain");
+        assert_eq!(notes.bytes().as_deref(), Some(&b"# hi"[..]));
+        assert!(file("blob.bin", &[0xff, 0xfe, 0x00]).is_err());
+    }
 }

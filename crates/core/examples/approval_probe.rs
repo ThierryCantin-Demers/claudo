@@ -174,6 +174,7 @@ fn turn(
         profile,
         model: "haiku".to_string(),
         effort: Effort::Default,
+        attachments: Vec::new(),
     });
     let mut seen = Turn::default();
     while let Some(event) = rx.blocking_recv() {

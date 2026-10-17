@@ -106,7 +106,7 @@ fn turn(
             }),
             "claudo live probe",
             &[],
-            prompt,
+            prompt.into(),
         )
         .expect("send turn");
     for ev in events {
