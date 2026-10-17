@@ -220,7 +220,12 @@ newline.
 **Selectable text**: iced's text and markdown widgets cannot be selected, so COSMIC
 transcripts draw their text with `Selectable` (`src/app/selectable.rs`), a rich-text widget
 on cosmic-text's hit testing and highlight runs, and render markdown through its `Viewer`.
-New transcript text should go through it too, or it cannot be selected or copied.
+New transcript text should go through it too, or it cannot be selected or copied. It also
+draws furigana (`src/app/furigana.rs`): a reply's `<ruby>` elements reach it as Unicode's
+interlinear annotation characters, the only form the markdown parser keeps, and it lays out
+the words alone and draws each reading over them. cosmic-text has one line height per
+paragraph, so every line of a paragraph with readings is spaced for them, and a copied
+selection holds the words without their readings.
 
 **Fonts**: egui bundles Latin glyphs only, so the Japanese font is embedded via
 `include_bytes!` and registered as a fallback. Do not switch to loading system fonts; that

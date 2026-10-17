@@ -21,6 +21,7 @@ use cosmic::widget::{self, markdown};
 use cosmic::{Element, Theme};
 
 use super::Message;
+use super::furigana::{self, Ruby};
 
 /// A place in a transcript: a block of text, as its entry and its position within the
 /// entry, and a byte offset into the block.
@@ -179,6 +180,8 @@ impl<'a> Selectable<'a> {
 struct State {
     spans: Vec<Span<'static, markdown::Uri>>,
     paragraph: Paragraph,
+    /// Readings to draw over the paragraph's words, which it lays out without them.
+    rubies: Vec<Ruby>,
     last_click: Option<Click>,
     pressed_link: Option<usize>,
     hovered_link: Option<usize>,
@@ -201,6 +204,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         tree::State::new(State {
             spans: Vec::new(),
             paragraph: Paragraph::default(),
+            rubies: Vec::new(),
             last_click: None,
             pressed_link: None,
             hovered_link: None,
@@ -225,18 +229,38 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         let spans = self.spans.as_slice();
         layout::sized(limits, self.width, Length::Shrink, |limits| {
             let bounds = limits.max();
-            let laid = || Paragraph::with_spans(text(spans, bounds, size, font, wrapping));
             if state.spans != spans {
-                state.paragraph = laid();
+                let (shown, rubies) = furigana::split(spans);
+                state.rubies = rubies;
+                let line_height = line_height(&state.rubies);
+                state.paragraph = Paragraph::with_spans(text(
+                    &shown[..],
+                    bounds,
+                    size,
+                    line_height,
+                    font,
+                    wrapping,
+                ));
                 state.spans = spans.iter().cloned().map(Span::to_static).collect();
             } else {
+                let line_height = line_height(&state.rubies);
                 match state
                     .paragraph
-                    .compare(text((), bounds, size, font, wrapping))
+                    .compare(text((), bounds, size, line_height, font, wrapping))
                 {
                     Difference::None => {}
                     Difference::Bounds => state.paragraph.resize(bounds),
-                    Difference::Shape => state.paragraph = laid(),
+                    Difference::Shape => {
+                        let (shown, _) = furigana::split(spans);
+                        state.paragraph = Paragraph::with_spans(text(
+                            &shown[..],
+                            bounds,
+                            size,
+                            line_height,
+                            font,
+                            wrapping,
+                        ));
+                    }
                 }
             }
             state.paragraph.min_bounds()
@@ -302,6 +326,45 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
             }
         }
         renderer.fill_paragraph(&state.paragraph, bounds.position(), color, *viewport);
+        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        for ruby in &state.rubies {
+            let (start, end) = (
+                cursor_at(buffer, ruby.base.start),
+                cursor_at(buffer, ruby.base.end),
+            );
+            // A word broken over two lines gets its reading over the first part.
+            let Some((run, (x, width))) = buffer
+                .layout_runs()
+                .find_map(|run| Some((run.line_y, run.highlight(start, end).next()?)))
+            else {
+                continue;
+            };
+            let size = self.size * READING;
+            renderer.fill_text(
+                Text {
+                    content: ruby.reading.clone(),
+                    // Unbounded, cosmic-text wraps after every character.
+                    bounds: Size::new(
+                        size * 2.0 * ruby.reading.chars().count() as f32 + size,
+                        size * 2.0,
+                    ),
+                    size: Pixels(size),
+                    line_height: LineHeight::default(),
+                    font,
+                    align_x: Alignment::Center,
+                    align_y: alignment::Vertical::Bottom,
+                    shaping: Shaping::Advanced,
+                    wrapping: Wrapping::None,
+                    ellipsize: Ellipsize::None,
+                },
+                Point::new(
+                    bounds.x + x + width / 2.0,
+                    bounds.y + run - self.size * 0.95,
+                ),
+                color,
+                *viewport,
+            );
+        }
     }
 
     fn update(
@@ -544,10 +607,22 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
     }
 }
 
+/// A reading's size, relative to its words'.
+const READING: f32 = 0.5;
+
+/// Lines tall enough for readings over them, in a block that has any.
+fn line_height(rubies: &[Ruby]) -> LineHeight {
+    match rubies.is_empty() {
+        true => LineHeight::default(),
+        false => LineHeight::Relative(2.1),
+    }
+}
+
 fn text<C>(
     content: C,
     bounds: Size,
     size: Pixels,
+    line_height: LineHeight,
     font: Font,
     wrapping: Wrapping,
 ) -> Text<C, Font> {
@@ -555,7 +630,7 @@ fn text<C>(
         content,
         bounds,
         size,
-        line_height: LineHeight::default(),
+        line_height,
         font,
         align_x: Alignment::Default,
         align_y: alignment::Vertical::Top,

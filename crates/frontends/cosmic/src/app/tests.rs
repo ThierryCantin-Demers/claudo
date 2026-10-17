@@ -502,6 +502,15 @@ fn snapshots() {
 
     Harness::new(with_subagent()).snapshot("subagent");
 
+    let mut app = two_tiles();
+    app.views.get_mut(ALPHA).unwrap().items.push(Entry::Reply(Box::new(Reply::complete(
+        "<ruby>今日<rt>きょう</rt></ruby>は<ruby>漢字<rt>かんじ</rt></ruby>を<ruby>勉強<rt>べんきょう</rt></ruby>しましょう。\
+         <ruby>日本語<rt>にほんご</rt></ruby>の<ruby>文<rt>ぶん</rt></ruby>は、**<ruby>振<rt>ふ</rt></ruby>り<ruby>仮名<rt>がな</rt></ruby>**があると\
+         <ruby>読<rt>よ</rt></ruby>みやすくなります。Every line of a paragraph with readings is spaced for them."
+            .to_string(),
+    ))));
+    Harness::new(app).snapshot("furigana");
+
     let mut app = with_subagent();
     app.layout_mut().sidebar_open = false;
     let _ = app.update(Message::ShowCommands(true));

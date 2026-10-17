@@ -122,7 +122,7 @@ mod app {
 
         fn complete(text: String) -> Self {
             Self {
-                markdown: markdown::Content::parse(&text),
+                markdown: markdown::Content::parse(&furigana::annotate(&text)),
                 parsed: text.len(),
                 text,
             }
@@ -130,13 +130,20 @@ mod app {
 
         fn reveal_to(&mut self, end: usize) {
             if end > self.parsed {
-                self.markdown.push_str(&self.text[self.parsed..end]);
-                self.parsed = end;
+                self.parse_to(furigana::whole_up_to(&self.text, self.parsed, end));
             }
         }
 
         fn finish(&mut self) {
-            self.reveal_to(self.text.len());
+            self.parse_to(self.text.len());
+        }
+
+        fn parse_to(&mut self, end: usize) {
+            if end > self.parsed {
+                let chunk = furigana::annotate(&self.text[self.parsed..end]);
+                self.markdown.push_str(&chunk);
+                self.parsed = end;
+            }
         }
     }
 
@@ -5174,6 +5181,7 @@ mod app {
     mod compaction;
     mod folder;
     mod frozen;
+    mod furigana;
     mod selectable;
     mod sessions;
     mod slash;
