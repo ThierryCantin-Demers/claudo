@@ -169,6 +169,11 @@ pub enum EngineEvent {
     Delivered {
         joined: bool,
     },
+    /// The user's own message, typed elsewhere such as the Claude app through Remote
+    /// Control, started this turn or joined it.
+    Typed {
+        text: String,
+    },
     /// A message from someone other than the client, such as another agent, started this turn.
     Incoming {
         from: String,
@@ -527,7 +532,8 @@ impl Session {
                     }
                     let completed = matches!(ev, EngineEvent::Completed { .. });
                     let mut turns = reader.turns.lock().unwrap();
-                    let incoming = matches!(ev, EngineEvent::Incoming { .. });
+                    let incoming =
+                        matches!(ev, EngineEvent::Incoming { .. } | EngineEvent::Typed { .. });
                     if turns.running.is_none()
                         && (incoming || matches!(ev, EngineEvent::Started { .. }))
                     {
@@ -903,7 +909,21 @@ pub(crate) fn incoming(v: &Value) -> Option<(String, String)> {
         return None;
     }
     let from = field("name").or(field("kind")).unwrap_or("another session");
-    let text = match (field("body"), v.pointer("/message/content")) {
+    Some((from.to_string(), message_text(v)))
+}
+
+/// The user's own message, typed in the Claude app through Remote Control or in a terminal,
+/// which the CLI marks `human`; the client's own carry no origin.
+fn typed(v: &Value) -> Option<String> {
+    (v.pointer("/origin/kind")?.as_str()? == "human").then(|| message_text(v))
+}
+
+/// What a user message says: another agent's `body`, else its text.
+fn message_text(v: &Value) -> String {
+    match (
+        v.pointer("/origin/body").and_then(Value::as_str),
+        v.pointer("/message/content"),
+    ) {
         (Some(body), _) => body.to_string(),
         (None, Some(Value::String(text))) => text.clone(),
         (None, _) => content_blocks(v)
@@ -911,8 +931,7 @@ pub(crate) fn incoming(v: &Value) -> Option<(String, String)> {
             .filter_map(|b| b.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
-    };
-    Some((from.to_string(), text))
+    }
 }
 
 fn control_response(request_id: &str, response: Value) -> Value {
@@ -1009,10 +1028,13 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             .into_iter()
             .collect(),
 
-        "user" if v.get("isReplay").and_then(Value::as_bool) == Some(true) => incoming(v)
-            .map(|(from, text)| EngineEvent::Incoming { from, text })
-            .into_iter()
-            .collect(),
+        "user" if v.get("isReplay").and_then(Value::as_bool) == Some(true) => match typed(v) {
+            Some(text) => vec![EngineEvent::Typed { text }],
+            None => incoming(v)
+                .map(|(from, text)| EngineEvent::Incoming { from, text })
+                .into_iter()
+                .collect(),
+        },
 
         // Tool results are delivered as `user` messages by Claude Code.
         "user" => content_blocks(v)
@@ -1799,6 +1821,13 @@ mod tests {
             incoming(&typed).is_none(),
             "the user's own, typed in a terminal"
         );
+        let from_the_app = line(
+            r#"{"type":"user","isReplay":true,"uuid":"2222","origin":{"kind":"human"},"message":{"role":"user","content":"hi from my phone"}}"#,
+        );
+        assert!(matches!(
+            &decode(&from_the_app)[..],
+            [EngineEvent::Typed { text }] if text == "hi from my phone"
+        ));
     }
 
     #[test]

@@ -519,6 +519,12 @@ pub enum ServerEvent {
     Delivered {
         conversation_id: ConversationId,
     },
+    /// The user's own message, typed elsewhere such as the Claude app through Remote
+    /// Control, started a turn the client did not send, or joined the running one.
+    Typed {
+        conversation_id: ConversationId,
+        text: String,
+    },
     /// Another agent's message started a turn the client did not send.
     Incoming {
         conversation_id: ConversationId,

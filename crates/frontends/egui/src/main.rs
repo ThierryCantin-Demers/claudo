@@ -335,6 +335,17 @@ impl ClaudoApp {
                     }
                 }
 
+                ServerEvent::Typed {
+                    conversation_id,
+                    text,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.assistant_idx = None;
+                        self.streaming = true;
+                        self.items.push(Item::User(text));
+                    }
+                }
+
                 ServerEvent::Notice {
                     conversation_id,
                     text,

@@ -415,6 +415,13 @@ mod app {
                     self.since.get_or_insert_with(std::time::Instant::now);
                     self.items.push(Entry::Incoming { from, text });
                 }
+                ServerEvent::Typed { text, .. } => {
+                    self.finish_reply();
+                    self.error = None;
+                    self.streaming = true;
+                    self.since.get_or_insert_with(std::time::Instant::now);
+                    self.items.push(Entry::User(text));
+                }
                 ServerEvent::Notice { text, .. } => {
                     self.finish_reply();
                     self.error = None;
@@ -1931,6 +1938,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Typed {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Notice {
                     ref conversation_id,
                     ..
@@ -1994,7 +2005,9 @@ mod app {
                     // the sidebar marks as working.
                     if matches!(
                         ev,
-                        ServerEvent::Incoming { .. } | ServerEvent::Notice { .. }
+                        ServerEvent::Incoming { .. }
+                            | ServerEvent::Typed { .. }
+                            | ServerEvent::Notice { .. }
                     ) && !self.views.contains_key(&id)
                     {
                         let draft = self.drafts.remove(&id).unwrap_or_default();

@@ -438,6 +438,10 @@ impl Forward {
                 }
                 self.emit(ServerEvent::Delivered { conversation_id });
             }
+            EngineEvent::Typed { text } => self.emit(ServerEvent::Typed {
+                conversation_id,
+                text,
+            }),
             EngineEvent::Incoming { from, text } => self.emit(ServerEvent::Incoming {
                 conversation_id,
                 from,

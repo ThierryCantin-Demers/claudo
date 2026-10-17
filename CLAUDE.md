@@ -142,7 +142,7 @@ Events consumed from the JSONL stream:
 | `user` message, `tool_result` block | tool returned (denials arrive here as errors) |
 | `control_request` / `can_use_tool` | a call waits for approval; answered with a `control_response` |
 | `command_lifecycle` | `state` `queued`/`started`/`completed` for the message with `command_uuid` |
-| `user` with `isReplay` | a message starting its turn; one from another agent has `origin.name` and `origin.body` |
+| `user` with `isReplay` | a message starting its turn; one from another agent has `origin.name` and `origin.body`, one the user typed in the Claude app (Remote Control) or a terminal has `origin.kind: "human"`, and the client's own have no `origin` |
 | `system` / `status` with `status: "compacting"` | a compaction is running |
 | `system` / `compact_boundary` | it ended: `compact_metadata` `trigger` (`manual`/`auto`), `pre_tokens`, `post_tokens` |
 | `user` with `isSynthetic` | the compaction's summary, as a string |

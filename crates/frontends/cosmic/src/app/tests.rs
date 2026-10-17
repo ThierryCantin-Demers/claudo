@@ -1797,3 +1797,15 @@ fn the_usage_says_when_it_was_updated_and_refreshes_on_demand() {
     assert!(!app.quota_asked, "a refresh that failed can be tried again");
     assert_eq!(app.quota_error.as_deref(), Some("claude exited"));
 }
+
+#[test]
+fn a_message_typed_in_the_claude_app_shows_as_the_users_own() {
+    let mut app = two_tiles();
+    let _ = app.update(Message::Events(vec![ServerEvent::Typed {
+        conversation_id: ALPHA.to_string(),
+        text: "how is it going?".to_string(),
+    }]));
+    let view = &app.views[ALPHA];
+    assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "how is it going?"));
+    assert!(view.streaming, "its turn is running");
+}
