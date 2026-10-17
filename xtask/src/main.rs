@@ -74,14 +74,20 @@ fn main() -> ExitCode {
 impl Task {
     fn needs(&self) -> &'static [Need] {
         match self {
-            Task::Install | Task::Cosmic { hot: false, .. } => &[Need::Xkbcommon, Need::Claude],
-            Task::Cosmic { hot: true, .. } => {
-                &[Need::Xkbcommon, Need::Claude, Need::CargoHot, Need::Lld]
+            Task::Install | Task::Cosmic { hot: false, .. } => {
+                &[Need::PkgConfig, Need::Xkbcommon, Need::Claude]
             }
+            Task::Cosmic { hot: true, .. } => &[
+                Need::PkgConfig,
+                Need::Xkbcommon,
+                Need::Claude,
+                Need::CargoHot,
+                Need::Lld,
+            ],
             Task::Egui => &[Need::Claude],
             Task::Daemon => &[Need::WebBundle, Need::Claude],
             Task::Web => &[Need::WasmTarget, Need::WasmBindgen],
-            Task::Lint | Task::Test { .. } => &[Need::Xkbcommon],
+            Task::Lint | Task::Test { .. } => &[Need::PkgConfig, Need::Xkbcommon],
             Task::Probe { name: Some(_) } => &[Need::Claude],
             Task::Setup | Task::Uninstall | Task::Probe { name: None } => &[],
         }

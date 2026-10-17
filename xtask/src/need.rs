@@ -10,6 +10,7 @@ use crate::WEB_OUT;
 #[derive(Clone, Copy)]
 pub enum Need {
     Claude,
+    PkgConfig,
     /// libcosmic's Wayland client finds libxkbcommon through pkg-config at build time.
     Xkbcommon,
     CargoHot,
@@ -21,8 +22,9 @@ pub enum Need {
 }
 
 /// What `setup` installs or reports.
-pub const TOOLS: [Need; 6] = [
+pub const TOOLS: [Need; 7] = [
     Need::Claude,
+    Need::PkgConfig,
     Need::Xkbcommon,
     Need::CargoHot,
     Need::Lld,
@@ -33,45 +35,17 @@ pub const TOOLS: [Need; 6] = [
 enum Fix {
     /// Needs no root, so `setup` runs it.
     Run(Vec<String>),
-    Packages(&'static [Package]),
+    /// System packages are named only as a hint: how they get installed (dnf, rpm-ostree,
+    /// nix, conda, a toolbox) is the user's choice.
     Manual(String),
-}
-
-/// A system package, by its name in each package manager.
-struct Package {
-    dnf: &'static str,
-    apt: &'static str,
-    pacman: &'static str,
-}
-
-const PKG_CONFIG: Package = Package {
-    dnf: "pkgconf-pkg-config",
-    apt: "pkg-config",
-    pacman: "pkgconf",
-};
-const XKBCOMMON: Package = Package {
-    dnf: "libxkbcommon-devel",
-    apt: "libxkbcommon-dev",
-    pacman: "libxkbcommon",
-};
-const LLD: Package = Package {
-    dnf: "lld",
-    apt: "lld",
-    pacman: "lld",
-};
-
-#[derive(Clone, Copy)]
-enum Manager {
-    Dnf,
-    Apt,
-    Pacman,
 }
 
 impl Need {
     fn label(self) -> String {
         match self {
             Need::Claude => "the Claude Code CLI".to_string(),
-            Need::Xkbcommon => "pkg-config and the xkbcommon headers".to_string(),
+            Need::PkgConfig => "pkg-config".to_string(),
+            Need::Xkbcommon => "pkg-config module xkbcommon".to_string(),
             Need::CargoHot => format!("cargo-hot {}", cargo_hot_version()),
             Need::Lld => "ld.lld".to_string(),
             Need::WasmTarget => "the wasm32-unknown-unknown target".to_string(),
@@ -83,8 +57,9 @@ impl Need {
     fn met(self) -> bool {
         match self {
             Need::Claude => on_path(&claude_bin()),
+            Need::PkgConfig => on_path(&pkg_config()),
             Need::Xkbcommon => {
-                output(Command::new("pkg-config").args(["--exists", "xkbcommon"])).is_some()
+                output(Command::new(pkg_config()).args(["--exists", "xkbcommon"])).is_some()
             }
             Need::CargoHot => output(Command::new("cargo").args(["install", "--list"]))
                 .is_some_and(|list| {
@@ -113,12 +88,18 @@ impl Need {
             Need::Claude => Fix::Manual(
                 "install it from https://code.claude.com, then run claude auth login".to_string(),
             ),
-            Need::Xkbcommon => Fix::Packages(&[PKG_CONFIG, XKBCOMMON]),
+            Need::PkgConfig => Fix::Manual(
+                "pkgconf-pkg-config (Fedora), pkg-config (Debian, Ubuntu), pkgconf (Arch)".to_string(),
+            ),
+            Need::Xkbcommon => Fix::Manual(
+                "libxkbcommon-devel (Fedora), libxkbcommon-dev (Debian, Ubuntu), libxkbcommon (Arch)"
+                    .to_string(),
+            ),
             Need::CargoHot => Fix::Run(words(&format!(
                 "cargo install cargo-hot --version {} --locked",
                 cargo_hot_version()
             ))),
-            Need::Lld => Fix::Packages(&[LLD]),
+            Need::Lld => Fix::Manual("the lld package".to_string()),
             Need::WasmTarget => Fix::Run(words("rustup target add wasm32-unknown-unknown")),
             Need::WasmBindgen => Fix::Run(words(&format!(
                 "cargo install wasm-bindgen-cli --version {} --locked",
@@ -129,41 +110,12 @@ impl Need {
     }
 }
 
-impl Manager {
-    fn detect() -> Option<Self> {
-        let release = fs::read_to_string("/etc/os-release").ok()?;
-        release
-            .lines()
-            .filter_map(|line| line.strip_prefix("ID=").or(line.strip_prefix("ID_LIKE=")))
-            .flat_map(|ids| ids.trim_matches('"').split_whitespace())
-            .find_map(|id| match id {
-                "fedora" | "rhel" | "centos" => Some(Manager::Dnf),
-                "debian" | "ubuntu" => Some(Manager::Apt),
-                "arch" => Some(Manager::Pacman),
-                _ => None,
-            })
-    }
-
-    fn install(self, packages: &[Package]) -> String {
-        let (command, names): (_, Vec<_>) = match self {
-            Manager::Dnf => ("sudo dnf install", packages.iter().map(|p| p.dnf).collect()),
-            Manager::Apt => ("sudo apt install", packages.iter().map(|p| p.apt).collect()),
-            Manager::Pacman => (
-                "sudo pacman -S",
-                packages.iter().map(|p| p.pacman).collect(),
-            ),
-        };
-        format!("{command} {}", names.join(" "))
-    }
-}
-
 /// Fails with every need that is not met and how to meet it.
 pub fn require(needs: &[Need]) -> Result<(), String> {
     let missing: Vec<Need> = needs.iter().copied().filter(|need| !need.met()).collect();
     if missing.is_empty() {
         return Ok(());
     }
-    let manager = Manager::detect();
     let mut runnable = false;
     let mut report = String::from("missing what this needs:");
     for need in missing {
@@ -172,10 +124,6 @@ pub fn require(needs: &[Need]) -> Result<(), String> {
                 runnable = true;
                 command.join(" ")
             }
-            Fix::Packages(packages) => match manager {
-                Some(manager) => manager.install(packages),
-                None => "install it with your package manager".to_string(),
-            },
             Fix::Manual(how) => how,
         };
         report.push_str(&format!("\n  {}: {how}", need.label()));
@@ -209,6 +157,11 @@ pub fn bundled_lld() -> Option<PathBuf> {
 
 fn claude_bin() -> String {
     env::var("CLAUDO_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string())
+}
+
+/// The pkg-config the build's `pkg-config` crate runs, so both see the same modules.
+fn pkg_config() -> String {
+    env::var("PKG_CONFIG").unwrap_or_else(|_| "pkg-config".to_string())
 }
 
 /// The cargo-hot release that speaks the protocol version the `hot` feature locks.
