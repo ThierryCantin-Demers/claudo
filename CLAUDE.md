@@ -224,7 +224,8 @@ New transcript text should go through it too, or it cannot be selected or copied
 draws furigana (`src/app/furigana.rs`): a reply's `<ruby>` elements reach it as Unicode's
 interlinear annotation characters, the only form the markdown parser keeps, and it lays out
 the words alone and draws each reading over them. cosmic-text has one line height per
-paragraph, so every line of a paragraph with readings is spaced for them, and a copied
+paragraph, so every line of a paragraph with readings is spaced for them (the paragraph is
+drawn higher by half that spacing, so its first line stays level with a list number), and a copied
 selection holds the words without their readings. Ruby inside code, inline or fenced, stays
 as written.
 

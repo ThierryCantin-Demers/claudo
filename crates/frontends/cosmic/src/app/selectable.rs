@@ -263,7 +263,9 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
                     }
                 }
             }
-            state.paragraph.min_bounds()
+            let lift = lift(&state.rubies, self.size);
+            let laid = state.paragraph.min_bounds();
+            Size::new(laid.width, laid.height - 2.0 * lift)
         })
     }
 
@@ -278,11 +280,20 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
-        if !bounds.intersects(viewport) {
+        let state = tree.state.downcast_ref::<State>();
+        let lift = lift(&state.rubies, self.size);
+        let painted = Rectangle {
+            y: bounds.y - 2.0 * lift,
+            height: bounds.height + 2.0 * lift,
+            ..bounds
+        };
+        if !painted.intersects(viewport) {
             return;
         }
-        let state = tree.state.downcast_ref::<State>();
         let buffer = state.paragraph.buffer();
+        // Where the paragraph's own top is: its first line where it would be without
+        // readings, which hang over the space above.
+        let origin = Point::new(bounds.x, bounds.y - lift);
 
         if let Some((from, to)) = self.selected {
             let len = text_len(buffer);
@@ -295,7 +306,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
                         renderer.fill_quad(
                             renderer::Quad {
                                 bounds: Rectangle::new(
-                                    Point::new(bounds.x + x, bounds.y + run.line_top),
+                                    Point::new(origin.x + x, origin.y + run.line_top),
                                     Size::new(width, run.line_height),
                                 ),
                                 ..renderer::Quad::default()
@@ -314,8 +325,8 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
                     renderer::Quad {
                         bounds: Rectangle::new(
                             Point::new(
-                                bounds.x + region.x,
-                                bounds.y + region.y + region.height - 2.0,
+                                origin.x + region.x,
+                                origin.y + region.y + region.height - 2.0,
                             ),
                             Size::new(region.width, 1.0),
                         ),
@@ -325,7 +336,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
                 );
             }
         }
-        renderer.fill_paragraph(&state.paragraph, bounds.position(), color, *viewport);
+        renderer.fill_paragraph(&state.paragraph, origin, color, *viewport);
         let font = self.font.unwrap_or_else(|| renderer.default_font());
         for ruby in &state.rubies {
             let (start, end) = (
@@ -358,8 +369,8 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
                     ellipsize: Ellipsize::None,
                 },
                 Point::new(
-                    bounds.x + x + width / 2.0,
-                    bounds.y + run - self.size * 0.95,
+                    origin.x + x + width / 2.0,
+                    origin.y + run - self.size * 0.95,
                 ),
                 color,
                 *viewport,
@@ -379,7 +390,10 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-        let position = cursor.position_in(layout.bounds());
+        let lift = lift(&state.rubies, self.size);
+        let position = cursor
+            .position_in(layout.bounds())
+            .map(|point| Point::new(point.x, point.y + lift));
         let link_at = |state: &State, point: Point| {
             state.paragraph.hit_span(point).filter(|&span| {
                 self.spans
@@ -616,6 +630,15 @@ fn line_height(rubies: &[Ruby]) -> LineHeight {
         true => LineHeight::default(),
         false => LineHeight::Relative(2.3),
     }
+}
+
+/// How much taller lines with readings make the paragraph at each end: its text is drawn
+/// that much higher, so a first line with readings sits where one without would, level with
+/// a list item's number.
+fn lift(rubies: &[Ruby], size: f32) -> f32 {
+    let size = Pixels(size);
+    let line = |height: LineHeight| height.to_absolute(size).0;
+    (line(line_height(rubies)) - line(LineHeight::default())) / 2.0
 }
 
 fn text<C>(
