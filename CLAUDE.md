@@ -96,11 +96,12 @@ claude -p --input-format stream-json --output-format stream-json \
   [--resume <session-id>] [--model <m>] [--effort <low|medium|high|xhigh|max>]
 ```
 
-Each user line carries a `uuid`, and an `initialize` control request goes first. Its
-`content` may hold API blocks besides text: `image` (base64), and `document` with a base64
-PDF or a `text` source and a `title`. The CLI takes a PNG of several MB as is, and the
-transcript keeps the blocks inline, where the loader turns them back into files. Its response
-lists the models: claudo offers the family aliases (`opus`, `sonnet`, ...) labelled with
+Each user line carries a `uuid`, and its `content` may hold API blocks besides text:
+`image` (base64), and `document` with a base64 PDF or a `text` source and a `title`. The CLI
+takes a PNG of several MB as is, and the transcript keeps the blocks inline, where the loader
+turns them back into files.
+
+An `initialize` control request goes first. Its response lists the models: claudo offers the family aliases (`opus`, `sonnet`, ...) labelled with
 the version each runs today (`displayName`), so a choice follows new releases.
 
 A slash command is sent as an ordinary message (`/compact keep it short`). A local one
