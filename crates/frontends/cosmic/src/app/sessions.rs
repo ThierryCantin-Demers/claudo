@@ -52,7 +52,7 @@ impl ClaudoApp {
         let detail = format!(
             "{} · {} · {}",
             session.source,
-            ago(now.saturating_sub(session.updated)),
+            time::ago(now.saturating_sub(session.updated)),
             home_relative(&session.cwd)
         );
         let radius = cosmic::theme::active().cosmic().corner_radii.radius_s;
@@ -78,30 +78,5 @@ fn home_relative(path: &str) -> String {
     match Path::new(path).strip_prefix(&home) {
         Ok(rest) if !home.is_empty() => Path::new("~").join(rest).display().to_string(),
         _ => path.to_string(),
-    }
-}
-
-/// How long ago, in the one unit that reads at a glance.
-fn ago(seconds: u64) -> String {
-    match (seconds / 86_400, seconds / 3600, seconds / 60) {
-        (0, 0, 0) => "just now".to_string(),
-        (0, 0, minutes) => format!("{minutes} min ago"),
-        (0, hours, _) => format!("{hours} h ago"),
-        (1, _, _) => "yesterday".to_string(),
-        (days, _, _) => format!("{days} days ago"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ages_read_at_a_glance() {
-        assert_eq!(ago(30), "just now");
-        assert_eq!(ago(5 * 60), "5 min ago");
-        assert_eq!(ago(3 * 3600 + 59), "3 h ago");
-        assert_eq!(ago(30 * 3600), "yesterday");
-        assert_eq!(ago(9 * 86_400), "9 days ago");
     }
 }

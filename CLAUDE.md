@@ -119,6 +119,8 @@ waits for the next line. Closing stdin makes it finish the running turn and exit
 `--thinking-display summarized` is not in `--help`. Without it print mode sends every
 thinking block empty; with it the summary streams as `thinking_delta` and is saved in the
 transcript. The model decides per turn whether to think at all, so many turns have none.
+The summary arrives in one burst when the thinking block ends, so a long think streams
+nothing until then; `system` / `thinking_tokens` only accompanies those deltas.
 
 Events consumed from the JSONL stream:
 
@@ -138,7 +140,9 @@ Events consumed from the JSONL stream:
 | `system` / `task_started` | a call moved to the background (`is_backgrounded`), by `tool_use_id` |
 | `system` / `task_notification` | a background call ended: `status`, `summary`, `output_file`; may arrive between turns |
 | `rate_limit_event` | `rate_limit_info.unifiedWindows` five-hour and seven-day `utilization` and `resetsAt` |
-| `result` | turn complete; `usage` and `modelUsage[*].contextWindow` for context display |
+| `assistant` with no `parent_tool_use_id` | its `message.usage` is one request's context; the turn's last one is the context shown |
+| `system` / `api_retry` | a failed request will be retried: `attempt`, `max_retries`, `error`, `error_status` |
+| `result` | turn complete; `modelUsage[*].contextWindow` for the window. Its `usage` sums every request of the turn, so it is not the context |
 
 Parse defensively by field extraction, not strict structs, so unrelated schema changes do
 not break chat.

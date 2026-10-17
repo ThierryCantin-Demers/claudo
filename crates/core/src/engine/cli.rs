@@ -115,7 +115,7 @@ pub fn usage() -> io::Result<Quota> {
 }
 
 /// Unix seconds of an RFC 3339 time, such as `2026-10-15T21:30:00.476926+00:00`.
-fn unix_seconds(time: &str) -> Option<u64> {
+pub(crate) fn unix_seconds(time: &str) -> Option<u64> {
     let (date, rest) = time.split_once('T')?;
     let mut date = date.splitn(3, '-').map(str::parse::<i64>);
     let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
@@ -209,6 +209,12 @@ pub enum EngineEvent {
     },
     /// The conversation is being summarized to free up context.
     Compacting,
+    /// A request to the API failed and the CLI is waiting to try it again.
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        error: String,
+    },
     Compacted(Compaction),
     /// The summary a compaction left in place of the conversation.
     CompactSummary(String),
@@ -383,11 +389,17 @@ impl Session {
             // The CLI starts a turn of its own for background commands that ended, and
             // echoes no message for it, so it opens with these.
             let mut notices: Vec<String> = Vec::new();
+            // A turn's `result` sums the usage of every request it made; its context is the
+            // last request's.
+            let mut last_request = 0;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 reader.touch();
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
+                if let Some(context) = request_context(&v) {
+                    last_request = context;
+                }
                 if let Some(message) = started_message(&v) {
                     let mut turns = reader.turns.lock().unwrap();
                     turns.reports_ids = true;
@@ -436,7 +448,10 @@ impl Session {
                     }
                     None => decode(&v),
                 };
-                for ev in events {
+                for mut ev in events {
+                    if let EngineEvent::Completed { context, .. } = &mut ev {
+                        context.used = std::mem::take(&mut last_request);
+                    }
                     let completed = matches!(ev, EngineEvent::Completed { .. });
                     let mut turns = reader.turns.lock().unwrap();
                     let incoming = matches!(ev, EngineEvent::Incoming { .. });
@@ -829,6 +844,24 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
             .into_iter()
             .collect(),
 
+        "system" if v.get("subtype").and_then(Value::as_str) == Some("api_retry") => {
+            let number = |key| v.get(key).and_then(Value::as_u64).unwrap_or(0) as u32;
+            let error = match (
+                v.get("error").and_then(Value::as_str),
+                v.get("error_status").and_then(Value::as_u64),
+            ) {
+                (Some(error), Some(status)) => format!("{error} ({status})"),
+                (Some(error), None) => error.to_string(),
+                (None, Some(status)) => format!("HTTP {status}"),
+                (None, None) => "an API error".to_string(),
+            };
+            vec![EngineEvent::Retrying {
+                attempt: number("attempt"),
+                max_retries: number("max_retries"),
+                error,
+            }]
+        }
+
         // Token-level text and thinking deltas. Tool input arrives here too (as
         // input_json_delta) but we render tools from the complete `assistant`
         // message below.
@@ -898,7 +931,10 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
                     .get("terminal_reason")
                     .and_then(Value::as_str)
                     .is_some_and(|reason| reason.starts_with("aborted_")),
-            context: context_usage(v),
+            context: ContextUsage {
+                used: 0,
+                window: context_window(v),
+            },
             text: v
                 .get("result")
                 .and_then(Value::as_str)
@@ -1079,32 +1115,31 @@ fn quota(v: &Value) -> Option<Quota> {
     })
 }
 
-/// Context size for the turn, from the `result` event: everything that made up
-/// the request's context, plus the model's window from `modelUsage`.
-fn context_usage(v: &Value) -> ContextUsage {
-    let n = |key: &str| {
-        v.pointer(&format!("/usage/{key}"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-    };
-    let used = n("input_tokens")
-        + n("cache_read_input_tokens")
-        + n("cache_creation_input_tokens")
-        + n("output_tokens");
+/// The tokens one request of the main agent had in context, from its `assistant` message;
+/// a subagent's carry the call that started it.
+fn request_context(v: &Value) -> Option<u64> {
+    let main = v.get("parent_tool_use_id").is_none_or(Value::is_null);
+    if v.get("type")?.as_str()? != "assistant" || !main {
+        return None;
+    }
+    let usage = v.pointer("/message/usage")?;
+    let n = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(
+        n("input_tokens")
+            + n("cache_read_input_tokens")
+            + n("cache_creation_input_tokens")
+            + n("output_tokens"),
+    )
+}
 
-    // `modelUsage` is keyed by model name; take the largest window reported
-    // (side-models like the title generator also appear here).
-    let window = v
-        .get("modelUsage")
-        .and_then(Value::as_object)
-        .and_then(|models| {
-            models
-                .values()
-                .filter_map(|m| m.get("contextWindow").and_then(Value::as_u64))
-                .max()
-        });
-
-    ContextUsage { used, window }
+/// The model's context window, from the `result` event's `modelUsage`.
+fn context_window(v: &Value) -> Option<u64> {
+    // Keyed by model name; side models such as the title generator appear too.
+    v.get("modelUsage")?
+        .as_object()?
+        .values()
+        .filter_map(|m| m.get("contextWindow").and_then(Value::as_u64))
+        .max()
 }
 
 fn stream_delta(v: &Value) -> Option<EngineEvent> {
@@ -1199,6 +1234,30 @@ mod tests {
     }
 
     #[test]
+    fn a_retried_request_says_why() {
+        let retry = line(
+            r#"{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":4000,"error_status":529,"error":"overloaded"}"#,
+        );
+        assert!(matches!(
+            &decode(&retry)[..],
+            [EngineEvent::Retrying { attempt: 2, max_retries: 10, error }] if error == "overloaded (529)"
+        ));
+    }
+
+    #[test]
+    fn context_is_the_last_request_of_the_main_agent() {
+        let usage = r#""usage":{"input_tokens":2,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"output_tokens":3}"#;
+        let main = line(&format!(
+            r#"{{"type":"assistant","parent_tool_use_id":null,"message":{{{usage}}}}}"#
+        ));
+        assert_eq!(request_context(&main), Some(35));
+        let subagent = line(&format!(
+            r#"{{"type":"assistant","parent_tool_use_id":"t1","message":{{{usage}}}}}"#
+        ));
+        assert_eq!(request_context(&subagent), None);
+    }
+
+    #[test]
     fn result_reports_context_and_stops_are_not_errors() {
         let done = line(
             r#"{"type":"result","is_error":false,"session_id":"s","usage":{"input_tokens":2,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"output_tokens":3},"modelUsage":{"main":{"contextWindow":1000000},"side":{"contextWindow":200000}}}"#,
@@ -1214,7 +1273,6 @@ mod tests {
             ] => {
                 assert_eq!(session_id.as_deref(), Some("s"));
                 assert!(!is_error);
-                assert_eq!(context.used, 35);
                 assert_eq!(context.window, Some(1_000_000));
             }
             other => panic!("unexpected {other:?}"),

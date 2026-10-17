@@ -50,6 +50,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.
+- Each turn ends with when it started and how long it took; while one runs, COSMIC shows its time so far and says when the API is being retried.
 - Context usage for the last turn. Past 500k tokens of context, COSMIC offers to compact the conversation; compactions, automatic or asked for, show where they happened with their summary.
 - COSMIC: a `/` menu of the CLI's slash commands (built in, skills, plugins) as you type one; `/clear`, `/rename`, `/model` and `/effort` act on claudo's own conversation, title and settings.
 - COSMIC: your plan's usage at the foot of the sidebar, the five-hour session and the week, with when each resets.

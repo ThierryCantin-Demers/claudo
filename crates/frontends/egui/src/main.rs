@@ -258,6 +258,7 @@ impl ClaudoApp {
 
                 ServerEvent::Models(models) => self.models = models,
                 ServerEvent::Commands(_)
+                | ServerEvent::Retrying { .. }
                 | ServerEvent::Compacting { .. }
                 | ServerEvent::CompactSummary { .. } => {}
                 ServerEvent::Compacted {
@@ -415,12 +416,14 @@ impl ClaudoApp {
                 ServerEvent::Completed {
                     conversation_id,
                     is_error,
+                    time,
                     ..
                 } => {
                     if self.is_current(&conversation_id) {
                         self.approvals.clear();
                         self.streaming = false;
                         self.assistant_idx = None;
+                        self.items.extend(time.map(Item::Ended));
                         if is_error {
                             self.error =
                                 Some("Claude reported an error for this turn.".to_string());
@@ -1017,6 +1020,10 @@ impl ClaudoApp {
                                     "Conversation compacted: {} → {} tokens",
                                     c.before, c.after
                                 ));
+                            }
+                            Item::Ended(time) => {
+                                let seconds = time.ended.saturating_sub(time.started);
+                                ui.weak(format!("Took {} min {} s", seconds / 60, seconds % 60));
                             }
                         }
                     }

@@ -26,7 +26,7 @@ mod app {
     use claudo_protocol::{
         CliCommand, Command, Compaction, ConversationId, ConversationInfo, Decision, Effort, Item,
         ModelOption, Overrides, Profile, Quota, ServerEvent, SessionId, SessionInfo, Settings,
-        SystemStatus, ToolCall,
+        SystemStatus, ToolCall, TurnTime,
     };
     use claudo_transport::{Commands, spawn_backend};
 
@@ -99,6 +99,8 @@ mod app {
             call: ToolCall,
             open: bool,
         },
+        /// The turn before it ended.
+        Ended(TurnTime),
     }
 
     struct Reply {
@@ -150,6 +152,7 @@ mod app {
                 Item::Assistant(text) => Entry::Reply(Box::new(Reply::complete(text))),
                 Item::Thinking(text) => Entry::Thinking { text, open: false },
                 Item::Tool(call) => Entry::Tool { call, open: false },
+                Item::Ended(time) => Entry::Ended(time),
             }
         }
     }
@@ -194,6 +197,10 @@ mod app {
         menu_closed: bool,
         /// Changes when `items` is replaced wholesale, so no entry reuses a key from before.
         generation: u64,
+        /// When the running turn started.
+        since: Option<std::time::Instant>,
+        /// Why the API is being asked again, while it waits to be.
+        retrying: Option<String>,
     }
 
     impl ConversationView {
@@ -216,6 +223,8 @@ mod app {
                 menu: 0,
                 menu_closed: false,
                 generation: 0,
+                since: None,
+                retrying: None,
             }
         }
 
@@ -274,12 +283,18 @@ mod app {
             if self.compacting {
                 return Some("Compacting the conversation".to_string());
             }
-            match self.items.last() {
-                Some(Entry::Thinking { .. }) => None,
-                Some(Entry::Tool { call, .. }) if call.result.is_none() => {
-                    Some(format!("Running {}", call.name))
+            let doing = match (&self.retrying, self.items.last()) {
+                (Some(retry), _) => retry.clone(),
+                (None, Some(Entry::Thinking { .. })) => return None,
+                (None, Some(Entry::Tool { call, .. })) if call.result.is_none() => {
+                    format!("Running {}", call.name)
                 }
-                _ => Some("Thinking".to_string()),
+                _ => "Thinking".to_string(),
+            };
+            // A long think streams nothing until it ends, so the time says it is still going.
+            match self.since.map(|since| since.elapsed().as_secs()) {
+                Some(seconds) if seconds >= 5 => Some(format!("{doing} · {}", time::took(seconds))),
+                _ => Some(doing),
             }
         }
 
@@ -352,6 +367,8 @@ mod app {
         fn fail(&mut self, detail: String) {
             self.error = Some(detail);
             self.streaming = false;
+            self.since = None;
+            self.retrying = None;
             self.approvals.clear();
             self.finish_reply();
         }
@@ -380,16 +397,32 @@ mod app {
                     self.finish_reply();
                     self.error = None;
                     self.streaming = true;
+                    self.since.get_or_insert_with(std::time::Instant::now);
                     self.items.push(Entry::Incoming { from, text });
                 }
                 ServerEvent::Notice { text, .. } => {
                     self.finish_reply();
                     self.error = None;
                     self.streaming = true;
+                    self.since.get_or_insert_with(std::time::Instant::now);
                     self.items.push(Entry::Notice(text));
                 }
-                ServerEvent::Delta { text, .. } => self.push_assistant(&text),
+                ServerEvent::Delta { text, .. } => {
+                    self.retrying = None;
+                    self.push_assistant(&text);
+                }
+                ServerEvent::Retrying {
+                    attempt,
+                    max_retries,
+                    error,
+                    ..
+                } => {
+                    self.retrying = Some(format!(
+                        "Retrying after {error}, attempt {attempt} of {max_retries}"
+                    ));
+                }
                 ServerEvent::ThinkingDelta { text, .. } => {
+                    self.retrying = None;
                     if let Some(Entry::Thinking { text: thought, .. }) = self.items.last_mut() {
                         thought.push_str(&text);
                     } else {
@@ -398,6 +431,7 @@ mod app {
                     }
                 }
                 ServerEvent::ToolStarted { call, .. } => {
+                    self.retrying = None;
                     self.finish_reply();
                     self.items.push(Entry::Tool { call, open: false });
                 }
@@ -443,11 +477,14 @@ mod app {
                         compaction.summary = text;
                     }
                 }
-                ServerEvent::Completed { is_error, .. } => {
+                ServerEvent::Completed { is_error, time, .. } => {
                     self.streaming = false;
                     self.compacting = false;
+                    self.since = None;
+                    self.retrying = None;
                     self.approvals.clear();
                     self.finish_reply();
+                    self.items.extend(time.map(Entry::Ended));
                     if is_error {
                         self.error = Some("Claude reported an error.".to_string());
                     }
@@ -1695,6 +1732,7 @@ mod app {
             view.finish_reply();
             view.items.push(Entry::User(text.clone()));
             view.streaming = true;
+            view.since = Some(std::time::Instant::now());
             self.cmd(Command::SendMessage {
                 conversation_id: id.clone(),
                 text,
@@ -1810,6 +1848,10 @@ mod app {
                 }
                 | ServerEvent::Compacting {
                     ref conversation_id,
+                }
+                | ServerEvent::Retrying {
+                    ref conversation_id,
+                    ..
                 }
                 | ServerEvent::Compacted {
                     ref conversation_id,
@@ -2745,6 +2787,10 @@ mod app {
                         self.zoom,
                     ),
                     Entry::Notice(text) => notice_row(text, size),
+                    Entry::Ended(turn) => widget::text(time::turn_label(*turn))
+                        .size(size * 0.8)
+                        .class(dim())
+                        .into(),
                     Entry::Compacted { compaction, open } => {
                         let summary = open.then(|| {
                             texts
@@ -4633,6 +4679,7 @@ mod app {
     #[cfg(test)]
     mod tests;
     mod tile_drag;
+    mod time;
     mod usage;
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its

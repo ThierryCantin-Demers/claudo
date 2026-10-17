@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
-    Command, ContextUsage, ConversationInfo, Decision, ModelOption, ServerEvent,
+    Command, ContextUsage, ConversationInfo, Decision, ModelOption, ServerEvent, TurnTime,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -333,6 +333,8 @@ struct Forward {
     latest: Option<String>,
     /// The running turn has streamed text.
     streamed: bool,
+    /// When the running turn started, in Unix seconds.
+    started: Option<u64>,
 }
 
 impl Forward {
@@ -348,6 +350,7 @@ impl Forward {
             conversation_id,
             latest,
             streamed: false,
+            started: None,
         }
     }
 
@@ -359,6 +362,7 @@ impl Forward {
         let conversation_id = self.conversation_id.clone();
         match ev {
             EngineEvent::Started { session_id } => {
+                self.started.get_or_insert_with(crate::sessions::now_secs);
                 self.latest = Some(session_id.clone());
                 self.store
                     .lock()
@@ -383,6 +387,16 @@ impl Forward {
                 });
             }
             EngineEvent::Compacting => self.emit(ServerEvent::Compacting { conversation_id }),
+            EngineEvent::Retrying {
+                attempt,
+                max_retries,
+                error,
+            } => self.emit(ServerEvent::Retrying {
+                conversation_id,
+                attempt,
+                max_retries,
+                error,
+            }),
             EngineEvent::Compacted(compaction) => {
                 // The next turn reports the real size; until then, the summary's.
                 {
@@ -470,10 +484,15 @@ impl Forward {
                         store.set_context(&conversation_id, context);
                     }
                 }
+                let time = self.started.take().map(|started| TurnTime {
+                    started,
+                    ended: crate::sessions::now_secs(),
+                });
                 self.emit(ServerEvent::Completed {
                     conversation_id,
                     is_error,
                     context,
+                    time,
                 });
                 self.emit(conversations_event(&self.store));
             }

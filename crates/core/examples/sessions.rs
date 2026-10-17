@@ -58,6 +58,7 @@ fn main() {
                 clip(&c.summary)
             ),
             Item::Thinking(t) => println!("  THINKING: {}", clip(t)),
+            Item::Ended(time) => println!("  ENDED {} -> {}", time.started, time.ended),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
             Item::Tool(tc) => println!(
                 "  TOOL {} err={} result={}",

@@ -139,6 +139,13 @@ impl ContextUsage {
     }
 }
 
+/// When a turn started and ended, in Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnTime {
+    pub started: u64,
+    pub ended: u64,
+}
+
 /// Thinking / effort level. `Default` leaves the CLI's default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effort {
@@ -202,6 +209,8 @@ pub enum Item {
     /// What started a turn Claude Code began by itself, such as a background command ending.
     Notice(String),
     Compacted(Compaction),
+    /// The turn before it ended.
+    Ended(TurnTime),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,6 +483,14 @@ pub enum ServerEvent {
     Compacting {
         conversation_id: ConversationId,
     },
+    /// A request to the API failed and the CLI is waiting to try it again.
+    Retrying {
+        conversation_id: ConversationId,
+        attempt: u32,
+        max_retries: u32,
+        /// Such as "overloaded (529)".
+        error: String,
+    },
     Compacted {
         conversation_id: ConversationId,
         compaction: Compaction,
@@ -494,6 +511,8 @@ pub enum ServerEvent {
         is_error: bool,
         #[serde(default)]
         context: ContextUsage,
+        #[serde(default)]
+        time: Option<TurnTime>,
     },
     Quota(Quota),
     Error {

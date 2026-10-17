@@ -1452,6 +1452,7 @@ fn streaming_frame_cost() {
                     conversation_id: id.to_string(),
                     is_error: false,
                     context: Default::default(),
+                    time: None,
                 }]));
                 let view = h.app.views.get_mut(id).unwrap();
                 view.items.push(Entry::User("Go on".to_string()));

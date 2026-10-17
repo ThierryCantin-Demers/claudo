@@ -55,6 +55,9 @@ fn turn(
             EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
             EngineEvent::Quota(_) => {}
             EngineEvent::Compacting => println!("  [compacting]"),
+            EngineEvent::Retrying { attempt, error, .. } => {
+                println!("  [retrying after {error}, attempt {attempt}]")
+            }
             EngineEvent::Compacted(c) => println!("  [compacted {} -> {}]", c.before, c.after),
             EngineEvent::CompactSummary(_) => {}
             EngineEvent::Background { background, .. } => {

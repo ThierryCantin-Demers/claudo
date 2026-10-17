@@ -182,6 +182,7 @@ pub fn key(view: &ConversationView, idx: usize, entry: &Entry, live: bool, zoom:
         Entry::Incoming { from, text } => (from.len(), text.len()).hash(&mut h),
         Entry::Compacted { compaction, open } => (compaction.summary.len(), open).hash(&mut h),
         Entry::Reply(reply) => reply.parsed.hash(&mut h),
+        Entry::Ended(time) => time.hash(&mut h),
         Entry::Thinking { text, open } => (text.len(), open, live).hash(&mut h),
         Entry::Tool { call, open } => {
             let background = call
