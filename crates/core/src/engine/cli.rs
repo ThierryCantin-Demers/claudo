@@ -295,6 +295,8 @@ struct Shared {
     always: Mutex<HashSet<String>>,
     /// Calls of the running turn already shown, which a forked command's replay repeats.
     shown: Mutex<HashSet<String>>,
+    /// Calls running in the background, which keep the process alive with stdin closed.
+    background: Mutex<HashSet<String>>,
 }
 
 struct Pending {
@@ -414,6 +416,7 @@ impl Session {
             approvals: Mutex::default(),
             always: Mutex::default(),
             shown: Mutex::default(),
+            background: Mutex::default(),
         });
         // Without it the process joins the other agents only once its first turn ends.
         shared.write(&json!({
@@ -502,6 +505,17 @@ impl Session {
                     None => decode(&v),
                 };
                 for mut ev in events {
+                    if let EngineEvent::Background {
+                        call_id,
+                        background,
+                    } = &ev
+                    {
+                        let mut running = reader.background.lock().unwrap();
+                        match background.status {
+                            TaskStatus::Running => running.insert(call_id.clone()),
+                            _ => running.remove(call_id),
+                        };
+                    }
                     if let EngineEvent::ToolStarted(call) = &ev
                         && !reader.first_shown(&call.call_id)
                     {
@@ -687,6 +701,11 @@ impl Session {
 
     pub fn is_alive(&self) -> bool {
         !self.shared.turns.lock().unwrap().exited
+    }
+
+    /// A call runs in the background, such as a listener waiting for messages.
+    pub fn has_background(&self) -> bool {
+        !self.shared.background.lock().unwrap().is_empty()
     }
 
     /// A turn is running or waiting to.

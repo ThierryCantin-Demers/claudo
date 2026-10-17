@@ -35,7 +35,10 @@ impl LiveSessions {
         thread::spawn(move || {
             while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(tick) {
                 reaped.lock().unwrap().retain(|_, session| {
-                    session.is_alive() && (session.is_busy() || session.idle_for() < idle_timeout)
+                    session.is_alive()
+                        && (session.is_busy()
+                            || session.has_background()
+                            || session.idle_for() < idle_timeout)
                 });
             }
         });
@@ -64,14 +67,16 @@ impl LiveSessions {
             && session.is_alive()
         {
             // While a turn runs, a message joins it or waits for it, under the flags it has.
-            let busy = session.is_busy();
+            // A process running something in the background keeps its flags too: replacing
+            // it would leave that running where nothing reports on it.
+            let busy = session.is_busy() || session.has_background();
             if (busy || *session.config() == config)
                 && let Ok(turn) = session.send(message)
             {
                 return Ok(turn);
             }
             if busy {
-                return Err("claude stopped taking messages in the middle of a turn".to_string());
+                return Err("claude stopped taking messages while still working".to_string());
             }
         }
 

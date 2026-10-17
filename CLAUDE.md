@@ -296,6 +296,13 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
 - **Closing means closing stdin, never killing.** An idle process exits at once; one in
   the middle of a turn finishes it first, so a dropped daemon connection does not cut
   off an agent mid-edit. Processes idle for 30 minutes are closed this way.
+- **A call in the background keeps its process alive**, stdin closed or not, until it
+  ends. Only that process reports its end, so one running a call in the background is
+  never closed for idling nor replaced for new flags (a message keeps the flags it has).
+  A conversation reopened with no process of this claudo's shows such a call as ended.
+- **Several claudo instances share `conversations.json`.** Each writes the whole list, so a
+  save first takes in the conversations another added, and startup takes back any scratch
+  conversation whose folder and transcript remain but which the list lost.
 - **stderr is drained continuously**, keeping the last lines for the error message. A
   long-lived process blocks once an unread pipe fills.
 - There is no cap on live processes beyond the idle timeout.

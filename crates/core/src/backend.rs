@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
-    Command, ContextUsage, ConversationInfo, Decision, ModelOption, ServerEvent, TurnTime,
+    Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, ServerEvent, TaskStatus,
+    TurnTime,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -256,7 +257,7 @@ impl Backend {
             }
         };
 
-        let items = match &session {
+        let mut items = match &session {
             Some(sid) => {
                 let (items, ai_title) = load_transcript(sid);
                 if let Some(title) = ai_title {
@@ -276,6 +277,18 @@ impl Backend {
             None => Vec::new(),
         };
 
+        // Without a process of this claudo's, nothing here hears a background call end, so
+        // one still marked running is shown as having ended.
+        if self.live.pid(&id).is_none() {
+            for item in &mut items {
+                if let Item::Tool(call) = item
+                    && let Some(background) = &mut call.background
+                    && background.status == TaskStatus::Running
+                {
+                    background.status = TaskStatus::Unknown;
+                }
+            }
+        }
         self.emit(ServerEvent::History {
             conversation_id: id,
             items,
