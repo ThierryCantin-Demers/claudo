@@ -2999,6 +2999,9 @@ mod app {
             if let Some(label) = view.activity() {
                 rows.push(activity_row(label, self.pulse, size));
             }
+            if let Some(label) = view.in_background() {
+                rows.push(background_row(label, size));
+            }
             rows.extend(
                 view.queued
                     .iter()
@@ -3770,6 +3773,28 @@ mod app {
         ])
         .spacing(10)
         .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// Work going on in the background; a click shows it in the Commands panel.
+    fn background_row<'a>(label: String, size: f32) -> Element<'a, Message> {
+        widget::tooltip(
+            widget::button::custom(
+                widget::Row::with_children(vec![
+                    widget::icon::from_name("utilities-terminal-symbolic")
+                        .size(16)
+                        .into(),
+                    widget::text(label).size(size).class(dim()).into(),
+                ])
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::ShowCommands(true))
+            .class(cosmic::theme::Button::Text)
+            .padding(0),
+            widget::text("Show it in the Commands panel"),
+            widget::tooltip::Position::Top,
+        )
         .into()
     }
 

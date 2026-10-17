@@ -75,6 +75,30 @@ impl ConversationView {
             })
     }
 
+    /// What still works in the background, which nothing else shows once its turn ended.
+    pub(super) fn in_background(&self) -> Option<String> {
+        let (mut commands, mut subagents) = (0, 0);
+        for (_, call) in self.commands() {
+            if call.background.is_some() && self.running(call) {
+                match call.agent {
+                    true => subagents += 1,
+                    false => commands += 1,
+                }
+            }
+        }
+        let count = |n: usize, what: &str| match n {
+            0 => None,
+            1 => Some(format!("1 {what}")),
+            n => Some(format!("{n} {what}s")),
+        };
+        let running: Vec<String> = [count(commands, "command"), count(subagents, "subagent")]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!running.is_empty())
+            .then(|| format!("Running {} in the background", running.join(" and ")))
+    }
+
     pub(super) fn running_commands(&self) -> usize {
         self.commands()
             .filter(|(_, call)| self.running(call))
@@ -283,12 +307,21 @@ impl ClaudoApp {
                 .into(),
             );
         }
-        rows.extend(
-            running
-                .into_iter()
-                .chain(done)
-                .map(|(idx, call)| self.panel_row(id, view, idx, call, texts, size)),
-        );
+        for (label, calls) in [("Running", running), ("Finished", done)] {
+            if calls.is_empty() {
+                continue;
+            }
+            rows.push(
+                widget::container(widget::text(label).size(size * 0.85).class(dim()))
+                    .padding([6, 0, 0, 26])
+                    .into(),
+            );
+            rows.extend(
+                calls
+                    .into_iter()
+                    .map(|(idx, call)| self.panel_row(id, view, idx, call, texts, size)),
+            );
+        }
         widget::Column::with_children(rows).spacing(4).into()
     }
 

@@ -1723,6 +1723,11 @@ fn a_background_subagent_works_on_after_its_turn_as_one_panel_row() {
         "one row in the Commands panel, not one per call"
     );
     assert_eq!(view.running_commands(), 1);
+    assert_eq!(
+        view.in_background().as_deref(),
+        Some("Running 1 subagent in the background"),
+        "the end of the conversation says what still works"
+    );
     let running: Vec<&str> = view
         .made_by("agent")
         .filter(|(_, call)| view.running(call))
@@ -1746,5 +1751,15 @@ fn a_background_subagent_works_on_after_its_turn_as_one_panel_row() {
         app.views[ALPHA].running_commands(),
         0,
         "nothing outlives its subagent"
+    );
+    assert_eq!(app.views[ALPHA].in_background(), None);
+}
+
+#[test]
+fn the_end_of_a_conversation_counts_its_background_commands() {
+    let app = with_commands();
+    assert_eq!(
+        app.views[ALPHA].in_background().as_deref(),
+        Some("Running 1 command in the background")
     );
 }
