@@ -2068,7 +2068,7 @@ mod app {
                 Some(vec![
                     menu_item("New chat in new tile", Message::NewChat(Placement::Right)),
                     menu_item("New chat in new window", Message::NewWindow),
-                    menu_item("Continue a Claude Code session…", Message::ShowSessions),
+                    menu_item("Continue a session…", Message::ShowSessions),
                 ]),
             )
             .window_id(w)
