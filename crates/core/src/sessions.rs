@@ -354,8 +354,10 @@ pub fn delete_files(meta: &ConversationMeta) {
         if let Some(project) = transcript.parent() {
             // The session's own folder holds its subagents' transcripts.
             let _ = fs::remove_dir_all(project.join(session_id));
-            // A scratch conversation's project holds only its sessions; this fails if not empty.
+            // A scratch conversation's project holds only its sessions and the CLI's memory
+            // folder; neither removal happens unless the folder is empty.
             if !meta.attached {
+                let _ = fs::remove_dir(project.join("memory"));
                 let _ = fs::remove_dir(project);
             }
         }
