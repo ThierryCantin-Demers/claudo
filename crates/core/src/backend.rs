@@ -14,7 +14,7 @@ use claudo_protocol::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{EngineEvent, SessionConfig};
+use crate::engine::{EngineEvent, Resume, SessionConfig};
 use crate::live::{IDLE_TIMEOUT, LiveSessions};
 use crate::sessions::{Store, load_transcript};
 
@@ -106,6 +106,36 @@ impl Backend {
                 self.created(id, request);
             }
 
+            Command::ListSessions => {
+                let known = self.store.lock().unwrap().session_ids();
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let list = crate::sessions::discover(&known);
+                    let _ = events.send(ServerEvent::Sessions { list });
+                });
+            }
+
+            Command::Import {
+                session_id,
+                request,
+            } => {
+                let imported = self.store.lock().unwrap().import(&session_id);
+                match imported {
+                    Ok(id) => {
+                        self.emit(conversations_event(&self.store));
+                        self.emit(ServerEvent::Created {
+                            conversation_id: id,
+                            request,
+                            imported: true,
+                        });
+                    }
+                    Err(detail) => self.emit(ServerEvent::Error {
+                        conversation_id: None,
+                        detail,
+                    }),
+                }
+            }
+
             Command::OpenConversation { id } => self.open(id),
 
             Command::Delete { id } => {
@@ -181,6 +211,7 @@ impl Backend {
         self.emit(ServerEvent::Created {
             conversation_id: id,
             request,
+            imported: false,
         });
     }
 
@@ -236,7 +267,7 @@ impl Backend {
         model: String,
         effort: claudo_protocol::Effort,
     ) {
-        let (cwd, session_id, name, always) = {
+        let (cwd, session_id, borrowed, name, always) = {
             let mut store = self.store.lock().unwrap();
             // A message to an archived conversation means it is in use again.
             store.set_archived(&conversation_id, false);
@@ -249,6 +280,7 @@ impl Backend {
             (
                 meta.cwd.clone(),
                 meta.session_id.clone(),
+                meta.borrowed(),
                 name,
                 meta.always_allowed.clone(),
             )
@@ -261,20 +293,21 @@ impl Backend {
             model: (!model.trim().is_empty()).then_some(model),
             effort: effort.cli().map(str::to_owned),
         };
-        let turn = match self.live.send_turn(
-            &conversation_id,
-            config,
-            session_id.as_deref(),
-            &name,
-            &always,
-            &text,
-        ) {
-            Ok(turn) => turn,
-            Err(detail) => {
-                self.error(conversation_id, detail);
-                return;
-            }
-        };
+        let resume = session_id.as_deref().map(|session_id| Resume {
+            session_id,
+            fork: borrowed,
+        });
+        let turn =
+            match self
+                .live
+                .send_turn(&conversation_id, config, resume, &name, &always, &text)
+            {
+                Ok(turn) => turn,
+                Err(detail) => {
+                    self.error(conversation_id, detail);
+                    return;
+                }
+            };
 
         let mut forward = Forward::new(
             self.events.clone(),

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use claudo_core::engine::{EngineEvent, SessionConfig};
+use claudo_core::engine::{EngineEvent, Resume, SessionConfig};
 use claudo_core::live::LiveSessions;
 use claudo_protocol::Profile;
 
@@ -100,7 +100,10 @@ fn turn(
         .send_turn(
             CONVERSATION,
             config,
-            resume,
+            resume.map(|session_id| Resume {
+                session_id,
+                fork: false,
+            }),
             "claudo live probe",
             &[],
             prompt,

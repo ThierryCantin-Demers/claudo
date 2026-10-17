@@ -5,11 +5,15 @@
 //! We locate a transcript by its `<session-id>.jsonl` filename, so we never have
 //! to reverse Claude Code's directory-name encoding.
 
+use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use claudo_protocol::{Background, ContextUsage, Item, Overrides, Settings, TaskStatus};
+use claudo_protocol::{
+    Background, ContextUsage, Item, Overrides, SessionInfo, Settings, TaskStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -57,6 +61,10 @@ pub struct ConversationMeta {
     #[serde(default)]
     pub always_allowed: Vec<String>,
     pub session_id: Option<String>,
+    /// The other app's session it was imported from. Until a turn forks it, `session_id` is
+    /// still that session, which claudo must not change or delete.
+    #[serde(default)]
+    pub imported_from: Option<String>,
     #[serde(default)]
     pub overrides: Overrides,
     /// Context usage from the most recent turn.
@@ -66,6 +74,13 @@ pub struct ConversationMeta {
     pub created: u64,
     #[serde(default)]
     pub updated: u64,
+}
+
+impl ConversationMeta {
+    /// Its session is still another app's, so the next process forks it instead of resuming it.
+    pub fn borrowed(&self) -> bool {
+        self.imported_from.is_some() && self.imported_from == self.session_id
+    }
 }
 
 /// The persisted list of conversations (`~/.local/share/claudo/conversations.json`).
@@ -166,12 +181,43 @@ impl Store {
             archived: false,
             always_allowed: Vec::new(),
             session_id: None,
+            imported_from: None,
             overrides,
             context: ContextUsage::default(),
             created: now,
             updated: now,
         });
         self.save();
+    }
+
+    /// Add a conversation continuing another app's session, or find the one that already does.
+    pub fn import(&mut self, session_id: &str) -> Result<String, String> {
+        if let Some(c) = self.conversations.iter().find(|c| {
+            c.imported_from.as_deref() == Some(session_id)
+                || c.session_id.as_deref() == Some(session_id)
+        }) {
+            return Ok(c.id.clone());
+        }
+        let session = find_transcript(session_id)
+            .and_then(|path| summarize(&path))
+            .ok_or_else(|| "that session can no longer be continued".to_string())?;
+        let id = Uuid::new_v4().to_string();
+        self.push_new(id.clone(), session.cwd.into(), true, session.title);
+        if let Some(c) = self.get_mut(&id) {
+            c.session_id = Some(session_id.to_string());
+            c.imported_from = Some(session_id.to_string());
+        }
+        self.save();
+        Ok(id)
+    }
+
+    /// Every session a conversation continues or was imported from.
+    pub fn session_ids(&self) -> HashSet<String> {
+        self.conversations
+            .iter()
+            .flat_map(|c| [c.session_id.clone(), c.imported_from.clone()])
+            .flatten()
+            .collect()
     }
 
     pub fn set_context(&mut self, id: &str, context: ContextUsage) {
@@ -267,6 +313,7 @@ fn title_from_prompt(prompt: &str) -> String {
 /// scratch folder, which claudo owns. An attached project folder is never touched.
 pub fn delete_files(meta: &ConversationMeta) {
     if let Some(session_id) = &meta.session_id
+        && !meta.borrowed()
         && let Some(transcript) = find_transcript(session_id)
     {
         let _ = fs::remove_file(&transcript);
@@ -295,19 +342,132 @@ pub fn load_transcript(session_id: &str) -> (Vec<Item>, Option<String>) {
     parse_transcript(&path)
 }
 
+/// How many sessions `discover` lists.
+const DISCOVERED: usize = 50;
+
+/// Claude Code sessions no conversation continues, newest first. Headless runs, claudo's own
+/// among them, are left out.
+pub fn discover(known: &HashSet<String>) -> Vec<SessionInfo> {
+    let Some(projects) = claude_projects_dir() else {
+        return Vec::new();
+    };
+    let mut transcripts: Vec<(SystemTime, PathBuf)> = fs::read_dir(projects)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|project| fs::read_dir(project.path()).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let unknown =
+                path.extension()? == "jsonl" && !known.contains(path.file_stem()?.to_str()?);
+            unknown.then_some((entry.metadata().ok()?.modified().ok()?, path))
+        })
+        .collect();
+    transcripts.sort_by_key(|(modified, _)| Reverse(*modified));
+    let mut listed = HashSet::new();
+    transcripts
+        .iter()
+        .filter(|(_, path)| listed.insert(path.file_stem()))
+        .filter_map(|(_, path)| summarize(path))
+        .take(DISCOVERED)
+        .collect()
+}
+
+fn summarize(path: &Path) -> Option<SessionInfo> {
+    let transcript = fs::read_to_string(path).ok()?;
+    let updated = fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    summary(path.file_stem()?.to_str()?, &transcript, updated)
+}
+
+/// What the session list shows of a transcript, or `None` for one not worth continuing: a
+/// headless run, a subagent's, one with no prompt, or one whose folder is gone.
+fn summary(session_id: &str, transcript: &str, updated: u64) -> Option<SessionInfo> {
+    let parse = |line: &str| serde_json::from_str::<Value>(line).ok();
+    let first = transcript
+        .lines()
+        .filter(|line| line.contains("\"entrypoint\""))
+        .find_map(parse)?;
+    let entrypoint = first.get("entrypoint")?.as_str()?;
+    if entrypoint.starts_with("sdk") || flag(&first, "isSidechain") {
+        return None;
+    }
+    let last = |kind: &str, key: &str| {
+        transcript
+            .lines()
+            .rev()
+            .filter(|line| line.contains(kind))
+            .filter_map(parse)
+            .find(|v| v.get("type").and_then(Value::as_str) == Some(kind))
+            .and_then(|v| v.get(key)?.as_str().map(str::to_owned))
+    };
+    let title = last("custom-title", "customTitle")
+        .or_else(|| last("ai-title", "aiTitle"))
+        .or_else(|| first_prompt(transcript))?;
+    // A session that entered a worktree records where it went, and continues there.
+    let cwd = transcript
+        .lines()
+        .rev()
+        .filter(|line| line.contains("\"cwd\"") || line.contains("\"relocatedCwd\""))
+        .filter_map(parse)
+        .find_map(|v| {
+            let cwd = v.get("relocatedCwd").or_else(|| v.get("cwd"))?;
+            cwd.as_str().map(str::to_owned)
+        })?;
+    if !Path::new(&cwd).is_dir() {
+        return None;
+    }
+    Some(SessionInfo {
+        session_id: session_id.to_string(),
+        title,
+        cwd,
+        source: match entrypoint {
+            "claude-desktop" => "Claude Desktop",
+            "cli" => "Claude Code",
+            other => other,
+        }
+        .to_string(),
+        updated,
+    })
+}
+
+/// The first thing the user typed, as a title.
+fn first_prompt(transcript: &str) -> Option<String> {
+    transcript
+        .lines()
+        .filter(|line| line.contains("\"user\""))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("user") && !flag(v, "isMeta"))
+        .find_map(|v| {
+            let text = match v.pointer("/message/content")? {
+                Value::String(text) => text.as_str(),
+                Value::Array(blocks) => blocks.iter().find_map(|b| b.get("text")?.as_str())?,
+                _ => return None,
+            }
+            .trim();
+            // Command echoes and caveats are wrapped in tags; a prompt is not.
+            (!text.is_empty() && !text.starts_with('<')).then(|| title_from_prompt(text))
+        })
+}
+
+/// A session that moved into a worktree leaves a copy behind; the newest is the one in use.
 fn find_transcript(session_id: &str) -> Option<PathBuf> {
     let projects = claude_projects_dir()?;
     let target = format!("{session_id}.jsonl");
-    for entry in fs::read_dir(&projects).ok()?.flatten() {
-        let dir = entry.path();
-        if dir.is_dir() {
-            let file = dir.join(&target);
-            if file.is_file() {
-                return Some(file);
-            }
-        }
-    }
-    None
+    fs::read_dir(&projects)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join(&target))
+        .filter_map(|file| Some((fs::metadata(&file).ok()?.modified().ok()?, file)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, file)| file)
 }
 
 fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
@@ -482,6 +642,7 @@ mod tests {
             archived: false,
             always_allowed: Vec::new(),
             session_id: None,
+            imported_from: None,
             overrides,
             context: ContextUsage::default(),
             created: 0,
@@ -514,5 +675,87 @@ mod tests {
             "its own choice stays"
         );
         assert_eq!(own.overrides.profile, Some(Profile::FullAuto));
+    }
+
+    fn line(v: Value) -> String {
+        v.to_string() + "\n"
+    }
+
+    fn prompt(cwd: &str, entrypoint: &str, content: Value) -> String {
+        line(serde_json::json!({
+            "type": "user", "cwd": cwd, "entrypoint": entrypoint, "isSidechain": false,
+            "message": { "role": "user", "content": content },
+        }))
+    }
+
+    #[test]
+    fn a_session_continues_where_it_moved_under_the_title_it_was_given() {
+        let (start, worktree) = (std::env::temp_dir(), env!("CARGO_MANIFEST_DIR"));
+        let start = start.to_str().unwrap();
+        let transcript = [
+            prompt(start, "claude-desktop", "fix the build".into()),
+            line(serde_json::json!({ "type": "ai-title", "aiTitle": "Build fix" })),
+            line(serde_json::json!({ "type": "custom-title", "customTitle": "Old name" })),
+            line(serde_json::json!({ "type": "custom-title", "customTitle": "CI repair" })),
+            line(serde_json::json!({ "type": "relocated", "relocatedCwd": worktree })),
+        ]
+        .concat();
+        let session = summary("s", &transcript, 7).expect("listed");
+        assert_eq!(session.title, "CI repair");
+        assert_eq!(session.cwd, worktree);
+        assert_eq!(session.source, "Claude Desktop");
+        assert_eq!(session.updated, 7);
+    }
+
+    #[test]
+    fn an_untitled_session_is_named_after_what_was_typed() {
+        let cwd = std::env::temp_dir();
+        let cwd = cwd.to_str().unwrap();
+        let transcript = [
+            prompt(cwd, "cli", "<command-name>/model</command-name>".into()),
+            prompt(
+                cwd,
+                "cli",
+                serde_json::json!([{ "type": "text", "text": "why is CI red" }]),
+            ),
+        ]
+        .concat();
+        assert_eq!(summary("s", &transcript, 0).unwrap().title, "why is CI red");
+    }
+
+    #[test]
+    fn headless_runs_and_sessions_whose_folder_is_gone_are_not_listed() {
+        let cwd = std::env::temp_dir();
+        let headless = prompt(cwd.to_str().unwrap(), "sdk-cli", "hi".into());
+        assert!(summary("s", &headless, 0).is_none());
+        let gone = prompt("/no/such/folder", "cli", "hi".into());
+        assert!(summary("s", &gone, 0).is_none());
+    }
+
+    #[test]
+    fn an_imported_session_is_claudos_once_a_turn_forks_it() {
+        let mut imported = ConversationMeta {
+            id: "c".to_string(),
+            title: String::new(),
+            cwd: PathBuf::new(),
+            attached: true,
+            renamed: false,
+            archived: false,
+            always_allowed: Vec::new(),
+            session_id: Some("desktop".to_string()),
+            imported_from: Some("desktop".to_string()),
+            overrides: Overrides::default(),
+            context: ContextUsage::default(),
+            created: 0,
+            updated: 0,
+        };
+        assert!(imported.borrowed());
+        imported.session_id = Some("fork".to_string());
+        assert!(!imported.borrowed());
+        let store = Store {
+            conversations: vec![imported],
+            version: STORE_VERSION,
+        };
+        assert!(store.session_ids().contains("desktop"), "not offered again");
     }
 }

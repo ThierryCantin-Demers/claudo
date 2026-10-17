@@ -46,6 +46,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 ## Features
 
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.
+- Continue a session started in Claude Desktop or a terminal (COSMIC: right-click New chat; egui: Sessions…). Its first message forks it, so the original stays as it was.
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.

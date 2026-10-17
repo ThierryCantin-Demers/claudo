@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use claudo_protocol::{
     Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides, Profile,
-    ServerEvent, Settings, SystemStatus, ToolCall,
+    ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -59,6 +59,8 @@ enum Action {
     None,
     Open(String),
     NewScratch,
+    ShowSessions,
+    Import(String),
     /// Native only; the browser can't pick the daemon's server-side folders.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     PickFolder,
@@ -80,6 +82,9 @@ struct ClaudoApp {
     /// Current conversation's per-field overrides (each falls back to `settings`).
     overrides: Overrides,
     show_settings: bool,
+    show_sessions: bool,
+    /// What the sessions window lists; `None` while they are being found.
+    sessions: Option<Vec<SessionInfo>>,
     streaming: bool,
     /// Index of the assistant text item currently being filled by deltas.
     assistant_idx: Option<usize>,
@@ -111,6 +116,8 @@ impl ClaudoApp {
             models: Vec::new(),
             overrides: Overrides::default(),
             show_settings: false,
+            show_sessions: false,
+            sessions: None,
             streaming: false,
             assistant_idx: None,
             reveal: 0.0,
@@ -276,6 +283,12 @@ impl ClaudoApp {
                 }
 
                 ServerEvent::Created {
+                    conversation_id,
+                    imported: true,
+                    ..
+                } => self.open(conversation_id),
+
+                ServerEvent::Created {
                     conversation_id, ..
                 } => {
                     self.current = Some(conversation_id);
@@ -284,6 +297,8 @@ impl ClaudoApp {
                     self.assistant_idx = None;
                     self.error = None;
                 }
+
+                ServerEvent::Sessions { list } => self.sessions = Some(list),
 
                 ServerEvent::History {
                     conversation_id,
@@ -469,10 +484,23 @@ impl eframe::App for ClaudoApp {
         self.composer(ui);
         self.transcript(ui);
         self.settings_window(ui);
+        self.sessions_window(ui, &mut action);
 
         match action {
             Action::Open(id) => self.open(id),
             Action::NewScratch => self.transport.send(Command::NewScratch { request: 0 }),
+            Action::ShowSessions => {
+                self.sessions = None;
+                self.show_sessions = true;
+                self.transport.send(Command::ListSessions);
+            }
+            Action::Import(session_id) => {
+                self.show_sessions = false;
+                self.transport.send(Command::Import {
+                    session_id,
+                    request: 0,
+                });
+            }
             Action::PickFolder =>
             {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -511,6 +539,13 @@ impl ClaudoApp {
                         .clicked()
                     {
                         *action = Action::PickFolder;
+                    }
+                    if ui
+                        .add_enabled(!streaming, egui::Button::new("Sessions…"))
+                        .on_hover_text("Continue a session started in Claude Desktop or a terminal")
+                        .clicked()
+                    {
+                        *action = Action::ShowSessions;
                     }
                 });
                 ui.separator();
@@ -558,6 +593,49 @@ impl ClaudoApp {
             }
             ui.add_space(4.0);
         });
+    }
+
+    fn sessions_window(&mut self, ui: &mut egui::Ui, action: &mut Action) {
+        let mut open = self.show_sessions;
+        egui::Window::new("Claude Code sessions")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(480.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Started in Claude Desktop or a terminal. One continues here as a copy: \
+                         its first message forks it, and the original stays as it was.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(8.0);
+                match &self.sessions {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(list) if list.is_empty() => {
+                        ui.label("Every Claude Code session already has a conversation here.");
+                    }
+                    Some(list) => {
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| {
+                                for session in list {
+                                    if ui.selectable_label(false, &session.title).clicked() {
+                                        *action = Action::Import(session.session_id.clone());
+                                    }
+                                    let detail = format!("{} · {}", session.source, session.cwd);
+                                    ui.label(egui::RichText::new(detail).weak().small());
+                                    ui.add_space(4.0);
+                                }
+                            });
+                    }
+                }
+            });
+        self.show_sessions = open;
     }
 
     fn settings_window(&mut self, ui: &mut egui::Ui) {

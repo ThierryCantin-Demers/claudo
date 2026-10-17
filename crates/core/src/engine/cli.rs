@@ -228,6 +228,14 @@ pub struct SessionConfig {
     pub effort: Option<String>,
 }
 
+/// The session a new process continues.
+#[derive(Debug, Clone, Copy)]
+pub struct Resume<'a> {
+    pub session_id: &'a str,
+    /// Continue it as a new session, leaving this one as it was for the app it belongs to.
+    pub fork: bool,
+}
+
 /// Where the events of turns the client did not start go, such as one another agent's
 /// message started.
 pub type Incoming = Box<dyn Fn(EngineEvent) + Send + Sync>;
@@ -308,7 +316,7 @@ impl Session {
     /// `name` is how other agents find this one (`ListAgents`) and address it.
     pub fn spawn(
         config: SessionConfig,
-        resume: Option<&str>,
+        resume: Option<Resume>,
         name: &str,
         incoming: Option<Incoming>,
     ) -> io::Result<Self> {
@@ -333,8 +341,11 @@ impl Session {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(sid) = resume {
-            cmd.arg("--resume").arg(sid);
+        if let Some(resume) = resume {
+            cmd.arg("--resume").arg(resume.session_id);
+            if resume.fork {
+                cmd.arg("--fork-session");
+            }
         }
         if let Some(model) = &config.model {
             cmd.arg("--model").arg(model);

@@ -288,6 +288,19 @@ pub struct ConversationInfo {
     pub context: ContextUsage,
 }
 
+/// A Claude Code session claudo has no conversation for, such as one Claude Desktop started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: SessionId,
+    pub title: String,
+    /// The folder it last ran in, where claudo continues it.
+    pub cwd: String,
+    /// The app that started it, such as "Claude Desktop".
+    pub source: String,
+    /// When it was last written, in Unix seconds.
+    pub updated: u64,
+}
+
 /// The model, thinking and permissions new conversations start with. These are concrete
 /// values, so the user isn't guessing what "Default" means.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,6 +371,14 @@ pub enum Command {
         path: String,
         request: u64,
     },
+    /// Answered by `Sessions`.
+    ListSessions,
+    /// Continue a session from `Sessions` as a conversation, answered by `Created`. Its first
+    /// turn forks the session, so the app that started it keeps it as it was.
+    Import {
+        session_id: SessionId,
+        request: u64,
+    },
     SendMessage {
         conversation_id: ConversationId,
         text: String,
@@ -389,10 +410,18 @@ pub enum ServerEvent {
     Conversations {
         list: Vec<ConversationInfo>,
     },
-    /// Answers `NewScratch` or `NewAttached`, after the list that includes it.
+    /// Answers `NewScratch`, `NewAttached` or `Import`, after the list that includes it.
     Created {
         conversation_id: ConversationId,
         request: u64,
+        /// It continues a session that has history: open it like a listed conversation, not
+        /// as a new chat.
+        #[serde(default)]
+        imported: bool,
+    },
+    /// Answers `ListSessions`, newest first.
+    Sessions {
+        list: Vec<SessionInfo>,
     },
     /// Reconstructed history for a conversation the client opened.
     History {

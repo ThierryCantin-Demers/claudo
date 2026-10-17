@@ -149,7 +149,17 @@ types: `user` (content is a plain string for prompts, or an array containing `to
 `assistant` (blocks `thinking`, `tool_use`, `text`), `ai-title`. Ignore the rest.
 
 Use `--resume <session-id>` for continuation. `--continue` with `-p` can silently start a
-new session.
+new session. `--resume` finds a session from any folder.
+
+**Sessions other apps started.** Claude Desktop's Code sessions and terminal ones are
+transcripts in the same place, told apart by `entrypoint` (`claude-desktop`, `cli`; every
+`-p` run, claudo's own included, is `sdk-cli`). They also carry `custom-title` (a title the
+user gave) and `relocated` (`relocatedCwd`, the worktree the session moved into); a session
+that moved leaves a copy of its transcript behind, so the newest `<session-id>.jsonl` is the
+live one. claudo continues one with `--resume <id> --fork-session`, which copies the history
+into a new session under the new process's folder and leaves the original untouched; until
+that first turn the conversation's `session_id` is still the other app's (`imported_from`),
+so nothing may delete it.
 
 **Approvals go through the control protocol on stdin.** Each process starts with
 `--settings '{"permissions":{"ask":[...]}}'` (the `ASK_RULES` in `cli.rs`: `gh pr create`,

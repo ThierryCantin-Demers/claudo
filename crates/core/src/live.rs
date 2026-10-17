@@ -11,7 +11,7 @@ use std::time::Duration;
 use claudo_protocol::{ConversationId, Decision};
 
 use crate::claude_bin;
-use crate::engine::{EngineEvent, Session, SessionConfig};
+use crate::engine::{EngineEvent, Resume, Session, SessionConfig};
 
 /// Events of turns a conversation's process started on its own, such as for another
 /// agent's message, with the conversation they belong to.
@@ -54,7 +54,7 @@ impl LiveSessions {
         &self,
         conversation_id: &str,
         config: SessionConfig,
-        resume: Option<&str>,
+        resume: Option<Resume>,
         name: &str,
         always: &[String],
         prompt: &str,

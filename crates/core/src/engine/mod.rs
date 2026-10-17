@@ -4,4 +4,4 @@
 
 pub mod cli;
 
-pub use cli::{EngineEvent, Session, SessionConfig};
+pub use cli::{EngineEvent, Resume, Session, SessionConfig};

@@ -52,6 +52,7 @@ fn main() {
         if let Some(ServerEvent::Created {
             conversation_id,
             request,
+            ..
         }) = rx.blocking_recv()
         {
             ids.insert(request, conversation_id);

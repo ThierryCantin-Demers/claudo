@@ -1,7 +1,7 @@
 //! Manual smoke test for the M1 engine: run one real turn and print events.
 //! Usage: cargo run -p claudo-core --example turn -- "your prompt"
 
-use claudo_core::engine::{EngineEvent, Session, SessionConfig};
+use claudo_core::engine::{EngineEvent, Resume, Session, SessionConfig};
 use claudo_protocol::Profile;
 use std::path::Path;
 
@@ -37,8 +37,16 @@ fn turn(
         model: None,
         effort: None,
     };
-    let mut session =
-        Session::spawn(config, resume, "claudo turn probe", None).expect("spawn claude");
+    let mut session = Session::spawn(
+        config,
+        resume.map(|session_id| Resume {
+            session_id,
+            fork: false,
+        }),
+        "claudo turn probe",
+        None,
+    )
+    .expect("spawn claude");
     for ev in session.send(prompt).expect("send turn") {
         match ev {
             EngineEvent::Started { session_id: s } => session_id = Some(s),

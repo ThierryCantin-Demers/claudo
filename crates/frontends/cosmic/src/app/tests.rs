@@ -435,6 +435,68 @@ fn snapshots() {
     let x = app.tile_room(main).0 + 560.0;
     let _ = app.update(Message::In(main, Box::new(Message::DropHover(x))));
     Harness::new(app).snapshot("drop-marker");
+
+    let mut app = two_tiles();
+    let _ = app.update(Message::ShowSessions);
+    let home = std::env::var("HOME").unwrap_or_default();
+    app.sessions = Some(vec![
+        session(
+            "Replace QuantLevel with a nested list of scale levels",
+            "Claude Desktop",
+            &format!("{home}/prog/cubek"),
+            now - 3 * 3600,
+        ),
+        session(
+            "nvidia-smi broken after update",
+            "Claude Desktop",
+            &format!(
+                "{home}/.config/Claude/scratch-workspaces/70e96d5e-cde6-4590-aef3-a4258baaa080/scratch-2026-10-04"
+            ),
+            now - 30 * 3600,
+        ),
+        session(
+            "GitHub CLI signature verification error",
+            "Claude Code",
+            &format!("{home}/dotfiles"),
+            now - 9 * 86_400,
+        ),
+    ]);
+    Harness::new(app).snapshot("sessions");
+}
+
+fn session(title: &str, source: &str, cwd: &str, updated: u64) -> SessionInfo {
+    SessionInfo {
+        session_id: title.to_string(),
+        title: title.to_string(),
+        cwd: cwd.to_string(),
+        source: source.to_string(),
+        updated,
+    }
+}
+
+#[test]
+fn a_session_continued_from_the_sessions_page_opens_with_its_history() {
+    let mut app = two_tiles();
+    let _ = app.update(Message::ShowSessions);
+    assert_eq!(app.layout().page, Page::Sessions);
+    assert!(app.sessions.is_none(), "found anew each time");
+    let _ = app.update(Message::Events(vec![ServerEvent::Sessions {
+        list: vec![session("Quantization review", "Claude Desktop", "/tmp", 0)],
+    }]));
+    let _ = app.update(Message::Import("Quantization review".to_string()));
+    assert_eq!(app.layout().page, Page::Chat);
+    let charlie = "ccccc333-0000-4000-8000-000000000000";
+    let _ = app.update(Message::Events(vec![ServerEvent::Created {
+        conversation_id: charlie.to_string(),
+        request: app.next_request - 1,
+        imported: true,
+    }]));
+    assert!(
+        app.views[charlie].loading,
+        "its history is on its way, not a new chat"
+    );
+    let main = app.main_window();
+    assert_eq!(app.focused(main).map(String::as_str), Some(charlie));
 }
 
 #[test]

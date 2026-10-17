@@ -25,7 +25,8 @@ fn main() -> cosmic::iced::Result {
 mod app {
     use claudo_protocol::{
         CliCommand, Command, Compaction, ConversationId, ConversationInfo, Decision, Effort, Item,
-        ModelOption, Overrides, Profile, Quota, ServerEvent, Settings, SystemStatus, ToolCall,
+        ModelOption, Overrides, Profile, Quota, ServerEvent, SessionId, SessionInfo, Settings,
+        SystemStatus, ToolCall,
     };
     use claudo_transport::{Commands, spawn_backend};
 
@@ -631,12 +632,15 @@ mod app {
         blurred: bool,
         /// The slash commands the CLI offers, for the message box's `/` menu.
         cli_commands: Vec<CliCommand>,
+        /// What the sessions page lists; `None` while they are being found.
+        sessions: Option<Vec<SessionInfo>>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Page {
         Chat,
         Settings,
+        Sessions,
     }
 
     /// Where the window was left, restored on the next launch.
@@ -839,6 +843,10 @@ mod app {
         NewChat(Placement),
         /// A new chat in a new window.
         NewWindow,
+        /// The page of Claude Code sessions to continue, found anew.
+        ShowSessions,
+        /// Continue a Claude Code session in the focused tile.
+        Import(SessionId),
         /// The dragged tile left its window.
         TileAway,
         /// Another window, or this one, took the tile that left.
@@ -1429,10 +1437,16 @@ mod app {
         }
 
         fn new_conversation(&mut self, placement: Placement) {
+            let request = self.request(placement);
+            self.cmd(Command::NewScratch { request });
+        }
+
+        /// An id for a conversation the backend will create, which goes where `placement` says.
+        fn request(&mut self, placement: Placement) -> u64 {
             let request = self.next_request;
             self.next_request += 1;
             self.pending.insert(request, (self.current, placement));
-            self.cmd(Command::NewScratch { request });
+            request
         }
 
         /// Reopen every window's tiles. A window whose conversations are all gone closes;
@@ -1750,16 +1764,22 @@ mod app {
                 ServerEvent::Created {
                     conversation_id,
                     request,
+                    imported,
                 } => {
                     let (w, placement) = self
                         .pending
                         .remove(&request)
                         .unwrap_or((self.current, Placement::Focused));
-                    self.views
-                        .insert(conversation_id.clone(), ConversationView::new(""));
                     self.current = w;
-                    self.place(conversation_id, placement);
+                    if imported {
+                        self.open(conversation_id, placement);
+                    } else {
+                        self.views
+                            .insert(conversation_id.clone(), ConversationView::new(""));
+                        self.place(conversation_id, placement);
+                    }
                 }
+                ServerEvent::Sessions { list } => self.sessions = Some(list),
                 ServerEvent::Error {
                     conversation_id: None,
                     detail,
@@ -2006,6 +2026,7 @@ mod app {
                 Some(vec![
                     menu_item("New chat in new tile", Message::NewChat(Placement::Right)),
                     menu_item("New chat in new window", Message::NewWindow),
+                    menu_item("Continue a Claude Code session…", Message::ShowSessions),
                 ]),
             )
             .window_id(w)
@@ -3586,7 +3607,11 @@ mod app {
                 windows: HashMap::from([(
                     main,
                     WindowLayout {
-                        page: ui.page,
+                        // The sessions page lists what was found when it opened.
+                        page: match ui.page {
+                            Page::Sessions => Page::Chat,
+                            page => page,
+                        },
                         sidebar_open: ui.sidebar_open,
                         sidebar_width: ui.sidebar_width,
                         commands_open: ui.commands_open,
@@ -3615,6 +3640,7 @@ mod app {
                 carried_scroll: HashMap::new(),
                 blurred: false,
                 cli_commands: Vec::new(),
+                sessions: None,
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -3839,6 +3865,19 @@ mod app {
                 Message::NewChat(placement) => {
                     self.layout_mut().page = Page::Chat;
                     self.new_conversation(placement);
+                }
+                Message::ShowSessions => {
+                    self.sessions = None;
+                    self.layout_mut().page = Page::Sessions;
+                    self.cmd(Command::ListSessions);
+                }
+                Message::Import(session_id) => {
+                    self.layout_mut().page = Page::Chat;
+                    let request = self.request(Placement::Focused);
+                    self.cmd(Command::Import {
+                        session_id,
+                        request,
+                    });
                 }
                 Message::NewWindow => {
                     let current = self.layout();
@@ -4346,6 +4385,7 @@ mod app {
             let layout = self.window(w);
             let title: Option<Element<Message>> = match layout.page {
                 Page::Settings => Some(widget::text::heading("Settings").into()),
+                Page::Sessions => Some(widget::text::heading("Claude Code sessions").into()),
                 Page::Chat if layout.tiles.len() == 1 => self.focused(w).map(|id| {
                     if self.renaming(id, TitleAt::Header) {
                         self.rename_input(Length::Fixed(360.0))
@@ -4369,6 +4409,7 @@ mod app {
             let main = match layout.page {
                 Page::Chat => self.tiles(w),
                 Page::Settings => self.settings_page(),
+                Page::Sessions => self.sessions_page(),
             };
             let mut columns = Vec::new();
             if layout.sidebar_open {
@@ -4587,6 +4628,7 @@ mod app {
     mod compaction;
     mod frozen;
     mod selectable;
+    mod sessions;
     mod slash;
     #[cfg(test)]
     mod tests;
