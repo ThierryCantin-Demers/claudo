@@ -123,7 +123,7 @@ pub struct QuotaWindow {
 }
 
 /// Context usage for the last turn of a conversation, reported by the CLI.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
     /// Tokens in the last request's context (input + cache read/creation).
     pub used: u64,
@@ -317,7 +317,7 @@ pub enum Decision {
 
 /// A conversation's own model, thinking and permissions, copied from `Settings` when it is
 /// created, so changing the defaults leaves it as it is. A `None` field follows `Settings`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overrides {
     #[serde(default)]
     pub model: Option<String>,

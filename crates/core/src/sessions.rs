@@ -46,7 +46,7 @@ pub(crate) fn now_secs() -> u64 {
 
 /// One conversation in claudo's index. Message history is not stored here; it is
 /// read from Claude Code's transcript on demand.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationMeta {
     pub id: String,
     pub title: String,
@@ -95,6 +95,10 @@ pub struct Store {
     /// Conversations deleted here, which a save must not take back from the file.
     #[serde(skip)]
     removed: HashSet<String>,
+    /// The list as this claudo last read or wrote it, which tells its own changes from
+    /// another's.
+    #[serde(skip)]
+    synced: Vec<ConversationMeta>,
 }
 
 /// 1: conversations that followed the defaults keep them as they were, now that the
@@ -109,8 +113,11 @@ impl Store {
     pub fn load() -> Self {
         // An unreadable file is left alone rather than migrated over.
         let (mut store, readable): (Self, bool) = match fs::read_to_string(Self::path()) {
-            Ok(s) => match serde_json::from_str(&s) {
-                Ok(store) => (store, true),
+            Ok(s) => match serde_json::from_str::<Self>(&s) {
+                Ok(mut store) => {
+                    store.synced = store.conversations.clone();
+                    (store, true)
+                }
                 Err(_) => (Self::default(), false),
             },
             Err(_) => (Self::default(), true),
@@ -195,8 +202,8 @@ impl Store {
         }
     }
 
-    /// Write the list, keeping what another claudo added to the file since: each writes the
-    /// whole list, so neither may drop the other's conversations.
+    /// Write the list, keeping what another claudo wrote to the file since: each writes the
+    /// whole list, so neither may drop or undo the other's changes.
     pub fn save(&mut self) {
         let path = Self::path();
         if let Some(on_disk) = fs::read_to_string(&path)
@@ -208,15 +215,25 @@ impl Store {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, json);
+        if let Ok(json) = serde_json::to_string_pretty(self)
+            && fs::write(path, json).is_ok()
+        {
+            self.synced = self.conversations.clone();
         }
     }
 
+    /// Take in the conversations another claudo added, and its version of those this one
+    /// left as they were synced.
     fn adopt(&mut self, conversations: Vec<ConversationMeta>) {
         for c in conversations {
-            if self.get(&c.id).is_none() && !self.removed.contains(&c.id) {
-                self.conversations.push(c);
+            if self.removed.contains(&c.id) {
+                continue;
+            }
+            let synced = self.synced.iter().find(|s| s.id == c.id);
+            match self.conversations.iter_mut().find(|mine| mine.id == c.id) {
+                None => self.conversations.push(c),
+                Some(mine) if synced == Some(&*mine) => *mine = c,
+                Some(_) => {}
             }
         }
     }
@@ -1137,6 +1154,25 @@ mod tests {
         );
         let ids: Vec<&str> = store.conversations.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["mine", "theirs"]);
+    }
+
+    #[test]
+    fn a_save_takes_in_what_another_claudo_changed_and_keeps_what_this_one_did() {
+        let mut store = Store {
+            conversations: ["compacted here", "untouched here"]
+                .map(scratch_conversation)
+                .to_vec(),
+            ..Store::default()
+        };
+        store.synced = store.conversations.clone();
+        store.conversations[0].context.used = 8_690;
+        let mut theirs = store.synced.clone();
+        for c in &mut theirs {
+            c.context.used = 544_848;
+        }
+        store.adopt(theirs);
+        let used: Vec<u64> = store.conversations.iter().map(|c| c.context.used).collect();
+        assert_eq!(used, [8_690, 544_848]);
     }
 
     #[test]
