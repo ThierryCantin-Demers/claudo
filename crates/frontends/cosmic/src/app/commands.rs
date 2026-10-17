@@ -307,20 +307,40 @@ impl ClaudoApp {
                 .into(),
             );
         }
-        for (label, calls) in [("Running", running), ("Finished", done)] {
-            if calls.is_empty() {
-                continue;
-            }
+        let row = |(idx, call)| self.panel_row(id, view, idx, call, texts, size);
+        if !running.is_empty() {
             rows.push(
-                widget::container(widget::text(label).size(size * 0.85).class(dim()))
+                widget::container(widget::text("Running").size(size * 0.85).class(dim()))
                     .padding([6, 0, 0, 26])
                     .into(),
             );
-            rows.extend(
-                calls
-                    .into_iter()
-                    .map(|(idx, call)| self.panel_row(id, view, idx, call, texts, size)),
-            );
+            rows.extend(running.into_iter().map(row));
+        }
+        if !done.is_empty() {
+            let folded = view.finished_collapsed;
+            let chevron = if folded {
+                "go-next-symbolic"
+            } else {
+                "go-down-symbolic"
+            };
+            let heading = widget::button::custom(
+                widget::Row::with_children(vec![
+                    widget::icon::from_name(chevron).size(14).into(),
+                    widget::text(format!("Finished ({})", done.len()))
+                        .size(size * 0.85)
+                        .class(dim())
+                        .into(),
+                ])
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::ToggleFinished(id.clone()))
+            .class(cosmic::theme::Button::Text)
+            .padding([2, 4]);
+            rows.push(widget::container(heading).padding([4, 0, 0, 18]).into());
+            if !folded {
+                rows.extend(done.into_iter().map(row));
+            }
         }
         widget::Column::with_children(rows).spacing(4).into()
     }

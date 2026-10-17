@@ -383,6 +383,12 @@ fn snapshots() {
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
     Harness::new(app).snapshot("commands");
 
+    let mut app = with_commands();
+    app.layout_mut().sidebar_open = false;
+    let _ = app.update(Message::ShowCommands(true));
+    let _ = app.update(Message::ToggleFinished(ALPHA.to_string()));
+    Harness::new(app).snapshot("commands-finished-folded");
+
     let mut app = two_tiles();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -951,6 +957,8 @@ fn the_commands_panel_lists_every_agent() {
 
     let _ = app.update(Message::ToggleCommandGroup(BRAVO.to_string()));
     assert!(app.views[BRAVO].commands_collapsed);
+    let _ = app.update(Message::ToggleFinished(ALPHA.to_string()));
+    assert!(app.views[ALPHA].finished_collapsed);
 
     app.layout_mut().tiles.retain(|t| t.conversation == ALPHA);
     assert_eq!(
