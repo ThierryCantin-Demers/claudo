@@ -323,6 +323,8 @@ impl Backend {
             conversation_id,
             session_id,
         );
+        // A forked command's `init` comes only once it ends, so the turn starts when it is sent.
+        forward.started = Some(crate::sessions::now_secs());
         std::thread::spawn(move || {
             for ev in turn {
                 forward.event(ev);

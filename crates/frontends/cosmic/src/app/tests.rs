@@ -479,7 +479,9 @@ fn a_file_attached_above_the_message_box_keeps_the_box_working() {
     let mut h = Harness::new(two_tiles());
     h.move_to(560.0, 400.0);
     let image = claudo_protocol::Attachment::new("pasted.png".to_string(), "image/png", &[1, 2, 3]);
-    let _ = h.app.update(Message::Attach(ALPHA.to_string(), Ok(vec![image])));
+    let _ = h
+        .app
+        .update(Message::Attach(ALPHA.to_string(), Ok(vec![image])));
     h.move_to(561.0, 400.0);
     h.send(vec![typed('a')]);
     let _ = h.app.update(Message::Detach(ALPHA.to_string(), 0));

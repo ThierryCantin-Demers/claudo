@@ -169,6 +169,15 @@ into a new session under the new process's folder and leaves the original untouc
 that first turn the conversation's `session_id` is still the other app's (`imported_from`),
 so nothing may delete it.
 
+**A forked slash command streams nothing while it runs.** A skill with `context: fork`, such
+as `/code-review`, starts with `system` / `task_started` (`task_type: "local_agent"`, no
+`tool_use_id`) and ends with `task_notification`; only then does the CLI replay the
+subagent's messages (`parent_tool_use_id: "forked-command-<name>"`), send the turn's `init`
+and its `result`. The subagent writes its transcript live to
+`<session-id>/subagents/agent-<task_id>.jsonl`, which the engine follows for the calls in
+the meantime, dropping the replayed ones by call id. The main transcript keeps only the
+prompt and a `system` / `local_command` line with the result.
+
 **Approvals go through the control protocol on stdin.** Each process starts with
 `--settings '{"permissions":{"ask":[...]}}'` (the `ASK_RULES` in `cli.rs`: `gh pr create`,
 `gh issue create` and GitHub MCP's create tools) and `--permission-prompt-tool stdio`. The CLI

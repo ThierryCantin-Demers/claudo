@@ -5,9 +5,11 @@
 //! This is the seam that isolates CLI/stream-json specifics from the rest of the app.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -285,6 +287,8 @@ struct Shared {
     approvals: Mutex<HashMap<String, Pending>>,
     /// Scopes the user allowed always; their calls are allowed without asking.
     always: Mutex<HashSet<String>>,
+    /// Calls of the running turn already shown, which a forked command's replay repeats.
+    shown: Mutex<HashSet<String>>,
 }
 
 struct Pending {
@@ -390,6 +394,7 @@ impl Session {
             last_activity: Mutex::new(Instant::now()),
             approvals: Mutex::default(),
             always: Mutex::default(),
+            shown: Mutex::default(),
         });
         // Without it the process joins the other agents only once its first turn ends.
         shared.write(&json!({
@@ -409,11 +414,21 @@ impl Session {
             // A turn's `result` sums the usage of every request it made; its context is the
             // last request's.
             let mut last_request = 0;
+            let mut following: HashMap<String, Arc<AtomicBool>> = HashMap::new();
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 reader.touch();
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
+                if let Some((task, session)) = forked_task(&v) {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    following.insert(task.clone(), stop.clone());
+                    let shared = reader.clone();
+                    thread::spawn(move || follow_subagent(&shared, &session, &task, &stop));
+                }
+                if let Some(stop) = ended_task(&v).and_then(|task| following.remove(task)) {
+                    stop.store(true, Ordering::Relaxed);
+                }
                 if let Some(context) = request_context(&v) {
                     last_request = context;
                 }
@@ -466,8 +481,14 @@ impl Session {
                     None => decode(&v),
                 };
                 for mut ev in events {
+                    if let EngineEvent::ToolStarted(call) = &ev
+                        && !reader.first_shown(&call.call_id)
+                    {
+                        continue;
+                    }
                     if let EngineEvent::Completed { context, .. } = &mut ev {
                         context.used = std::mem::take(&mut last_request);
+                        reader.shown.lock().unwrap().clear();
                     }
                     let completed = matches!(ev, EngineEvent::Completed { .. });
                     let mut turns = reader.turns.lock().unwrap();
@@ -500,6 +521,9 @@ impl Session {
                 }
             }
 
+            for stop in following.values() {
+                stop.store(true, Ordering::Relaxed);
+            }
             let status = child.wait();
             let err = stderr.join().unwrap_or_default();
             let mut turns = reader.turns.lock().unwrap();
@@ -666,6 +690,11 @@ impl Drop for Session {
 impl Shared {
     fn touch(&self) {
         *self.last_activity.lock().unwrap() = Instant::now();
+    }
+
+    /// Whether a call is new to the running turn, marking it shown.
+    fn first_shown(&self, call_id: &str) -> bool {
+        self.shown.lock().unwrap().insert(call_id.to_string())
     }
 
     fn route(&self, turns: &Turns, ev: EngineEvent) {
@@ -1077,6 +1106,83 @@ fn background_task(v: &Value) -> Option<EngineEvent> {
     })
 }
 
+/// A forked slash command's subagent, by task and session id: the CLI sends its calls only
+/// once it ends, so they are followed from its transcript until then.
+fn forked_task(v: &Value) -> Option<(String, String)> {
+    let field = |key| v.get(key).and_then(Value::as_str);
+    let foreground = v.get("is_backgrounded").and_then(Value::as_bool) != Some(true);
+    // An Agent call's subagent names the call; a forked command's has none.
+    let command = field("tool_use_id").is_none();
+    (field("subtype")? == "task_started"
+        && field("task_type")? == "local_agent"
+        && foreground
+        && command)
+        .then(|| {
+            Some((
+                field("task_id")?.to_string(),
+                field("session_id")?.to_string(),
+            ))
+        })
+        .flatten()
+}
+
+fn ended_task(v: &Value) -> Option<&str> {
+    (v.get("subtype").and_then(Value::as_str)? == "task_notification")
+        .then(|| v.get("task_id").and_then(Value::as_str))
+        .flatten()
+}
+
+const FOLLOW_TICK: Duration = Duration::from_millis(250);
+
+/// Sends a subagent's calls to the running turn as its transcript records them, until `stop`.
+fn follow_subagent(shared: &Shared, session: &str, task: &str, stop: &AtomicBool) {
+    let name = format!("{session}/subagents/agent-{task}.jsonl");
+    let mut transcript: Option<BufReader<File>> = None;
+    let mut line = String::new();
+    loop {
+        let stopping = stop.load(Ordering::Relaxed);
+        if transcript.is_none() {
+            transcript = subagent_transcript(&name)
+                .and_then(|path| File::open(path).ok())
+                .map(BufReader::new);
+        }
+        // A line still being written stays in `line` until its newline arrives.
+        while let Some(reader) = &mut transcript
+            && matches!(reader.read_line(&mut line), Ok(n) if n > 0)
+            && line.ends_with('\n')
+        {
+            let events = serde_json::from_str::<Value>(&line)
+                .map(|v| decode(&v))
+                .unwrap_or_default();
+            line.clear();
+            for ev in events {
+                let shown = match &ev {
+                    EngineEvent::ToolStarted(call) => shared.first_shown(&call.call_id),
+                    EngineEvent::ToolResult { .. } => true,
+                    _ => false,
+                };
+                if shown {
+                    let turns = shared.turns.lock().unwrap();
+                    shared.route(&turns, ev);
+                }
+            }
+        }
+        if stopping {
+            return;
+        }
+        thread::sleep(FOLLOW_TICK);
+    }
+}
+
+fn subagent_transcript(name: &str) -> Option<PathBuf> {
+    let projects = PathBuf::from(std::env::var_os("HOME")?).join(".claude/projects");
+    std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|project| project.path().join(name))
+        .find(|path| path.is_file())
+}
+
 /// A background task's end, from the message the CLI gives the model when one ends, which
 /// the transcript keeps as a user prompt.
 pub(crate) struct TaskEnd {
@@ -1327,6 +1433,23 @@ mod tests {
             attachment(&attachment_block(&image)).unwrap().media_type,
             "image/png"
         );
+    }
+
+    #[test]
+    fn a_forked_commands_subagent_is_followed_and_an_agent_calls_is_not() {
+        let forked = line(
+            r#"{"type":"system","subtype":"task_started","task_id":"a86","session_id":"s1","task_type":"local_agent","is_backgrounded":false}"#,
+        );
+        assert_eq!(
+            forked_task(&forked),
+            Some(("a86".to_string(), "s1".to_string()))
+        );
+        let agent = line(
+            r#"{"type":"system","subtype":"task_started","task_id":"a87","session_id":"s1","task_type":"local_agent","is_backgrounded":false,"tool_use_id":"t9"}"#,
+        );
+        assert_eq!(forked_task(&agent), None);
+        let ended = line(r#"{"type":"system","subtype":"task_notification","task_id":"a86"}"#);
+        assert_eq!(ended_task(&ended), Some("a86"));
     }
 
     #[test]

@@ -497,6 +497,17 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                         .map(Item::Compacted),
                 );
             }
+            // A local command and what it printed, a forked skill's result among them.
+            Some("system") if v.get("subtype").and_then(Value::as_str) == Some("local_command") => {
+                let text = v.get("content").and_then(Value::as_str).unwrap_or("");
+                if let Some(command) = command_echo(text) {
+                    items.push(Item::User(command));
+                } else if let Some(output) = command_output(text)
+                    && !output.is_empty()
+                {
+                    items.push(Item::Assistant(output.to_string()));
+                }
+            }
             // What Claude Code tells the model around a slash command, not the user's words.
             Some("user") if flag(&v, "isMeta") => {}
             Some("user") if flag(&v, "isCompactSummary") => {
@@ -605,7 +616,8 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
         } else if let Some(turn) = &mut turn
             // Only a reply moves a turn's end: the lines between turns, such as a queued
             // message's, are written when the next one starts.
-            && kind == Some("assistant")
+            && (kind == Some("assistant")
+                || items[pushed..].iter().any(|item| matches!(item, Item::Assistant(_))))
         {
             turn.ended = at;
         }
@@ -782,6 +794,10 @@ mod tests {
             )
         };
         let queued = line(serde_json::json!({ "type": "queue-operation", "timestamp": at(700) }));
+        let forked = line(serde_json::json!({
+            "type": "system", "subtype": "local_command", "timestamp": at(900),
+            "content": "<local-command-stdout>14 findings</local-command-stdout>",
+        }));
         let transcript = [
             prompt(0, "one"),
             reply(5),
@@ -789,6 +805,7 @@ mod tests {
             queued,
             prompt(800, "two"),
             reply(830),
+            forked,
         ]
         .concat();
         let path = std::env::temp_dir().join(format!("claudo-turns-{}.jsonl", Uuid::new_v4()));
@@ -803,7 +820,13 @@ mod tests {
             })
             .collect();
         let base = unix_seconds(&at(0)).unwrap();
-        assert_eq!(ended, [(base, base + 70), (base + 800, base + 830)]);
+        assert_eq!(ended, [(base, base + 70), (base + 800, base + 900)]);
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::Assistant(t) if t == "14 findings")),
+            "a forked skill's result is its reply"
+        );
         assert!(
             matches!(items[3], Item::Ended(_)),
             "between the first turn and the second"
