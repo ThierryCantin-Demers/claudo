@@ -480,6 +480,15 @@ fn snapshots() {
     app.views
         .insert(BRAVO.to_string(), ConversationView::new(""));
     Harness::new(app).snapshot("folders");
+
+    let mut app = with_runs(6, 3);
+    let view = app.views.get_mut(ALPHA).unwrap();
+    view.queued.push((
+        "Also run the tests once you are done".to_string(),
+        Vec::new(),
+    ));
+    view.draft = text_editor::Content::with_text("and the docs");
+    Harness::new(app).snapshot("queued");
 }
 
 /// Alpha with a finished run of `done` calls, then a running one whose last call is going.
@@ -1590,5 +1599,45 @@ fn streaming_frame_cost() {
         per(view_t),
         per(build_t),
         per(draw_t)
+    );
+}
+
+#[test]
+fn a_message_sent_while_claude_works_waits_then_lands_where_claude_took_it() {
+    let mut app = two_tiles();
+    let send = |app: &mut ClaudoApp, text: &str| {
+        app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text(text);
+        let _ = app.update(Message::Send(ALPHA.to_string()));
+    };
+    app.views.get_mut(ALPHA).unwrap().streaming = true;
+    let before = app.views[ALPHA].items.len();
+    send(&mut app, "also check the tests");
+    assert_eq!(
+        app.views[ALPHA].items.len(),
+        before,
+        "not in the transcript yet"
+    );
+    assert_eq!(app.views[ALPHA].queued.len(), 1);
+
+    let alpha = || ALPHA.to_string();
+    let _ = app.update(Message::Events(vec![ServerEvent::Delivered {
+        conversation_id: alpha(),
+    }]));
+    let view = &app.views[ALPHA];
+    assert!(view.queued.is_empty());
+    assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "also check the tests"));
+    assert!(view.streaming);
+
+    send(&mut app, "one more");
+    let _ = app.update(Message::Events(vec![ServerEvent::Error {
+        conversation_id: Some(alpha()),
+        detail: "claude exited".to_string(),
+    }]));
+    let view = &app.views[ALPHA];
+    assert!(view.queued.is_empty());
+    assert_eq!(
+        view.draft.text().trim(),
+        "one more",
+        "back in the message box"
     );
 }

@@ -268,6 +268,12 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
   turns itself, for another agent's message, and queues the client's messages behind
   them; those turns go to the `incoming` callback given at spawn, which the backend
   forwards like any other, starting with `Incoming`.
+- **A message sent mid-turn joins it.** The CLI reports it `queued`, then at the turn's
+  next tool result replays it and reports it `started` while the turn still runs; both
+  messages end with that turn's one `result`. With no step left, it waits and starts the
+  next turn. Either way the engine sends `Delivered` (`joined` or not), which the
+  frontend uses to move the message from its queue into the transcript. A message sent
+  while busy keeps the running process's flags, since it may join its turn.
 - **A background command's end starts a turn of its own.** The CLI tells the model in
   a turn that echoes no message, so the engine opens it with a `Notice` carrying the
   CLI's summary. The transcript keeps that message as a `<task-notification>` prompt

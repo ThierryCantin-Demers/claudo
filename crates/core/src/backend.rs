@@ -408,6 +408,12 @@ impl Forward {
                 });
                 self.emit(conversations_event(&self.store));
             }
+            EngineEvent::Delivered { joined } => {
+                if !joined {
+                    self.started = Some(crate::sessions::now_secs());
+                }
+                self.emit(ServerEvent::Delivered { conversation_id });
+            }
             EngineEvent::Incoming { from, text } => self.emit(ServerEvent::Incoming {
                 conversation_id,
                 from,

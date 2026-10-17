@@ -205,6 +205,8 @@ mod app {
         retrying: Option<String>,
         /// Files the next message sends.
         attachments: Vec<attach::Shown>,
+        /// Messages sent while a turn runs that Claude has not taken yet, oldest first.
+        queued: Vec<(String, Vec<attach::Shown>)>,
         /// Runs of calls opened, by their first entry.
         groups_open: std::collections::HashSet<usize>,
     }
@@ -232,6 +234,7 @@ mod app {
                 since: None,
                 retrying: None,
                 attachments: Vec::new(),
+                queued: Vec::new(),
                 groups_open: Default::default(),
             }
         }
@@ -307,7 +310,7 @@ mod app {
         }
 
         fn can_send(&self) -> bool {
-            !self.streaming && !(self.draft.text().trim().is_empty() && self.attachments.is_empty())
+            !(self.draft.text().trim().is_empty() && self.attachments.is_empty())
         }
 
         fn push_assistant(&mut self, text: &str) {
@@ -498,7 +501,29 @@ mod app {
                         self.error = Some("Claude reported an error.".to_string());
                     }
                 }
-                ServerEvent::Error { detail, .. } => self.fail(detail),
+                ServerEvent::Delivered { .. } if !self.queued.is_empty() => {
+                    let (text, files) = self.queued.remove(0);
+                    self.finish_reply();
+                    self.error = None;
+                    if !text.is_empty() {
+                        self.items.push(Entry::User(text));
+                    }
+                    self.items.extend(files.into_iter().map(Entry::File));
+                    self.streaming = true;
+                    self.since.get_or_insert_with(std::time::Instant::now);
+                }
+                ServerEvent::Error { detail, .. } => {
+                    // Messages waiting behind a turn that failed never reach Claude.
+                    if !self.queued.is_empty() {
+                        let mut texts: Vec<String> =
+                            self.queued.iter().map(|(text, _)| text.clone()).collect();
+                        texts.push(self.draft.text());
+                        self.draft = text_editor::Content::with_text(texts.join("\n\n").trim());
+                        let files = self.queued.drain(..).flat_map(|(_, files)| files);
+                        self.attachments.extend(files);
+                    }
+                    self.fail(detail);
+                }
                 _ => {}
             }
         }
@@ -1754,19 +1779,20 @@ mod app {
             let Some(view) = self.views.get_mut(&id) else {
                 return;
             };
-            if view.streaming {
-                return;
-            }
-            view.error = None;
-            view.finish_reply();
             let files = std::mem::take(&mut view.attachments);
             let attachments = files.iter().map(|file| file.attachment.clone()).collect();
-            if !text.is_empty() {
-                view.items.push(Entry::User(text.clone()));
+            if view.streaming || !view.queued.is_empty() {
+                view.queued.push((text.clone(), files));
+            } else {
+                view.error = None;
+                view.finish_reply();
+                if !text.is_empty() {
+                    view.items.push(Entry::User(text.clone()));
+                }
+                view.items.extend(files.into_iter().map(Entry::File));
+                view.streaming = true;
+                view.since = Some(std::time::Instant::now());
             }
-            view.items.extend(files.into_iter().map(Entry::File));
-            view.streaming = true;
-            view.since = Some(std::time::Instant::now());
             self.cmd(Command::SendMessage {
                 conversation_id: id.clone(),
                 text,
@@ -1924,6 +1950,9 @@ mod app {
                 | ServerEvent::Completed {
                     ref conversation_id,
                     ..
+                }
+                | ServerEvent::Delivered {
+                    ref conversation_id,
                 }
                 | ServerEvent::Error {
                     conversation_id: Some(ref conversation_id),
@@ -2682,7 +2711,9 @@ mod app {
             let size = 14.0 * self.zoom;
             let (model, effort, profile) = self.effective(id);
             let menu_open = !self.command_matches(view).is_empty();
-            let placeholder = if view.items.is_empty() {
+            let placeholder = if view.streaming {
+                "Message Claude while it works…"
+            } else if view.items.is_empty() {
                 "Message Claude"
             } else {
                 "Reply to Claude…"
@@ -2731,14 +2762,26 @@ mod app {
                     mark(label, *e == effort && effort != defaults.effort)
                 })
                 .collect();
-            let send = if view.streaming {
+            let stop = view.streaming.then(|| {
                 widget::button::icon(widget::icon::from_name("media-playback-stop-symbolic"))
                     .class(cosmic::theme::Button::Standard)
                     .on_press(Message::Stop(id.clone()))
-            } else {
-                widget::button::icon(widget::icon::from_name("go-up-symbolic"))
-                    .class(cosmic::theme::Button::Suggested)
-                    .on_press_maybe(view.can_send().then(|| Message::Send(id.clone())))
+                    .into()
+            });
+            let send = widget::button::icon(widget::icon::from_name("go-up-symbolic"))
+                .class(cosmic::theme::Button::Suggested)
+                .on_press_maybe(view.can_send().then(|| Message::Send(id.clone())));
+            let send: Option<Element<Message>> = match (view.streaming, view.can_send()) {
+                (false, _) => Some(send.into()),
+                (true, true) => Some(
+                    widget::tooltip(
+                        send,
+                        widget::text("Claude reads it at its next step"),
+                        widget::tooltip::Position::Top,
+                    )
+                    .into(),
+                ),
+                (true, false) => None,
             };
             let (on_profile, on_effort, on_model) = (id.clone(), id.clone(), id.clone());
             let profile = widget::dropdown(
@@ -2769,14 +2812,19 @@ mod app {
                 widget::text("Attach files, or paste an image"),
                 widget::tooltip::Position::Top,
             );
-            let controls = widget::Row::with_children(vec![
-                attach.into(),
-                small(profile).into(),
-                small(effort).into(),
-                widget::space::horizontal().into(),
-                small(model).into(),
-                send.into(),
-            ])
+            let controls = widget::Row::with_children(
+                [
+                    attach.into(),
+                    small(profile).into(),
+                    small(effort).into(),
+                    widget::space::horizontal().into(),
+                    small(model).into(),
+                ]
+                .into_iter()
+                .chain(stop)
+                .chain(send)
+                .collect::<Vec<_>>(),
+            )
             .spacing(if compact { 2 } else { 6 })
             .align_y(Alignment::Center);
 
@@ -2915,6 +2963,11 @@ mod app {
             if let Some(label) = view.activity() {
                 rows.push(activity_row(label, self.pulse, size));
             }
+            rows.extend(
+                view.queued
+                    .iter()
+                    .map(|(text, files)| queued(text, files, size, self.zoom)),
+            );
             if let Some(err) = &view.error {
                 rows.push(
                     widget::text(err.as_str())
@@ -3395,7 +3448,34 @@ mod app {
         }
     }
 
-    fn user_bubble<'a>(text: Selectable<'a>, zoom: f32) -> Element<'a, Message> {
+    /// A message sent while Claude works, until Claude takes it.
+    fn queued<'a>(
+        text: &'a str,
+        files: &'a [attach::Shown],
+        size: f32,
+        zoom: f32,
+    ) -> Element<'a, Message> {
+        let bubble = (!text.is_empty())
+            .then(|| user_bubble(widget::text(text).size(size).class(dim()), zoom));
+        let note = widget::container(
+            widget::text("Queued for Claude's next step")
+                .size(size * 0.8)
+                .class(dim()),
+        )
+        .align_right(Length::Fill)
+        .into();
+        widget::Column::with_children(
+            bubble
+                .into_iter()
+                .chain(files.iter().map(|file| attach::sent(file, size, zoom)))
+                .chain([note])
+                .collect::<Vec<_>>(),
+        )
+        .spacing(6)
+        .into()
+    }
+
+    fn user_bubble<'a>(text: impl Into<Element<'a, Message>>, zoom: f32) -> Element<'a, Message> {
         let bubble = widget::container(text)
             .padding([10.0 * zoom, 14.0 * zoom])
             .max_width(BUBBLE_WIDTH * zoom)

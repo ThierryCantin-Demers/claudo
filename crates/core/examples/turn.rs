@@ -53,7 +53,7 @@ fn turn(
             EngineEvent::Delta { text: t } => text.push_str(&t),
             EngineEvent::ThinkingDelta { text: t } => println!("  [thinking: {}]", t.trim()),
             EngineEvent::ToolStarted(call) => println!("  [tool: {}]", call.name),
-            EngineEvent::Quota(_) => {}
+            EngineEvent::Quota(_) | EngineEvent::Delivered { .. } => {}
             EngineEvent::Compacting => println!("  [compacting]"),
             EngineEvent::Retrying { attempt, error, .. } => {
                 println!("  [retrying after {error}, attempt {attempt}]")

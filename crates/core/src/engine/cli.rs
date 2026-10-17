@@ -163,6 +163,12 @@ pub enum EngineEvent {
     Started {
         session_id: String,
     },
+    /// The client's oldest message still waiting reached the model: it started this turn,
+    /// or `joined` the running one, which the CLI hands a message sent mid-turn at its next
+    /// step.
+    Delivered {
+        joined: bool,
+    },
     /// A message from someone other than the client, such as another agent, started this turn.
     Incoming {
         from: String,
@@ -317,15 +323,28 @@ enum Route {
 
 impl Turns {
     fn start(&mut self, message: Option<&str>) {
-        let client = self
-            .queued
-            .iter()
-            .position(|(id, _)| Some(id.as_str()) == message)
-            .and_then(|i| self.queued.remove(i));
-        self.running = Some(match client {
-            Some((_, sink)) => Route::Client(sink),
+        self.running = Some(match self.take(message) {
+            Some(sink) => Route::Client(sink),
             None => Route::Incoming,
         });
+    }
+
+    /// `message` starts its turn, or joins the running one. `Some(joined)` when it is the
+    /// client's.
+    fn begin(&mut self, message: Option<&str>) -> Option<bool> {
+        if self.running.is_some() {
+            return self.take(message).map(|_| true);
+        }
+        self.start(message);
+        matches!(self.running, Some(Route::Client(_))).then_some(false)
+    }
+
+    fn take(&mut self, message: Option<&str>) -> Option<Sender<EngineEvent>> {
+        let i = self
+            .queued
+            .iter()
+            .position(|(id, _)| Some(id.as_str()) == message)?;
+        self.queued.remove(i).map(|(_, sink)| sink)
     }
 }
 
@@ -435,7 +454,9 @@ impl Session {
                 if let Some(message) = started_message(&v) {
                     let mut turns = reader.turns.lock().unwrap();
                     turns.reports_ids = true;
-                    turns.start(message);
+                    if let Some(joined) = turns.begin(message) {
+                        reader.route(&turns, EngineEvent::Delivered { joined });
+                    }
                     notices.clear();
                     continue;
                 }
@@ -1751,5 +1772,28 @@ mod tests {
         turns.start(started_message(&started("b")).unwrap());
         assert!(matches!(turns.running, Some(Route::Client(_))));
         assert_eq!(turns.queued.len(), 1);
+    }
+
+    #[test]
+    fn a_message_started_mid_turn_joins_it() {
+        let mut turns = Turns::default();
+        let (first, first_events) = mpsc::channel();
+        let (second, second_events) = mpsc::channel();
+        turns.queued.push_back(("a".to_string(), first));
+        turns.queued.push_back(("b".to_string(), second));
+
+        assert_eq!(turns.begin(Some("a")), Some(false));
+        assert_eq!(turns.begin(Some("peer")), None);
+        assert_eq!(turns.begin(Some("b")), Some(true));
+        assert!(turns.queued.is_empty());
+        let Some(Route::Client(running)) = &turns.running else {
+            panic!("the first message's turn goes on");
+        };
+        running.send(EngineEvent::Compacting).unwrap();
+        assert!(first_events.try_recv().is_ok());
+        assert!(
+            second_events.recv().is_err(),
+            "the joined message has no turn"
+        );
     }
 }

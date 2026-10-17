@@ -49,6 +49,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Send images, PDFs and text files with a message: COSMIC pastes an image from the clipboard with Ctrl+V and picks files with the paperclip; egui picks files with Attach.
 - Continue a session started in Claude Desktop or a terminal (COSMIC: right-click New chat, Continue a session; egui: Sessions…). Its first message forks it, so the original stays as it was.
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
+- COSMIC: send a message while Claude works. It waits under the reply and reaches Claude at its next step, as in the terminal, or starts the next turn if Claude is already finishing.
 - COSMIC: tool calls made one after another fold into one row ("6 calls · Bash ×6"), which opens to each call; while it runs, its newest call shows below it.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.

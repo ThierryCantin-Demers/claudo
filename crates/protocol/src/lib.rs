@@ -504,6 +504,11 @@ pub enum ServerEvent {
         conversation_id: ConversationId,
         session_id: SessionId,
     },
+    /// The oldest message the client sent that was still waiting reached Claude: it started
+    /// a turn, or joined the running one at its next step.
+    Delivered {
+        conversation_id: ConversationId,
+    },
     /// Another agent's message started a turn the client did not send.
     Incoming {
         conversation_id: ConversationId,

@@ -63,16 +63,15 @@ impl LiveSessions {
         if let Some(session) = sessions.get_mut(conversation_id)
             && session.is_alive()
         {
-            if *session.config() == config
+            // While a turn runs, a message joins it or waits for it, under the flags it has.
+            let busy = session.is_busy();
+            if (busy || *session.config() == config)
                 && let Ok(turn) = session.send(message)
             {
                 return Ok(turn);
             }
-            if session.is_busy() {
-                return Err(
-                    "a turn is running; change the model, thinking or permissions after it ends"
-                        .to_string(),
-                );
+            if busy {
+                return Err("claude stopped taking messages in the middle of a turn".to_string());
             }
         }
 
