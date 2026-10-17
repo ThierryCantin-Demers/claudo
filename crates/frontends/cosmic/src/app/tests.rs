@@ -515,6 +515,12 @@ fn snapshots() {
     ))));
     Harness::new(app).snapshot("furigana");
 
+    let mut app = two_tiles();
+    app.views.get_mut(ALPHA).unwrap().items.push(Entry::Reply(Box::new(Reply::complete(
+        TABLE.to_string(),
+    ))));
+    Harness::new(app).snapshot("table");
+
     let mut app = with_subagent();
     app.layout_mut().sidebar_open = false;
     let _ = app.update(Message::ShowCommands(true));
@@ -644,6 +650,36 @@ fn a_session_continued_from_the_sessions_page_opens_with_its_history() {
     );
     let main = app.main_window();
     assert_eq!(app.focused(main).map(String::as_str), Some(charlie));
+}
+
+const TABLE: &str = "A table:\n\n\
+    | App | How it gets the flags |\n|---|---|\n\
+    | Brave | Your existing Brave launcher script (renamed `28-brave-flags`) adds them beside the \
+      password store setting: menu entries and the shell wrappers. |\n\
+    | VS Code | New script `35-vscode-flags` rebuilds its two menu entries from the system ones \
+      with the flags added. VS Code's `argv.json` refuses these switches. |\n\
+    | Claude Desktop | Its own launcher config file sets `CLAUDE_GTK_IM_MODULE=fcitx`. |\n\n\
+    The end.";
+
+#[test]
+fn a_table_fits_the_reply_and_wraps_its_long_cells() {
+    use cosmic::iced::advanced::layout::Limits;
+    use cosmic::iced::advanced::widget::Tree;
+    let renderer = Harness::new(two_tiles()).renderer;
+    let reply = Reply::complete(TABLE.to_string());
+    let conversation = ALPHA.to_string();
+    let viewer = selectable::Viewer {
+        conversation: &conversation,
+        entry: 0,
+        selection: None,
+        next: std::cell::Cell::new(0),
+    };
+    let mut element = markdown::view_with(reply.markdown.items(), markdown_settings(14.0), &viewer);
+    let mut tree = Tree::new(element.as_widget());
+    let limits = Limits::new(Size::ZERO, Size::new(600.0, f32::INFINITY));
+    let size = element.as_widget_mut().layout(&mut tree, &renderer, &limits).size();
+    assert!(size.width <= 600.0, "{size:?}");
+    assert!(size.height < 300.0, "{size:?}");
 }
 
 #[test]

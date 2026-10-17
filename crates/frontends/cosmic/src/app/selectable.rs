@@ -619,6 +619,52 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
         .class(<Theme as markdown::Catalog>::code_block())
         .into()
     }
+
+    /// Fits the reply's width, its cells wrapping their text: blocks fill the width they are
+    /// given, which iced's table, sized by its cells, leaves at nothing.
+    fn table(
+        &self,
+        settings: markdown::Settings,
+        columns: &'a [markdown::Column],
+        rows: &'a [markdown::Row],
+    ) -> Element<'a, Message> {
+        use cosmic::iced::widget::table;
+        let chars = |cell: &[markdown::Item]| -> usize {
+            cell.iter()
+                .map(|item| match item {
+                    markdown::Item::Paragraph(text) | markdown::Item::Heading(_, text) => text
+                        .spans(settings.style)
+                        .iter()
+                        .map(|span| span.text.chars().count())
+                        .sum(),
+                    _ => 0,
+                })
+                .sum()
+        };
+        let columns = columns.iter().enumerate().map(|(i, column)| {
+            let longest = rows
+                .iter()
+                .filter_map(|row| row.cells.get(i))
+                .chain([&column.header])
+                .map(|cell| chars(cell))
+                .max()
+                .unwrap_or(0);
+            table::column(
+                markdown::items(self, settings, &column.header),
+                move |row: &'a markdown::Row| match row.cells.get(i) {
+                    Some(cell) => markdown::items(self, settings, cell),
+                    None => widget::text("").into(),
+                },
+            )
+            // Capped, so a column of prose leaves a column of labels room for its words.
+            .width(Length::FillPortion(longest.clamp(4, 40) as u16))
+        });
+        table(columns, rows)
+            .padding_x(settings.spacing.0)
+            .padding_y(settings.spacing.0 / 2.0)
+            .separator_x(0)
+            .into()
+    }
 }
 
 /// A reading's size, relative to its words'.

@@ -227,7 +227,9 @@ the words alone and draws each reading over them. cosmic-text has one line heigh
 paragraph, so every line of a paragraph with readings is spaced for them (the paragraph is
 drawn higher by half that spacing, so its first line stays level with a list number), and a copied
 selection holds the words without their readings. Ruby inside code, inline or fenced, stays
-as written.
+as written. Tables are its own too: iced's sizes a column by what its cells measure,
+and a block, which fills the width it is given, measures nothing, so claudo's fit the reply's
+width and share it by each column's longest cell.
 
 **Fonts**: egui bundles Latin glyphs only, so the Japanese font is embedded via
 `include_bytes!` and registered as a fallback. Do not switch to loading system fonts; that
