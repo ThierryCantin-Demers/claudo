@@ -282,6 +282,9 @@ pub struct ToolCall {
     /// Set when the call runs in the background: its result only says it started.
     #[serde(default)]
     pub background: Option<Background>,
+    /// The Agent call whose subagent made this one.
+    #[serde(default)]
+    pub parent: Option<CallId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

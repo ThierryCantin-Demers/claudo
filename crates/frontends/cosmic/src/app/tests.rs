@@ -3,7 +3,7 @@
 //! it does in the running app. Run with `cargo test -p claudo-cosmic --features cosmic`.
 
 use super::*;
-use claudo_protocol::AuthStatus;
+use claudo_protocol::{AuthStatus, Background, TaskStatus};
 use cosmic::iced::advanced::clipboard;
 use cosmic::iced::advanced::renderer::Headless;
 use cosmic::iced::runtime::user_interface::{Cache, UserInterface};
@@ -369,6 +369,7 @@ fn snapshots() {
             result: None,
             is_error: false,
             background: None,
+            parent: None,
         },
         scope: "gh issue create".to_string(),
     });
@@ -489,6 +490,8 @@ fn snapshots() {
     ));
     view.draft = text_editor::Content::with_text("and the docs");
     Harness::new(app).snapshot("queued");
+
+    Harness::new(with_subagent()).snapshot("subagent");
 }
 
 /// Alpha with a finished run of `done` calls, then a running one whose last call is going.
@@ -827,13 +830,62 @@ fn bash(id: &str, command: &str, description: &str) -> ToolCall {
         result: None,
         is_error: false,
         background: None,
+        parent: None,
     }
+}
+
+/// Alpha after its turn ended, with a subagent still working in the background: its
+/// first calls returned, its last runs.
+fn with_subagent() -> ClaudoApp {
+    let mut app = two_tiles();
+    let view = app.views.get_mut(ALPHA).unwrap();
+    let mut agent = bash("agent", "", "");
+    agent.name = "Agent".to_string();
+    agent.summary = "Verify the review's findings".to_string();
+    agent.command = None;
+    agent.result = Some("Async agent launched".to_string());
+    agent.background = Some(Background {
+        status: TaskStatus::Running,
+        output: None,
+    });
+    view.items.push(Entry::Tool {
+        call: agent,
+        open: false,
+    });
+    view.items.push(Entry::Reply(Box::new(Reply::complete(
+        "A subagent is checking the findings; I will report when it is done.".to_string(),
+    ))));
+    let commands = [
+        "git diff main",
+        "rg 'fn tune'",
+        "cargo test -p cubecl-runtime",
+    ];
+    let events = commands
+        .iter()
+        .enumerate()
+        .flat_map(|(n, command)| {
+            let mut call = bash(&format!("s{n}"), command, "Check");
+            call.parent = Some("agent".to_string());
+            let started = ServerEvent::ToolStarted {
+                conversation_id: ALPHA.to_string(),
+                call,
+            };
+            let returned = (n + 1 < commands.len()).then(|| ServerEvent::ToolResult {
+                conversation_id: ALPHA.to_string(),
+                call_id: format!("s{n}"),
+                content: "ok".to_string(),
+                is_error: false,
+            });
+            std::iter::once(started).chain(returned)
+        })
+        .collect();
+    let _ = app.update(Message::Events(events));
+    app
 }
 
 /// Alpha, mid-turn, with a command running in the foreground and one in the background,
 /// and two that ended.
 fn with_commands() -> ClaudoApp {
-    use claudo_protocol::{Background, TaskStatus};
     let mut app = two_tiles();
     let view = app.views.get_mut(ALPHA).expect("Alpha");
     let mut built = bash("t1", "cargo build --release", "Build the release binary");
@@ -857,7 +909,6 @@ fn with_commands() -> ClaudoApp {
 
 #[test]
 fn the_commands_panel_lists_every_agent() {
-    use claudo_protocol::{Background, TaskStatus};
     let mut app = with_commands();
     let mut server = bash("b1", "npm run dev", "Serve the site");
     server.background = Some(Background {
@@ -1639,5 +1690,41 @@ fn a_message_sent_while_claude_works_waits_then_lands_where_claude_took_it() {
         view.draft.text().trim(),
         "one more",
         "back in the message box"
+    );
+}
+
+#[test]
+fn a_background_subagents_calls_run_after_its_turn_and_nest_under_it() {
+    let mut app = with_subagent();
+    let view = &app.views[ALPHA];
+    assert!(!view.streaming, "the turn that started it ended");
+    let running: Vec<&str> = view
+        .commands()
+        .filter(|(_, call)| view.running(call))
+        .map(|(_, call)| call.call_id.as_str())
+        .collect();
+    assert_eq!(running, ["s2"], "its last command runs on");
+    assert_eq!(
+        view.commands().count(),
+        3,
+        "every one is in the Commands panel"
+    );
+    assert!(
+        matches!(&view.items[view.items.len() - 4], Entry::Reply(reply) if reply.text.contains("report")),
+        "the reply stays whole"
+    );
+
+    let _ = app.update(Message::Events(vec![ServerEvent::Background {
+        conversation_id: ALPHA.to_string(),
+        call_id: "agent".to_string(),
+        background: Background {
+            status: TaskStatus::Completed,
+            output: None,
+        },
+    }]));
+    assert_eq!(
+        app.views[ALPHA].running_commands(),
+        0,
+        "nothing outlives its subagent"
     );
 }

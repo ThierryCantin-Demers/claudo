@@ -195,7 +195,7 @@ pub fn key(view: &ConversationView, idx: usize, entry: &Entry, live: bool, zoom:
                 call.result.as_ref().map(String::len),
                 call.is_error,
                 background,
-                commands::running(call, view.streaming),
+                view.running(call),
             )
                 .hash(&mut h)
         }

@@ -728,8 +728,15 @@ impl Shared {
                     incoming(ev);
                 }
             }
+            // Between turns, only work still going in the background reports: a command
+            // ending, or a subagent's calls.
             None => {
-                if let (EngineEvent::Background { .. }, Some(incoming)) = (&ev, &self.incoming) {
+                let background = match &ev {
+                    EngineEvent::Background { .. } | EngineEvent::ToolResult { .. } => true,
+                    EngineEvent::ToolStarted(call) => call.parent.is_some(),
+                    _ => false,
+                };
+                if let (true, Some(incoming)) = (background, &self.incoming) {
                     incoming(ev);
                 }
             }
@@ -803,6 +810,7 @@ fn permission_prompt(v: &Value, bypass: bool) -> Option<Prompt> {
         result: None,
         is_error: false,
         background: None,
+        parent: None,
     };
     Some(Prompt::Ask {
         request_id,
@@ -827,6 +835,15 @@ fn ask_rule_in(command: &str) -> Option<&'static str> {
                 .filter_map(|rule| rule.strip_prefix("Bash(")?.strip_suffix(":*)"))
                 .find(|prefix| words.starts_with(&prefix.split_whitespace().collect::<Vec<_>>()))
         })
+}
+
+/// The Agent call whose subagent sent a message. A forked command's subagent has none, its
+/// command being no call.
+fn subagent_of(v: &Value) -> Option<String> {
+    v.get("parent_tool_use_id")?
+        .as_str()
+        .filter(|parent| !parent.starts_with("forked-command-"))
+        .map(str::to_owned)
 }
 
 /// The message id of a `command_lifecycle` line reporting a message's turn starting.
@@ -946,7 +963,11 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
         "assistant" => content_blocks(v)
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-            .map(|b| EngineEvent::ToolStarted(tool_call(b)))
+            .map(|b| {
+                let mut call = tool_call(b);
+                call.parent = subagent_of(v);
+                EngineEvent::ToolStarted(call)
+            })
             .collect(),
 
         // A message starting its turn, echoed by `--replay-user-messages`.
@@ -1278,6 +1299,7 @@ pub(crate) fn tool_call(block: &Value) -> ToolCall {
         result: None,
         is_error: false,
         background: None,
+        parent: None,
     }
 }
 
@@ -1772,6 +1794,22 @@ mod tests {
         turns.start(started_message(&started("b")).unwrap());
         assert!(matches!(turns.running, Some(Route::Client(_))));
         assert_eq!(turns.queued.len(), 1);
+    }
+
+    #[test]
+    fn a_subagents_calls_name_the_call_that_started_it() {
+        let parent = |parent: &str| {
+            let v = line(&format!(
+                r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"content":[{{"type":"tool_use","id":"t","name":"Bash","input":{{}}}}]}}}}"#
+            ));
+            match decode(&v).as_slice() {
+                [EngineEvent::ToolStarted(call)] => call.parent.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(parent(r#""toolu_a""#).as_deref(), Some("toolu_a"));
+        assert_eq!(parent("null"), None);
+        assert_eq!(parent(r#""forked-command-code-review""#), None);
     }
 
     #[test]

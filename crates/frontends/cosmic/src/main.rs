@@ -444,7 +444,11 @@ mod app {
                 }
                 ServerEvent::ToolStarted { call, .. } => {
                     self.retrying = None;
-                    self.finish_reply();
+                    // A subagent's call shows under the one that started it, so the reply
+                    // going on meanwhile is still one.
+                    if call.parent.is_none() {
+                        self.finish_reply();
+                    }
                     self.items.push(Entry::Tool { call, open: false });
                 }
                 ServerEvent::ToolResult {
@@ -2882,9 +2886,32 @@ mod app {
                 conversation: id,
                 selection: self.selection.as_ref(),
             };
+            let calls: std::collections::HashSet<&str> = view
+                .items
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Tool { call, .. } => Some(call.call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let mut made: HashMap<&str, Vec<usize>> = HashMap::new();
+            for (idx, entry) in view.items.iter().enumerate() {
+                if let Entry::Tool { call, .. } = entry
+                    && let Some(parent) = call.parent.as_deref()
+                    && calls.contains(parent)
+                {
+                    made.entry(parent).or_default().push(idx);
+                }
+            }
+            let nested: std::collections::HashSet<usize> =
+                made.values().flatten().copied().collect();
+            let top: Vec<usize> = (0..view.items.len())
+                .filter(|idx| !nested.contains(idx))
+                .collect();
+            let last_top = top.last().copied();
             let row = |idx: usize, entry: &'a Entry| -> Element<'a, Message> {
                 let toggle = || Message::Toggle(id.clone(), idx);
-                let last = idx + 1 == view.items.len();
+                let last = Some(idx) == last_top;
                 let key = frozen::key(view, idx, entry, last && live.is_some(), self.zoom);
                 let row = match entry {
                     Entry::User(text) => user_bubble(
@@ -2933,31 +2960,40 @@ mod app {
                         toggle(),
                         call,
                         open.then_some((texts, idx)),
-                        commands::call_status(call, view.streaming, self.pulse, size * 0.85),
+                        commands::call_status(call, view.running(call), self.pulse, size * 0.85),
                         size,
                     ),
                 };
                 frozen::Frozen::new(key, row).into()
             };
+            let nest = Nest {
+                id,
+                view,
+                made,
+                row: &row,
+                size,
+            };
             let mut rows: Vec<Element<Message>> = Vec::new();
-            let mut idx = 0;
-            while idx < view.items.len() {
-                let work = view.items[idx..]
+            let mut k = 0;
+            while k < top.len() {
+                let work = top[k..]
                     .iter()
-                    .take_while(|entry| {
-                        matches!(entry, Entry::Tool { .. } | Entry::Thinking { .. })
+                    .take_while(|&&idx| {
+                        matches!(view.items[idx], Entry::Tool { .. } | Entry::Thinking { .. })
                     })
                     .count();
-                let calls = view.items[idx..idx + work]
+                let run = &top[k..k + work];
+                let calls = run
                     .iter()
-                    .filter(|entry| matches!(entry, Entry::Tool { .. }))
+                    .filter(|&&idx| matches!(view.items[idx], Entry::Tool { .. }))
                     .count();
                 if calls < 2 {
-                    rows.push(row(idx, &view.items[idx]));
-                    idx += 1;
+                    rows.push(self.with_made(&nest, top[k]));
+                    k += 1;
                 } else {
-                    rows.push(self.tool_group(id, view, idx..idx + work, &row, size));
-                    idx += work;
+                    let live = view.streaming && k + work == top.len();
+                    rows.push(self.tool_group(&nest, run, live));
+                    k += work;
                 }
             }
             if let Some(label) = view.activity() {
@@ -2988,20 +3024,51 @@ mod app {
         }
     }
 
+    /// What drawing an entry takes, with the calls of a subagent it started.
+    struct Nest<'a, 'r> {
+        id: &'a ConversationId,
+        view: &'a ConversationView,
+        /// The calls each subagent made, by the call that started it.
+        made: HashMap<&'a str, Vec<usize>>,
+        row: &'r dyn Fn(usize, &'a Entry) -> Element<'a, Message>,
+        size: f32,
+    }
+
     impl ClaudoApp {
-        /// Calls made one after another, folded into one row. While they are the running
-        /// turn's latest, the newest shows below it, so the work stays visible.
+        /// An entry, and under a call that started a subagent, the calls it made.
+        fn with_made<'a>(&'a self, nest: &Nest<'a, '_>, idx: usize) -> Element<'a, Message> {
+            let entry = &nest.view.items[idx];
+            let row = (nest.row)(idx, entry);
+            let (agent, made) = match entry {
+                Entry::Tool { call, .. } => match nest.made.get(call.call_id.as_str()) {
+                    Some(made) => (call, made),
+                    None => return row,
+                },
+                _ => return row,
+            };
+            let live = nest.view.running(agent);
+            widget::Column::with_children(vec![
+                row,
+                widget::container(self.tool_group(nest, made, live))
+                    .padding([0, 0, 0, 24])
+                    .into(),
+            ])
+            .spacing(8)
+            .into()
+        }
+
+        /// Calls made one after another, folded into one row. While `live`, the newest
+        /// shows below it, so the work stays visible.
         fn tool_group<'a>(
             &'a self,
-            id: &'a ConversationId,
-            view: &'a ConversationView,
-            run: std::ops::Range<usize>,
-            row: &impl Fn(usize, &'a Entry) -> Element<'a, Message>,
-            size: f32,
+            nest: &Nest<'a, '_>,
+            run: &[usize],
+            live: bool,
         ) -> Element<'a, Message> {
-            let calls: Vec<&ToolCall> = view.items[run.clone()]
+            let (id, view, size) = (nest.id, nest.view, nest.size);
+            let calls: Vec<&ToolCall> = run
                 .iter()
-                .filter_map(|entry| match entry {
+                .filter_map(|&idx| match &view.items[idx] {
                     Entry::Tool { call, .. } => Some(call),
                     _ => None,
                 })
@@ -3023,18 +3090,15 @@ mod app {
                 .join(", ");
             let small = size * 0.85;
             let failed = calls.iter().filter(|call| call.is_error).count();
-            let status = match calls
-                .iter()
-                .find(|call| commands::running(call, view.streaming))
-            {
-                Some(call) => commands::call_status(call, view.streaming, self.pulse, small),
+            let status = match calls.iter().find(|call| view.running(call)) {
+                Some(call) => commands::call_status(call, true, self.pulse, small),
                 None if failed > 0 => widget::text(format!("{failed} failed"))
                     .size(small)
                     .class(destructive())
                     .into(),
                 None => commands::call_status(calls[calls.len() - 1], false, self.pulse, small),
             };
-            let open = view.groups_open.contains(&run.start);
+            let open = view.groups_open.contains(&run[0]);
             let chevron = if open {
                 "go-down-symbolic"
             } else {
@@ -3043,10 +3107,13 @@ mod app {
             let header = widget::button::custom(
                 widget::Row::with_children(vec![
                     widget::icon::from_name(chevron).size(16).into(),
-                    widget::text(format!("{} calls", calls.len()))
-                        .size(size)
-                        .font(cosmic::font::semibold())
-                        .into(),
+                    widget::text(match calls.len() {
+                        1 => "1 call".to_string(),
+                        n => format!("{n} calls"),
+                    })
+                    .size(size)
+                    .font(cosmic::font::semibold())
+                    .into(),
                     widget::text(tools)
                         .size(size)
                         .class(dim())
@@ -3059,21 +3126,20 @@ mod app {
                 .spacing(8)
                 .align_y(Alignment::Center),
             )
-            .on_press(Message::ToggleGroup(id.clone(), run.start))
+            .on_press(Message::ToggleGroup(id.clone(), run[0]))
             .class(cosmic::theme::Button::Text)
             .width(Length::Fill);
-            let latest = run.end == view.items.len() && view.streaming;
-            let shown: Vec<usize> = match (open, latest) {
-                (true, _) => run.collect(),
-                (false, true) => vec![run.end - 1],
-                (false, false) => Vec::new(),
+            let shown: &[usize] = match (open, live) {
+                (true, _) => run,
+                (false, true) => &run[run.len() - 1..],
+                (false, false) => &[],
             };
             if shown.is_empty() {
                 return header.into();
             }
             let members = shown
-                .into_iter()
-                .map(|idx| row(idx, &view.items[idx]))
+                .iter()
+                .map(|&idx| self.with_made(nest, idx))
                 .collect::<Vec<_>>();
             widget::Column::with_children(vec![
                 header.into(),

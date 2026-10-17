@@ -6,13 +6,14 @@
 //! to reverse Claude Code's directory-name encoding.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use claudo_protocol::{
-    Background, ContextUsage, Item, Overrides, SessionInfo, Settings, TaskStatus, TurnTime,
+    Background, ContextUsage, Item, Overrides, SessionInfo, Settings, TaskStatus, ToolCall,
+    TurnTime,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -375,7 +376,56 @@ pub fn load_transcript(session_id: &str) -> (Vec<Item>, Option<String>) {
     let Some(path) = find_transcript(session_id) else {
         return (Vec::new(), None);
     };
-    parse_transcript(&path)
+    let (items, title) = parse_transcript(&path);
+    let subagents = path.with_extension("").join("subagents");
+    (with_subagents(items, &subagents), title)
+}
+
+/// The calls subagents made, read from their own transcripts in `dir`, each after the call
+/// that started its subagent.
+fn with_subagents(items: Vec<Item>, dir: &Path) -> Vec<Item> {
+    let mut started: HashMap<String, Vec<ToolCall>> = HashMap::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let meta = entry.path();
+        let Some(agent) = meta
+            .file_name()
+            .and_then(|name| name.to_str()?.strip_suffix(".meta.json"))
+        else {
+            continue;
+        };
+        let parent = fs::read_to_string(&meta)
+            .ok()
+            .and_then(|meta| serde_json::from_str::<Value>(&meta).ok())
+            .and_then(|meta| Some(meta.get("toolUseId")?.as_str()?.to_owned()));
+        let Some(parent) = parent else {
+            continue;
+        };
+        let (subagent, _) = parse_transcript(&dir.join(format!("{agent}.jsonl")));
+        let calls = subagent.into_iter().filter_map(|item| match item {
+            Item::Tool(call) => Some(ToolCall {
+                parent: Some(parent.clone()),
+                ..call
+            }),
+            _ => None,
+        });
+        started.entry(parent.clone()).or_default().extend(calls);
+    }
+
+    fn place(call: ToolCall, started: &mut HashMap<String, Vec<ToolCall>>, out: &mut Vec<Item>) {
+        let made = started.remove(&call.call_id).unwrap_or_default();
+        out.push(Item::Tool(call));
+        for call in made {
+            place(call, started, out);
+        }
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Item::Tool(call) => place(call, &mut started, &mut out),
+            item => out.push(item),
+        }
+    }
+    out
 }
 
 /// How many folders `recent_folders` lists.
@@ -965,6 +1015,62 @@ mod tests {
         let expected = [crate_dir.join("src"), crate_dir, workspace];
         let expected: Vec<String> = expected.iter().map(|f| f.display().to_string()).collect();
         assert_eq!(ranked, expected);
+    }
+
+    #[test]
+    fn a_subagents_calls_follow_the_call_that_started_it() {
+        let dir = std::env::temp_dir().join(format!("claudo-subagents-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let use_line = |id: &str, name: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{{"command":"ls"}}}}]}}}}"#
+            )
+        };
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","content":"ok"}]}}"#;
+        for (agent, started_by, lines) in [
+            (
+                "one",
+                "a",
+                vec![
+                    use_line("b", "Bash"),
+                    result.to_string(),
+                    use_line("c", "Agent"),
+                ],
+            ),
+            ("two", "c", vec![use_line("d", "Bash")]),
+        ] {
+            fs::write(dir.join(format!("agent-{agent}.jsonl")), lines.join("\n")).unwrap();
+            let meta = format!(r#"{{"agentType":"general-purpose","toolUseId":"{started_by}"}}"#);
+            fs::write(dir.join(format!("agent-{agent}.meta.json")), meta).unwrap();
+        }
+        let mut agent = tool_call(&serde_json::json!({"id": "a", "name": "Agent"}));
+        agent.result = Some("launched".to_string());
+        let items = vec![
+            Item::User("review".to_string()),
+            Item::Tool(agent),
+            Item::Assistant("started".to_string()),
+        ];
+        let items = with_subagents(items, &dir);
+        let _ = fs::remove_dir_all(&dir);
+
+        let calls: Vec<(&str, Option<&str>)> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Tool(call) => Some((call.call_id.as_str(), call.parent.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("a", None),
+                ("b", Some("a")),
+                ("c", Some("a")),
+                ("d", Some("c"))
+            ]
+        );
+        assert!(matches!(&items[2], Item::Tool(b) if b.result.as_deref() == Some("ok")));
+        assert!(matches!(items.last(), Some(Item::Assistant(_))));
     }
 
     #[test]

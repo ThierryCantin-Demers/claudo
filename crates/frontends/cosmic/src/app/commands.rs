@@ -18,11 +18,11 @@ pub(super) fn running(call: &ToolCall, streaming: bool) -> bool {
 /// How a call stands, for its row: a pulse while running, else a mark or a word.
 pub(super) fn call_status<'a>(
     call: &ToolCall,
-    streaming: bool,
+    running: bool,
     pulse: f32,
     size: f32,
 ) -> Element<'a, Message> {
-    if running(call, streaming) {
+    if running {
         return pulse_dots(pulse, size);
     }
     let word = |label: &'a str| widget::text(label).size(size).class(dim()).into();
@@ -56,8 +56,29 @@ impl ConversationView {
 
     pub(super) fn running_commands(&self) -> usize {
         self.commands()
-            .filter(|(_, call)| running(call, self.streaming))
+            .filter(|(_, call)| self.running(call))
             .count()
+    }
+
+    /// Whether a call is still going. A subagent's call goes on while its subagent does,
+    /// which outlives the turn when it runs in the background.
+    pub(super) fn running(&self, call: &ToolCall) -> bool {
+        let started_by = call
+            .parent
+            .as_deref()
+            .filter(|parent| *parent != call.call_id)
+            .and_then(|parent| self.call(parent));
+        match (&call.background, started_by) {
+            (None, Some(agent)) if call.result.is_none() => self.running(agent),
+            _ => running(call, self.streaming),
+        }
+    }
+
+    fn call(&self, call_id: &str) -> Option<&ToolCall> {
+        self.items.iter().rev().find_map(|entry| match entry {
+            Entry::Tool { call, .. } if call.call_id == call_id => Some(call),
+            _ => None,
+        })
     }
 }
 
@@ -228,9 +249,8 @@ impl ClaudoApp {
             conversation: id,
             selection: self.selection.as_ref(),
         };
-        let (running, done): (Vec<_>, Vec<_>) = view
-            .commands()
-            .partition(|(_, call)| running(call, view.streaming));
+        let (running, done): (Vec<_>, Vec<_>) =
+            view.commands().partition(|(_, call)| view.running(call));
         if running.is_empty() && done.is_empty() {
             rows.push(
                 widget::container(
@@ -273,12 +293,17 @@ impl ClaudoApp {
                 .into(),
         ];
         let mut about = call.description.clone();
-        if call.background.is_some() {
-            about = if about.is_empty() {
-                "in the background".to_string()
-            } else {
-                format!("{about} · in the background")
-            };
+        for (applies, note) in [
+            (call.background.is_some(), "in the background"),
+            (call.parent.is_some(), "by a subagent"),
+        ] {
+            if applies {
+                about = if about.is_empty() {
+                    note.to_string()
+                } else {
+                    format!("{about} · {note}")
+                };
+            }
         }
         if !about.is_empty() {
             lines.push(
@@ -295,7 +320,7 @@ impl ClaudoApp {
                 .spacing(2)
                 .width(Length::Fill)
                 .into(),
-            call_status(call, view.streaming, self.pulse, small),
+            call_status(call, view.running(call), self.pulse, small),
         ])
         .spacing(8)
         .align_y(Alignment::Center);

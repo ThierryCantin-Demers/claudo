@@ -145,6 +145,7 @@ Events consumed from the JSONL stream:
 | `system` / `task_notification` | a background call ended: `status`, `summary`, `output_file`; may arrive between turns |
 | `rate_limit_event` | `rate_limit_info.unifiedWindows` five-hour and seven-day `utilization` and `resetsAt` |
 | `assistant` with no `parent_tool_use_id` | its `message.usage` is one request's context; the turn's last one is the context shown |
+| `assistant` / `user` with a `parent_tool_use_id` | a subagent's calls and results, by the Agent call that started it; its text is not streamed |
 | `system` / `api_retry` | a failed request will be retried: `attempt`, `max_retries`, `error`, `error_status` |
 | `result` | turn complete; `modelUsage[*].contextWindow` for the window. Its `usage` sums every request of the turn, so it is not the context |
 
@@ -168,6 +169,12 @@ live one. claudo continues one with `--resume <id> --fork-session`, which copies
 into a new session under the new process's folder and leaves the original untouched; until
 that first turn the conversation's `session_id` is still the other app's (`imported_from`),
 so nothing may delete it.
+
+**Subagents.** An Agent call's subagent streams its calls live, in the foreground or the
+background, and a background one keeps streaming after the turn that started it ended,
+which the engine passes on between turns. The main transcript keeps none of them: each
+subagent writes `<session-id>/subagents/agent-<id>.jsonl`, beside an `agent-<id>.meta.json`
+whose `toolUseId` names the Agent call, and the loader places its calls after that call.
 
 **A forked slash command streams nothing while it runs.** A skill with `context: fork`, such
 as `/code-review`, starts with `system` / `task_started` (`task_type: "local_agent"`, no
