@@ -596,7 +596,7 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
         &self,
         settings: markdown::Settings,
         _language: Option<&'a str>,
-        _code: &'a str,
+        code: &'a str,
         lines: &'a [markdown::Text],
     ) -> Element<'a, Message> {
         let lines: Vec<Element<'a, Message>> = lines
@@ -611,9 +611,25 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
                 if i == 0 { line.joiner("\n\n") } else { line }.into()
             })
             .collect();
-        widget::container(widget::scrollable::horizontal(
+        // A line wider than the block scrolls, and a drag selection does not follow it.
+        let copy = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("edit-copy-symbolic")).on_press(
+                Message::Copied {
+                    text: code.trim_end_matches('\n').to_string(),
+                    primary: false,
+                },
+            ),
+            widget::text("Copy"),
+            widget::tooltip::Position::Top,
+        );
+        let scrolled = widget::scrollable::horizontal(
             widget::container(widget::Column::with_children(lines)).padding(settings.code_size.0),
-        ))
+        )
+        .width(Length::Fill);
+        widget::container(widget::Row::with_children(vec![
+            scrolled.into(),
+            copy.into(),
+        ]))
         .width(Length::Fill)
         .padding(settings.code_size.0 / 4.0)
         .class(<Theme as markdown::Catalog>::code_block())

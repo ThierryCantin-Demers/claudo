@@ -516,9 +516,11 @@ fn snapshots() {
     Harness::new(app).snapshot("furigana");
 
     let mut app = two_tiles();
-    app.views.get_mut(ALPHA).unwrap().items.push(Entry::Reply(Box::new(Reply::complete(
-        TABLE.to_string(),
-    ))));
+    app.views
+        .get_mut(ALPHA)
+        .unwrap()
+        .items
+        .push(Entry::Reply(Box::new(Reply::complete(TABLE.to_string()))));
     Harness::new(app).snapshot("table");
 
     let mut app = with_subagent();
@@ -677,7 +679,10 @@ fn a_table_fits_the_reply_and_wraps_its_long_cells() {
     let mut element = markdown::view_with(reply.markdown.items(), markdown_settings(14.0), &viewer);
     let mut tree = Tree::new(element.as_widget());
     let limits = Limits::new(Size::ZERO, Size::new(600.0, f32::INFINITY));
-    let size = element.as_widget_mut().layout(&mut tree, &renderer, &limits).size();
+    let size = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits)
+        .size();
     assert!(size.width <= 600.0, "{size:?}");
     assert!(size.height < 300.0, "{size:?}");
 }
@@ -724,16 +729,48 @@ fn a_double_click_selects_a_word() {
     assert_eq!(h.selected(), "paragraph");
 }
 
+const SAMPLE: &str = "## A heading\n\nSome **bold** text and `inline code`, then a list:\n\n\
+    - first point\n- second point\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nThe end.";
+
+#[test]
+fn a_code_block_is_copied_whole_from_its_button() {
+    let mut app = two_tiles();
+    app.views
+        .get_mut(ALPHA)
+        .expect("Alpha")
+        .items
+        .push(Entry::Reply(Box::new(Reply::complete(SAMPLE.to_string()))));
+    let mut h = Harness::new(app);
+    h.move_to(795.0, 686.0);
+    let cursor = mouse::Cursor::Available(h.cursor);
+    let messages = h.frame(|ui, renderer| {
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &[button(true), button(false)],
+            cursor,
+            renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        messages
+    });
+    let code = "fn main() {\n    println!(\"hi\");\n}";
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::In(_, m) if matches!(m.as_ref(),
+                Message::Copied { text, primary: false } if text == code))),
+        "none copying the block: {messages:?}"
+    );
+}
+
 #[test]
 #[ignore = "writes images; run with --ignored"]
 fn selection_snapshot() {
     let mut app = two_tiles();
     let view = app.views.get_mut(ALPHA).expect("Alpha");
-    view.items.push(Entry::Reply(Box::new(Reply::complete(
-        "## A heading\n\nSome **bold** text and `inline code`, then a list:\n\n\
-         - first point\n- second point\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nThe end."
-            .to_string(),
-    ))));
+    view.items
+        .push(Entry::Reply(Box::new(Reply::complete(SAMPLE.to_string()))));
     let mut h = Harness::new(app);
     h.move_to(330.0, 640.0);
     h.send(vec![button(true)]);
