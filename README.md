@@ -71,12 +71,13 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 |---|---|
 | Open a conversation in the focused tile | Click it |
 | Open it in a new tile at the right | Shift+click, or right-click → Open in new tile |
-| New conversation | New chat or Ctrl+N; Shift+click or Ctrl+Shift+N for a new tile |
+| Open it in a new window | Alt+click, or right-click → Open in new window |
+| New conversation | New chat or Ctrl+N; Shift+click or Ctrl+Shift+N for a new tile, Alt+click, Ctrl+Alt+N or right-click → New chat in new window for a new window |
 | Resize tiles | Drag the line between two tiles |
 | Move a tile | Drag its title or Ctrl+drag anywhere in it, right-click its title for Move left/right, or Alt+Shift+Left/Right |
 | Focus the previous or next tile | Alt+Left/Right |
 | Close a tile | Its ✕, or Ctrl+W; a window other than the first closes with its last tile |
-| Open a conversation in its own window | Right-click it in the sidebar → Open in new window, or right-click a tile's title → Move to new window; Ctrl+Alt+N, or right-click New chat, for a new chat in a new window |
+| Move a tile to its own window | Right-click its title → Move to new window, or Alt+click it in the sidebar |
 | Move a tile to another window | Drag it there by its title (or Ctrl+drag), or right-click its title → Move to window N; dropped outside every window, it gets its own |
 | Rename a conversation | Click its title, or right-click it in the sidebar → Rename; Enter keeps it, Escape cancels |
 | Archive a conversation | Right-click it in the sidebar → Archive; it moves under Archived at the end of the list, kept whole. Unarchive, or a new message in it, brings it back |

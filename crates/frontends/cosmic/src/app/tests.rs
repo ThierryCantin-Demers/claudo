@@ -1492,6 +1492,26 @@ fn shift_picks_every_conversation_up_to_the_one_clicked() {
     assert_eq!(app.picked, ["d", BRAVO, "c"]);
 }
 
+#[test]
+fn alt_click_opens_a_conversation_in_a_new_window() {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    app.conversations.push(ConversationInfo {
+        id: "c".to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let _ = app.update(Message::Modifiers(keyboard::Modifiers::ALT));
+    let _ = app.update(Message::In(main, Box::new(Message::Open("c".to_string()))));
+    assert_eq!(app.windows.len(), 2);
+    assert!(app.tile_of("c").is_some_and(|(w, _)| w != main));
+    assert!(app.picked.is_empty());
+}
+
 fn cli_command(name: &str, hint: &str) -> CliCommand {
     CliCommand {
         name: name.to_string(),

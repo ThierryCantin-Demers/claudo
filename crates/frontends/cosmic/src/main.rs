@@ -944,7 +944,7 @@ mod app {
         /// which iced's own reload leaves until the next input event.
         #[cfg(feature = "hot")]
         Hotpatched,
-        /// A click on a conversation in the sidebar; with Shift it gets a new tile.
+        /// A click on a conversation in the sidebar; with Shift it gets a new tile, with Alt a window.
         Open(ConversationId),
         OpenTile(ConversationId),
         /// A conversation in a window of its own, moved there if a tile showed it.
@@ -1024,7 +1024,7 @@ mod app {
         Surface(cosmic::surface::Action),
         /// The main window is closing.
         Quit,
-        /// "New chat"; with Shift it gets a new tile.
+        /// "New chat"; with Shift it gets a new tile, with Alt a window.
         New,
         SetModel(usize),
         ModelText(String),
@@ -2183,18 +2183,22 @@ mod app {
             .into()
         }
 
-        /// "New chat", with Shift for a new tile and a menu for the rest.
+        /// "New chat", with Shift for a new tile, Alt for a new window and a menu for the rest.
         fn new_chat_button(&self, w: window::Id) -> Element<'_, Message> {
             widget::context_menu(
                 widget::tooltip(
-                    widget::button::text(if self.modifiers.shift() {
+                    widget::button::text(if self.modifiers.alt() {
+                        "New window"
+                    } else if self.modifiers.shift() {
                         "New tile"
                     } else {
                         "New chat"
                     })
                     .leading_icon(widget::icon::from_name("list-add-symbolic"))
                     .on_press(Message::New),
-                    widget::text("Shift+click for a new tile, right-click for more"),
+                    widget::text(
+                        "Shift+click for a new tile, Alt+click for a new window, right-click for more",
+                    ),
                     widget::tooltip::Position::Bottom,
                 ),
                 Some(vec![
@@ -4316,6 +4320,9 @@ mod app {
                         return self.update(Message::Pick(id));
                     }
                 }
+                Message::Open(id) if self.modifiers.alt() => {
+                    return self.update(Message::OpenWindow(id));
+                }
                 Message::Open(id) => {
                     self.layout_mut().page = Page::Chat;
                     let placement = if self.modifiers.shift() {
@@ -4614,6 +4621,7 @@ mod app {
                         self.close(&id);
                     }
                 }
+                Message::New if self.modifiers.alt() => return self.update(Message::NewWindow),
                 Message::New => {
                     self.layout_mut().page = Page::Chat;
                     let placement = if self.modifiers.shift() {
