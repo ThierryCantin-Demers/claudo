@@ -1,5 +1,5 @@
-//! The project folder a conversation works in: chosen under the message box until its first
-//! message, and named there after.
+//! The project folder a conversation works in: chosen in the message box's controls until its
+//! first message, and named there after.
 
 use std::path::Path;
 
@@ -44,15 +44,18 @@ impl ClaudoApp {
                 .class(dim())
                 .wrapping(text::Wrapping::None)
                 .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                .width(Length::Fill)
                 .into()
         };
+        // Fills the controls' free middle, so a narrow tile shortens the path, not the row.
         Some(
             widget::Row::with_children(vec![
                 widget::icon::from_name("folder-symbolic").size(16).into(),
                 content,
             ])
             .spacing(6)
-            .padding([0, 8])
+            .padding([0, 6])
+            .width(Length::Fill)
             .align_y(Alignment::Center)
             .into(),
         )

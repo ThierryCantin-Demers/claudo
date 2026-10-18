@@ -2884,7 +2884,8 @@ mod app {
                     attach.into(),
                     small(profile).into(),
                     small(effort).into(),
-                    widget::space::horizontal().into(),
+                    self.folder_row(id, view)
+                        .unwrap_or_else(|| widget::space::horizontal().into()),
                     small(model).into(),
                 ]
                 .into_iter()
@@ -2920,13 +2921,8 @@ mod app {
                     ..container::Style::default()
                 }
             }));
-            let column = widget::Column::with_children(
-                std::iter::once(boxed.into())
-                    .chain(self.folder_row(id, view))
-                    .collect::<Vec<_>>(),
-            )
-            .spacing(6)
-            .max_width(COLUMN_WIDTH * self.zoom);
+            let column = widget::Column::with_children(vec![boxed.into()])
+                .max_width(COLUMN_WIDTH * self.zoom);
             widget::container(column)
                 .center_x(Length::Fill)
                 .padding(if compact {
