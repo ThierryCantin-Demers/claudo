@@ -69,7 +69,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 
 | Do | How |
 |---|---|
-| Open a conversation in the focused tile | Click it |
+| Open a conversation in the focused tile | Click it; one already open is focused instead, its window brought to the front |
 | Open it in a new tile at the right | Shift+click, or right-click → Open in new tile |
 | Open it in a new window | Alt+click, or right-click → Open in new window |
 | New conversation | New chat or Ctrl+N; Shift+click or Ctrl+Shift+N for a new tile, Alt+click, Ctrl+Alt+N or right-click → New chat in new window for a new window |

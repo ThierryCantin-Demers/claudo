@@ -1269,7 +1269,7 @@ mod app {
                     self.move_tile(last, slot);
                 }
             }
-            self.tasks.push(window::gain_focus(w));
+            self.raise(w);
             self.persist();
         }
 
@@ -1347,7 +1347,7 @@ mod app {
             self.current = w;
             self.layout_mut().page = Page::Chat;
             self.open(id, Placement::Right);
-            self.tasks.push(window::gain_focus(w));
+            self.raise(w);
         }
 
         /// Show a conversation in a window of its own, taking it from where it was.
@@ -1393,10 +1393,21 @@ mod app {
                 return;
             };
             if w != self.current {
-                self.tasks.push(window::gain_focus(w));
+                self.raise(w);
                 self.current = w;
             }
             self.layout_mut().focused = i;
+        }
+
+        /// Bring a window to the front with the keyboard focus.
+        fn raise(&mut self, w: window::Id) {
+            self.tasks.push(window::gain_focus(w));
+            // winit's Wayland `gain_focus` does nothing; an attention request is an
+            // xdg-activation, which COSMIC answers with focus for an unsandboxed app.
+            self.tasks.push(window::request_user_attention(
+                w,
+                Some(window::UserAttention::Informational),
+            ));
         }
 
         /// Where the tiles start, and the width they share, or `None` once they
