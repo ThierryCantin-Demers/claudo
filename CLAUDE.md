@@ -237,9 +237,7 @@ breaks the web build and portability.
 
 **libcosmic** is a git dependency pinned to a rev, optional behind the `cosmic` feature.
 Keep it optional. Markdown and code highlighting come from its `markdown` and
-`highlighter` features (iced's markdown widget). Its `single-instance` feature stays on although claudo
-runs as plain `run`: without it libcosmic drops every Wayland text-input event, so input
-methods (fcitx5, Mozc) type nothing. API notes: `cosmic::app::{Application, Core, Task, Settings, run}`,
+`highlighter` features (iced's markdown widget). API notes: `cosmic::app::{Application, Core, Task, Settings, run}`,
 widgets under `cosmic::widget`, and `row()`/`column()` require children so use
 `Row::with_children` / `Column::with_children`. Sidebar labels need
 `Wrapping::None` or they overflow their button and overlap the next row. There is no runtime
