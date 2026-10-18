@@ -272,7 +272,8 @@ from a window's view and keys pressed in it arrive as `Message::In(window, ..)`.
 draws its header bar and frame for the main window only, so `view_window` draws them for the
 others, and a context menu opens over the first window unless given `.window_id(w)`. Closing
 the main window hands its role to another with `core.set_main_window_id`, which keeps
-libcosmic from exiting. A tile dragged past its window's edge becomes a Wayland drag and
+libcosmic from exiting. Bring a window forward with `raise`, never `window::gain_focus`
+alone, which winit's Wayland backend leaves empty. A tile dragged past its window's edge becomes a Wayland drag and
 drop (`app/tile_drag.rs`): a window learns nothing of the cursor outside it, so only the
 compositor can say which window the tile was dropped on.
 
