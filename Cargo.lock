@@ -3841,6 +3841,7 @@ dependencies = [
  "palette",
  "phf 0.13.1",
  "rfd 0.16.0",
+ "ron",
  "rust-embed",
  "serde",
  "slotmap",
