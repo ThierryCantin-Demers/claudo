@@ -288,6 +288,12 @@ pub struct ToolCall {
     /// It starts a subagent, whose calls name it as their `parent`.
     #[serde(default)]
     pub agent: bool,
+    /// When it started and ended, in Unix milliseconds. A call in the background ends with
+    /// its task, not with the result that said it started.
+    #[serde(default)]
+    pub started: Option<u64>,
+    #[serde(default)]
+    pub ended: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -548,6 +554,9 @@ pub enum ServerEvent {
         call_id: CallId,
         content: String,
         is_error: bool,
+        /// When it arrived, in Unix milliseconds.
+        #[serde(default)]
+        at: Option<u64>,
     },
     /// Claude wants to make a call that always needs the user's approval, such as
     /// opening an issue or a pull request. The turn waits for `AnswerApproval`.
@@ -589,6 +598,9 @@ pub enum ServerEvent {
         conversation_id: ConversationId,
         call_id: CallId,
         background: Background,
+        /// When it happened, in Unix milliseconds.
+        #[serde(default)]
+        at: Option<u64>,
     },
     Completed {
         conversation_id: ConversationId,

@@ -15,6 +15,37 @@ pub(super) fn running(call: &ToolCall, streaming: bool) -> bool {
     }
 }
 
+/// How long a call ran, or has run so far; nothing for one whose end went unrecorded.
+fn duration(call: &ToolCall, running: bool) -> Option<String> {
+    let started = call.started?;
+    if running {
+        return Some(time::took(
+            time::now_millis().saturating_sub(started) / 1000,
+        ));
+    }
+    if call
+        .background
+        .as_ref()
+        .is_some_and(|b| b.status == TaskStatus::Unknown)
+    {
+        return None;
+    }
+    Some(time::lasted(call.ended?.saturating_sub(started)))
+}
+
+/// A row's duration and status, side by side at its end.
+fn row_end<'a>(call: &ToolCall, running: bool, pulse: f32, size: f32) -> Element<'a, Message> {
+    let mut end = Vec::with_capacity(2);
+    if let Some(duration) = duration(call, running) {
+        end.push(widget::text(duration).size(size).class(dim()).into());
+    }
+    end.push(call_status(call, running, pulse, size));
+    widget::Row::with_children(end)
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+}
+
 /// How a call stands, for its row: a pulse while running, else a mark or a word.
 pub(super) fn call_status<'a>(
     call: &ToolCall,
@@ -128,6 +159,17 @@ impl ConversationView {
 }
 
 impl ClaudoApp {
+    /// A panel shows a running command whose clock moves.
+    pub(super) fn clocks_running(&self) -> bool {
+        self.windows.keys().any(|&w| {
+            self.commands_room(w) > 0.0
+                && self.command_groups(w).iter().any(|(_, view)| {
+                    view.commands()
+                        .any(|(_, call)| call.started.is_some() && view.running(call))
+                })
+        })
+    }
+
     /// Its width and the handle's, when it shows.
     pub(super) fn commands_room(&self, w: window::Id) -> f32 {
         let layout = self.window(w);
@@ -339,7 +381,11 @@ impl ClaudoApp {
             .padding([2, 4]);
             rows.push(widget::container(heading).padding([4, 0, 0, 18]).into());
             if !folded {
-                rows.extend(done.into_iter().map(row));
+                // Under the heading's words, past its chevron.
+                rows.extend(
+                    done.into_iter()
+                        .map(|done| widget::container(row(done)).padding([0, 0, 0, 35]).into()),
+                );
             }
         }
         widget::Column::with_children(rows).spacing(4).into()
@@ -386,13 +432,13 @@ impl ClaudoApp {
         if running && let Some((_, latest)) = made.last() {
             about.push(format!("{} {}", latest.name, latest.summary));
         }
+        let title = widget::text(truncate(&agent.summary, PREVIEW_CHARS))
+            .size(size)
+            .wrapping(text::Wrapping::None)
+            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+            .width(Length::Fill);
         let lines = vec![
-            widget::text(truncate(&agent.summary, PREVIEW_CHARS))
-                .size(size)
-                .wrapping(text::Wrapping::None)
-                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
-                .width(Length::Fill)
-                .into(),
+            if running { title } else { title.class(dim()) }.into(),
             widget::text(about.join(" · "))
                 .size(small)
                 .class(dim())
@@ -406,7 +452,7 @@ impl ClaudoApp {
                     .spacing(2)
                     .width(Length::Fill)
                     .into(),
-                call_status(agent, running, self.pulse, small),
+                row_end(agent, running, self.pulse, small),
             ])
             .spacing(8)
             .align_y(Alignment::Center),
@@ -463,19 +509,18 @@ impl ClaudoApp {
     ) -> Element<'a, Message> {
         let small = size * 0.9;
         let open = view.commands_open.contains(&idx);
+        let running = view.running(call);
         let title = match call.command {
             Some(_) => call.summary.clone(),
             None => format!("{} {}", call.name, call.summary),
         };
-        let mut lines = vec![
-            widget::text(truncate(&title, PREVIEW_CHARS))
-                .size(size)
-                .font(cosmic::font::mono())
-                .wrapping(text::Wrapping::None)
-                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
-                .width(Length::Fill)
-                .into(),
-        ];
+        let title = widget::text(truncate(&title, PREVIEW_CHARS))
+            .size(size)
+            .font(cosmic::font::mono())
+            .wrapping(text::Wrapping::None)
+            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+            .width(Length::Fill);
+        let mut lines = vec![if running { title } else { title.class(dim()) }.into()];
         let mut about = call.description.clone();
         if call.background.is_some() {
             about = if about.is_empty() {
@@ -499,7 +544,7 @@ impl ClaudoApp {
                 .spacing(2)
                 .width(Length::Fill)
                 .into(),
-            call_status(call, view.running(call), self.pulse, small),
+            row_end(call, running, self.pulse, small),
         ])
         .spacing(8)
         .align_y(Alignment::Center);

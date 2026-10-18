@@ -14,6 +14,20 @@ pub(super) fn ago(seconds: u64) -> String {
     }
 }
 
+/// How long a finished call ran: tenths under ten seconds, where most calls end.
+pub(super) fn lasted(millis: u64) -> String {
+    match millis {
+        0..10_000 => format!("{:.1} s", millis as f64 / 1000.0),
+        _ => took(millis / 1000),
+    }
+}
+
+pub(super) fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 pub(super) fn took(seconds: u64) -> String {
     match (seconds / 3600, seconds % 3600 / 60, seconds % 60) {
         (0, 0, seconds) => format!("{seconds} s"),
@@ -60,6 +74,8 @@ mod tests {
     fn durations_keep_the_two_units_that_matter() {
         assert_eq!(took(42), "42 s");
         assert_eq!(took(130), "2 min 10 s");
+        assert_eq!(lasted(420), "0.4 s");
+        assert_eq!(lasted(130_000), "2 min 10 s");
         assert_eq!(took(3 * 3600 + 5 * 60 + 9), "3 h 5 min");
     }
 }

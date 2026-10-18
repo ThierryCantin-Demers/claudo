@@ -407,11 +407,15 @@ mod app {
                 ServerEvent::Background {
                     call_id,
                     background,
+                    at,
                     ..
                 } => {
                     if let Some(Entry::Tool { call, .. }) = self.items.iter_mut().rev().find(
                         |entry| matches!(entry, Entry::Tool { call, .. } if call.call_id == call_id),
                     ) {
+                        if background.status != claudo_protocol::TaskStatus::Running {
+                            call.ended = at.or(call.ended);
+                        }
                         call.background = Some(background);
                     }
                 }
@@ -472,6 +476,7 @@ mod app {
                     call_id,
                     content,
                     is_error,
+                    at,
                     ..
                 } => {
                     if let Some(Entry::Tool { call, .. }) = self.items.iter_mut().rev().find(
@@ -479,6 +484,7 @@ mod app {
                     ) {
                         call.result = Some(content);
                         call.is_error = is_error;
+                        call.ended = at;
                     }
                 }
                 ServerEvent::ApprovalRequested {
@@ -872,6 +878,8 @@ mod app {
         /// Open or fold the run of calls that starts at this entry.
         ToggleGroup(ConversationId, usize),
         Minute,
+        /// Moves the running commands' clocks on; the view reads the time itself.
+        Second,
         /// Ask for the usage windows now.
         RefreshUsage,
         /// Open or close the Commands panel.
@@ -4140,6 +4148,12 @@ mod app {
             } else if self.streaming() {
                 subscriptions.push(cosmic::iced::time::every(PULSE_TICK).map(|_| Message::Pulse));
             }
+            if self.clocks_running() {
+                subscriptions.push(
+                    cosmic::iced::time::every(std::time::Duration::from_secs(1))
+                        .map(|_| Message::Second),
+                );
+            }
             Subscription::batch(subscriptions)
         }
 
@@ -4150,6 +4164,7 @@ mod app {
                     return self.update(*message);
                 }
                 Message::Connected(commands) => self.commands = Some(commands),
+                Message::Second => {}
                 Message::Minute => {
                     self.minutes += 1;
                     if self.minutes.is_multiple_of(usage::USAGE_REFRESH_MINUTES) {

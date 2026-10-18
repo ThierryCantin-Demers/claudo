@@ -394,6 +394,7 @@ impl ClaudoApp {
                     conversation_id,
                     call_id,
                     background,
+                    ..
                 } => {
                     if self.is_current(&conversation_id)
                         && let Some(Item::Tool(tc)) = self
@@ -410,6 +411,7 @@ impl ClaudoApp {
                     call_id,
                     content,
                     is_error,
+                    ..
                 } => {
                     if self.is_current(&conversation_id)
                         && let Some(Item::Tool(tc)) = self

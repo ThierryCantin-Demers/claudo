@@ -371,6 +371,8 @@ fn snapshots() {
             background: None,
             parent: None,
             agent: false,
+            started: None,
+            ended: None,
         },
         scope: "gh issue create".to_string(),
     });
@@ -939,6 +941,8 @@ fn bash(id: &str, command: &str, description: &str) -> ToolCall {
         background: None,
         parent: None,
         agent: false,
+        started: None,
+        ended: None,
     }
 }
 
@@ -984,6 +988,7 @@ fn with_subagent() -> ClaudoApp {
                 call_id: format!("s{n}"),
                 content: "ok".to_string(),
                 is_error: false,
+                at: None,
             });
             std::iter::once(started).chain(returned)
         })
@@ -1008,7 +1013,12 @@ fn with_commands() -> ClaudoApp {
         status: TaskStatus::Running,
         output: None,
     });
-    let running = bash("t4", "rg -n \"fn main\" crates", "Find the entry points");
+    let mut running = bash("t4", "rg -n \"fn main\" crates", "Find the entry points");
+    let now = time::now_millis();
+    (built.started, built.ended) = (Some(now - 75_000), Some(now - 12_400));
+    (failed.started, failed.ended) = (Some(now - 12_000), Some(now - 11_580));
+    server.started = Some(now - 300_000);
+    running.started = Some(now - 3_000);
     for call in [built, failed, server, running] {
         view.items.push(Entry::Tool { call, open: false });
     }
@@ -1842,6 +1852,7 @@ fn a_background_subagent_works_on_after_its_turn_as_one_panel_row() {
             status: TaskStatus::Completed,
             output: None,
         },
+        at: None,
     }]));
     assert_eq!(
         app.views[ALPHA].running_commands(),

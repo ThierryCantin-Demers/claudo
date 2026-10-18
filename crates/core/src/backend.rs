@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
     Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, ServerEvent, TaskStatus,
-    TurnTime,
+    ToolCall, TurnTime,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -503,7 +503,10 @@ impl Forward {
             }),
             EngineEvent::ToolStarted(call) => self.emit(ServerEvent::ToolStarted {
                 conversation_id,
-                call,
+                call: ToolCall {
+                    started: call.started.or(Some(crate::sessions::now_millis())),
+                    ..call
+                },
             }),
             EngineEvent::Notice { text } => self.emit(ServerEvent::Notice {
                 conversation_id,
@@ -516,6 +519,7 @@ impl Forward {
                 conversation_id,
                 call_id,
                 background,
+                at: Some(crate::sessions::now_millis()),
             }),
             EngineEvent::ToolResult {
                 call_id,
@@ -526,6 +530,7 @@ impl Forward {
                 call_id,
                 content,
                 is_error,
+                at: Some(crate::sessions::now_millis()),
             }),
             EngineEvent::Completed {
                 session_id,

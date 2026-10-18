@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::engine::cli::{
     attachment, backgrounded, command_echo, command_output, compaction, incoming,
-    task_notification, tool_call, unix_seconds,
+    task_notification, tool_call, unix_millis,
 };
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
@@ -38,9 +38,13 @@ fn claude_projects_dir() -> Option<PathBuf> {
 }
 
 pub(crate) fn now_secs() -> u64 {
+    now_millis() / 1000
+}
+
+pub(crate) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -725,6 +729,10 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
         };
         let pushed = items.len();
         let kind = v.get("type").and_then(Value::as_str);
+        let at = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(unix_millis);
         match kind {
             Some("ai-title") => {
                 ai_title = v.get("aiTitle").and_then(Value::as_str).map(str::to_owned);
@@ -778,6 +786,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                     Some(end) => {
                         if let Some(call) = call_mut(&mut items, &end.call_id) {
                             call.background = Some(end.background);
+                            call.ended = at.or(call.ended);
                         }
                         items.push(Item::Notice(end.summary));
                     }
@@ -799,6 +808,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                                 b.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
                                 tool_result_text(b.get("content")),
                                 b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                                at,
                             ),
                             _ => {}
                         }
@@ -824,7 +834,10 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                                     items.push(Item::Thinking(t.trim_end().to_string()));
                                 }
                             }
-                            Some("tool_use") => items.push(Item::Tool(tool_call(b))),
+                            Some("tool_use") => items.push(Item::Tool(ToolCall {
+                                started: at,
+                                ..tool_call(b)
+                            })),
                             _ => {}
                         }
                     }
@@ -832,11 +845,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
             }
             _ => {}
         }
-        let Some(at) = v
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(unix_seconds)
-        else {
+        let Some(at) = at.map(|millis| millis / 1000) else {
             continue;
         };
         let starts_turn = items[pushed..].iter().any(|item| {
@@ -887,8 +896,15 @@ fn call_mut<'a>(items: &'a mut [Item], call_id: &str) -> Option<&'a mut claudo_p
     })
 }
 
-fn attach_result(items: &mut [Item], call_id: &str, result: String, is_error: bool) {
+fn attach_result(
+    items: &mut [Item],
+    call_id: &str,
+    result: String,
+    is_error: bool,
+    at: Option<u64>,
+) {
     if let Some(tc) = call_mut(items, call_id) {
+        tc.ended = at;
         if backgrounded(&result) {
             tc.background = Some(Background {
                 status: TaskStatus::Unknown,
@@ -1060,7 +1076,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let base = unix_seconds(&at(0)).unwrap();
+        let base = unix_millis(&at(0)).unwrap() / 1000;
         assert_eq!(ended, [(base, base + 70), (base + 800, base + 900)]);
         assert!(
             items
@@ -1072,6 +1088,36 @@ mod tests {
             matches!(items[3], Item::Ended(_)),
             "between the first turn and the second"
         );
+    }
+
+    #[test]
+    fn a_call_runs_from_its_use_to_its_result() {
+        let transcript = [
+            serde_json::json!({
+                "type": "assistant", "timestamp": "2026-10-17T22:38:52.000Z",
+                "message": { "content": [
+                    { "type": "tool_use", "id": "t1", "name": "Bash", "input": { "command": "ls" } },
+                ] },
+            }),
+            serde_json::json!({
+                "type": "user", "timestamp": "2026-10-17T22:38:53.250Z",
+                "message": { "content": [
+                    { "type": "tool_result", "tool_use_id": "t1", "content": "ok" },
+                ] },
+            }),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat();
+        let path = std::env::temp_dir().join(format!("claudo-call-{}.jsonl", Uuid::new_v4()));
+        fs::write(&path, transcript).unwrap();
+        let (items, _) = parse_transcript(&path);
+        let _ = fs::remove_file(&path);
+        let base = unix_millis("2026-10-17T22:38:52.000Z").unwrap();
+        let times = items.iter().find_map(|item| match item {
+            Item::Tool(call) => Some((call.started, call.ended)),
+            _ => None,
+        });
+        assert_eq!(times, Some((Some(base), Some(base + 1250))));
     }
 
     #[test]

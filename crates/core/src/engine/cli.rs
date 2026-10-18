@@ -119,6 +119,11 @@ pub fn usage() -> io::Result<Quota> {
 
 /// Unix seconds of an RFC 3339 time, such as `2026-10-15T21:30:00.476926+00:00`.
 pub(crate) fn unix_seconds(time: &str) -> Option<u64> {
+    unix_millis(time).map(|millis| millis / 1000)
+}
+
+/// Unix milliseconds of an RFC 3339 time.
+pub(crate) fn unix_millis(time: &str) -> Option<u64> {
     let (date, rest) = time.split_once('T')?;
     let mut date = date.splitn(3, '-').map(str::parse::<i64>);
     let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
@@ -126,7 +131,11 @@ pub(crate) fn unix_seconds(time: &str) -> Option<u64> {
     let mut clock = clock.splitn(3, ':');
     let hour = clock.next()?.parse::<i64>().ok()?;
     let minute = clock.next()?.parse::<i64>().ok()?;
-    let second = clock.next()?.split('.').next()?.parse::<i64>().ok()?;
+    let mut seconds = clock.next()?.splitn(2, '.');
+    let second = seconds.next()?.parse::<i64>().ok()?;
+    let millis = format!("{:0<3}", seconds.next().unwrap_or(""))[..3]
+        .parse::<i64>()
+        .ok()?;
     let offset = match zone.chars().next() {
         None | Some('Z') => 0,
         Some(sign) => {
@@ -142,7 +151,8 @@ pub(crate) fn unix_seconds(time: &str) -> Option<u64> {
     let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     let days = era * 146_097 + day_of_era - 719_468;
-    u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second - offset).ok()
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset;
+    u64::try_from(seconds * 1000 + millis).ok()
 }
 
 /// Map the shared `Profile` to the CLI's `--permission-mode` value. True
@@ -847,6 +857,8 @@ fn permission_prompt(v: &Value, bypass: bool) -> Option<Prompt> {
         background: None,
         parent: None,
         agent: false,
+        started: None,
+        ended: None,
     };
     Some(Prompt::Ask {
         request_id,
@@ -1355,6 +1367,8 @@ pub(crate) fn tool_call(block: &Value) -> ToolCall {
         is_error: false,
         background: None,
         parent: None,
+        started: None,
+        ended: None,
     }
 }
 
@@ -1739,6 +1753,11 @@ mod tests {
         );
         assert_eq!(unix_seconds("2026-10-15T21:30:00Z"), Some(1_792_099_800));
         assert_eq!(unix_seconds("tomorrow"), None);
+        assert_eq!(
+            unix_millis("2026-10-17T22:38:52.922Z"),
+            Some(1_792_276_732_922)
+        );
+        assert_eq!(unix_millis("2026-10-15T21:30:00Z"), Some(1_792_099_800_000));
     }
 
     #[test]
