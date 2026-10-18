@@ -54,7 +54,11 @@ impl ClaudoApp {
             (false, None, Some(at)) => format!("Updated {}", time::ago(now.saturating_sub(at))),
             (false, None, None) => String::new(),
         };
-        let status = widget::text(status).size(size * 0.9).class(dim());
+        // Fill, so the button keeps its size and a narrow sidebar wraps the text instead.
+        let status = widget::text(status)
+            .size(size * 0.9)
+            .class(dim())
+            .width(Length::Fill);
         let status: Element<Message> = match &self.quota_error {
             Some(error) if !self.quota_asked => widget::tooltip(
                 status,
@@ -66,7 +70,6 @@ impl ClaudoApp {
         };
         widget::Row::with_children(vec![
             status,
-            widget::space::horizontal().into(),
             widget::tooltip(
                 widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
                     .extra_small()

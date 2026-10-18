@@ -406,7 +406,11 @@ fn snapshots() {
     });
     app.quota_asked = false;
     app.quota_at = Some(now - 180);
-    Harness::new(app).snapshot("usage");
+    let mut h = Harness::new(app);
+    h.snapshot("usage");
+    h.app.layout_mut().sidebar_width = SIDEBAR_MIN;
+    h.app.zoom = 1.3;
+    h.snapshot("usage-narrow");
 
     let mut app = two_tiles();
     let main = app.main_window();
