@@ -54,7 +54,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Code reviews (`/code-review`) show as a list of findings, each with its rank, file and line and what is wrong, its failure scenario folded under it.
 - COSMIC: links open in the browser, whether written as markdown or as a bare address, in replies, your own messages and tool output.
 - COSMIC: one claudo at a time. Launching it again while it runs opens a new window with a new chat in the running one.
-- COSMIC: Restart to update. Once a new build is installed or rebuilt over the running one, a button in the header restarts into it, and every agent keeps working through the restart, mid-turn included.
+- COSMIC: update without stopping agents. Once a new build is installed or rebuilt over the running one, an Update button beside Settings restarts into it, and every agent keeps working through the restart, mid-turn included.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Remote Control (COSMIC: Settings): your agents also show in the Claude app and on claude.ai/code, where you can follow them and message them.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.

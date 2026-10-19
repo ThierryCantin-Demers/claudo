@@ -785,7 +785,7 @@ mod app {
         beside: bool,
         /// A window opened for a later launch, to bring forward once it exists.
         launched: Option<window::Id>,
-        /// A new build is installed, so the header offers to restart into it.
+        /// A new build is installed, so the sidebar offers to restart into it.
         update_ready: bool,
     }
 
@@ -2273,10 +2273,17 @@ mod app {
                     ]
                     .into_iter()
                     .chain(self.usage())
-                    .chain([widget::button::text("Settings")
-                        .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
-                        .on_press(Message::SetPage(Page::Settings))
-                        .into()])
+                    .chain([widget::Row::with_children(
+                        [widget::button::text("Settings")
+                            .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
+                            .on_press(Message::SetPage(Page::Settings))
+                            .into()]
+                        .into_iter()
+                        .chain(self.restart_button(w))
+                        .collect::<Vec<_>>(),
+                    )
+                    .align_y(Alignment::Center)
+                    .into()])
                     .collect::<Vec<Element<Message>>>(),
                 )
                 .spacing(8),
@@ -2286,6 +2293,34 @@ mod app {
             .height(Length::Fill)
             .padding(8)
             .into()
+        }
+
+        /// Once a new build is installed, beside Settings: restarting into it keeps every
+        /// agent. A sidebar too narrow for both labels gets the icon alone.
+        fn restart_button(&self, w: window::Id) -> Option<Element<'_, Message>> {
+            const LABELLED: f32 = 220.0;
+            let icon = || widget::icon::from_name("software-update-available-symbolic");
+            let button: Element<Message> = if self.window(w).sidebar_width >= LABELLED {
+                widget::button::suggested("Update")
+                    .leading_icon(icon())
+                    .on_press(Message::Restart)
+                    .into()
+            } else {
+                widget::button::icon(icon())
+                    .class(cosmic::theme::Button::Suggested)
+                    .on_press(Message::Restart)
+                    .into()
+            };
+            self.update_ready.then(|| {
+                widget::tooltip(
+                    widget::container(button).align_right(Length::Fill),
+                    widget::text(
+                        "A new build of claudo is installed. Restart into it: agents keep working.",
+                    ),
+                    widget::tooltip::Position::Top,
+                )
+                .into()
+            })
         }
 
         /// "New chat", with Shift for a new tile, Alt for a new window and a menu for the rest.
@@ -5274,18 +5309,8 @@ mod app {
         /// Commands button.
         fn header_end_of(&self, w: window::Id) -> Vec<Element<'_, Message>> {
             let layout = self.window(w);
-            let restart = self.update_ready.then(|| {
-                widget::tooltip(
-                    widget::button::suggested("Restart to update")
-                        .leading_icon(widget::icon::from_name("view-refresh-symbolic"))
-                        .on_press(Message::Restart),
-                    widget::text("A new build of claudo is installed. Agents keep working through the restart."),
-                    widget::tooltip::Position::Bottom,
-                )
-                .into()
-            });
             if layout.page != Page::Chat {
-                return restart.into_iter().collect();
+                return Vec::new();
             }
             let context = self
                 .focused(w)
@@ -5293,9 +5318,8 @@ mod app {
                 .filter(|_| layout.tiles.len() == 1)
                 .and_then(|c| context_label(&c.context))
                 .map(|label| widget::text(label).size(12.0).class(dim()).into());
-            restart
+            context
                 .into_iter()
-                .chain(context)
                 .chain([self.commands_button(w)])
                 .collect()
         }

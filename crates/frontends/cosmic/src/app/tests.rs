@@ -2394,14 +2394,16 @@ fn a_turn_handed_over_from_the_replaced_app_shows_as_working() {
 fn restart_snapshot() {
     let mut app = two_tiles();
     app.update_ready = true;
+    app.quota = Some(claudo_protocol::Quota {
+        five_hour: Some(claudo_protocol::QuotaWindow {
+            used: 0.42,
+            resets_at: usage::now() + 7200,
+        }),
+        seven_day: None,
+    });
+    app.quota_asked = false;
     let mut h = Harness::new(app);
-    let main = h.app.main_window();
-    let header = widget::container(
-        widget::Row::with_children(h.app.header_end_of(main))
-            .spacing(8)
-            .align_y(Alignment::Center),
-    )
-    .padding(8)
-    .into();
-    render_alone(&mut h.renderer, header, "restart-to-update");
+    h.snapshot("restart-to-update");
+    h.app.layout_mut().sidebar_width = SIDEBAR_MIN;
+    h.snapshot("restart-to-update-narrow");
 }
