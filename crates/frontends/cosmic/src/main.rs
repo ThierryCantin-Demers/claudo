@@ -714,6 +714,8 @@ mod app {
         show_archived: bool,
         /// Unsent text of conversations that have no view.
         drafts: HashMap<ConversationId, String>,
+        /// Files attached to the unsent message of conversations that have no view.
+        unsent_files: HashMap<ConversationId, Vec<attach::Shown>>,
         /// Each window's tiles to reopen, with its focused one, once the conversation list
         /// arrives.
         restore: Vec<(window::Id, Vec<Tile>, usize)>,
@@ -1116,8 +1118,7 @@ mod app {
 
         fn open(&mut self, id: ConversationId, placement: Placement) {
             if !self.views.contains_key(&id) {
-                let draft = self.drafts.remove(&id).unwrap_or_default();
-                let mut view = ConversationView::new(&draft);
+                let mut view = self.revived(&id);
                 view.loading = true;
                 self.views.insert(id.clone(), view);
                 self.cmd(Command::OpenConversation { id: id.clone() });
@@ -1152,7 +1153,7 @@ mod app {
             self.persist();
         }
 
-        /// Drop a view no tile shows once its turn is over, keeping the unsent text.
+        /// Drop a view no tile shows once its turn is over, keeping the unsent message.
         fn release(&mut self, id: &str) {
             if self.tile_of(id).is_some() || self.views.get(id).is_none_or(|v| v.streaming) {
                 return;
@@ -1162,7 +1163,17 @@ mod app {
                 if !text.trim().is_empty() {
                     self.drafts.insert(id.to_string(), text);
                 }
+                if !view.attachments.is_empty() {
+                    self.unsent_files.insert(id.to_string(), view.attachments);
+                }
             }
+        }
+
+        /// A new view of a conversation, with the message it was writing when let go.
+        fn revived(&mut self, id: &str) -> ConversationView {
+            let mut view = ConversationView::new(&self.drafts.remove(id).unwrap_or_default());
+            view.attachments = self.unsent_files.remove(id).unwrap_or_default();
+            view
         }
 
         /// Close a conversation's tile. The main window keeps its last one; another window
@@ -1666,6 +1677,7 @@ mod app {
             self.untile(id);
             self.views.remove(id);
             self.drafts.remove(id);
+            self.unsent_files.remove(id);
             if self
                 .selection
                 .as_ref()
@@ -2036,8 +2048,7 @@ mod app {
                             | ServerEvent::Notice { .. }
                     ) && !self.views.contains_key(&id)
                     {
-                        let draft = self.drafts.remove(&id).unwrap_or_default();
-                        let mut view = ConversationView::new(&draft);
+                        let mut view = self.revived(&id);
                         view.partial = true;
                         self.views.insert(id.clone(), view);
                     }
@@ -4110,6 +4121,7 @@ mod app {
                 picked: Vec::new(),
                 show_archived: ui.show_archived,
                 drafts: ui.drafts,
+                unsent_files: HashMap::new(),
                 restore: vec![(main, ui.tiles.clone(), ui.focused)],
                 focus_composer: None,
                 quota: None,

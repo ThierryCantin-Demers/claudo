@@ -618,6 +618,27 @@ fn a_file_attached_above_the_message_box_keeps_the_box_working() {
 }
 
 #[test]
+fn an_unsent_file_comes_back_with_its_conversation() {
+    let mut app = two_tiles();
+    app.conversations.push(ConversationInfo {
+        id: "c".to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let image = claudo_protocol::Attachment::new("pasted.png".to_string(), "image/png", &[1, 2, 3]);
+    let _ = app.update(Message::Attach(ALPHA.to_string(), Ok(vec![image])));
+    app.layout_mut().focused = app.tile_of(ALPHA).expect("a tile").1;
+    let _ = app.update(Message::Open("c".to_string()));
+    assert!(!app.views.contains_key(ALPHA), "the view was let go");
+    let _ = app.update(Message::Open(ALPHA.to_string()));
+    assert_eq!(app.views[ALPHA].attachments.len(), 1);
+}
+
+#[test]
 fn attached_files_go_with_the_next_message_even_without_text() {
     let mut app = two_tiles();
     let image = claudo_protocol::Attachment::new("pasted.png".to_string(), "image/png", &[1, 2, 3]);
