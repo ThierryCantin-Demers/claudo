@@ -17,6 +17,7 @@ use claudo_protocol::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{EngineEvent, Resume, SessionConfig, UserMessage};
+use crate::handover::{Handed, Handover, Progress};
 use crate::live::{IDLE_TIMEOUT, LiveSessions};
 use crate::sessions::{Store, load_transcript};
 
@@ -24,20 +25,32 @@ pub struct Backend {
     store: Arc<Mutex<Store>>,
     live: LiveSessions,
     events: UnboundedSender<ServerEvent>,
+    /// Each conversation's running turn, for a handover to pass on.
+    progress: Running,
 }
+
+type Running = Arc<Mutex<HashMap<String, Progress>>>;
 
 impl Backend {
     pub fn new(events: UnboundedSender<ServerEvent>) -> Self {
         let store = Arc::new(Mutex::new(Store::load()));
+        let handover = crate::handover::take();
+        let progress: Running = Arc::new(Mutex::new(
+            handover
+                .iter()
+                .flat_map(|handover| &handover.sessions)
+                .map(|handed| (handed.conversation.clone(), handed.progress))
+                .collect(),
+        ));
         let (incoming, turns) = std::sync::mpsc::channel();
-        let (forwarded, kept) = (events.clone(), store.clone());
+        let (forwarded, kept, running) = (events.clone(), store.clone(), progress.clone());
         std::thread::spawn(move || {
             let mut forwards: HashMap<String, Forward> = HashMap::new();
             for (id, ev) in turns {
                 forwards
                     .entry(id)
                     .or_insert_with_key(|id| {
-                        Forward::new(forwarded.clone(), kept.clone(), id.clone(), None)
+                        Forward::resumed(forwarded.clone(), kept.clone(), id.clone(), &running)
                     })
                     .event(ev);
             }
@@ -46,11 +59,100 @@ impl Backend {
             store,
             live: LiveSessions::new(IDLE_TIMEOUT, Some(incoming)),
             events,
+            progress,
         };
         if crate::settings::load().remote_control {
             backend.live.set_remote_control(true, |_| String::new());
         }
+        if let Some(handover) = handover {
+            backend.adopt(handover);
+        }
         backend
+    }
+
+    /// Take over the agents of the app this one replaced, where each one was.
+    fn adopt(&self, handover: Handover) {
+        for Handed {
+            conversation,
+            state,
+            ..
+        } in handover.sessions
+        {
+            let working = state.running().is_some();
+            let adopted = self.live.adopt(&conversation, state);
+            if working {
+                self.emit(ServerEvent::Working {
+                    conversation_id: conversation.clone(),
+                });
+            }
+            for (request_id, call, scope) in adopted.approvals {
+                self.emit(ServerEvent::ApprovalRequested {
+                    conversation_id: conversation.clone(),
+                    request_id,
+                    call,
+                    scope,
+                });
+            }
+            if let Some(turn) = adopted.running {
+                self.forward(
+                    turn,
+                    Forward::resumed(
+                        self.events.clone(),
+                        self.store.clone(),
+                        conversation.clone(),
+                        &self.progress,
+                    ),
+                );
+            }
+            for turn in adopted.queued {
+                let latest = self.session_id(&conversation);
+                self.forward(turn, self.fresh(conversation.clone(), latest));
+            }
+        }
+        crate::handover::reap(handover.reap);
+    }
+
+    /// Replace this app with the build installed where it was started from, handing it
+    /// every agent.
+    fn restart(&self) {
+        let Some(exe) = crate::handover::installed() else {
+            return self.emit(ServerEvent::Error {
+                conversation_id: None,
+                detail: "Could not find where claudo is installed".to_string(),
+            });
+        };
+        let progress = self.progress.lock().unwrap().clone();
+        let error = self
+            .live
+            .exec(&exe, |id| progress.get(id).copied().unwrap_or_default());
+        self.emit(ServerEvent::Error {
+            conversation_id: None,
+            detail: format!("Could not restart claudo: {error}"),
+        });
+    }
+
+    fn session_id(&self, conversation_id: &str) -> Option<String> {
+        let store = self.store.lock().unwrap();
+        store.get(conversation_id)?.session_id.clone()
+    }
+
+    fn fresh(&self, conversation_id: String, latest: Option<String>) -> Forward {
+        Forward::new(
+            self.events.clone(),
+            self.store.clone(),
+            conversation_id,
+            latest,
+            self.progress.clone(),
+        )
+    }
+
+    /// Passes a turn's events on from a thread of its own.
+    fn forward(&self, turn: std::sync::mpsc::Receiver<EngineEvent>, mut forward: Forward) {
+        std::thread::spawn(move || {
+            for ev in turn {
+                forward.event(ev);
+            }
+        });
     }
 
     fn emit(&self, event: ServerEvent) {
@@ -223,6 +325,8 @@ impl Backend {
                 }
             }
 
+            Command::Restart => self.restart(),
+
             Command::AnswerApproval {
                 conversation_id,
                 request_id,
@@ -365,19 +469,10 @@ impl Backend {
             }
         };
 
-        let mut forward = Forward::new(
-            self.events.clone(),
-            self.store.clone(),
-            conversation_id,
-            session_id,
-        );
+        let mut forward = self.fresh(conversation_id, session_id);
         // A forked command's `init` comes only once it ends, so the turn starts when it is sent.
         forward.started = Some(crate::sessions::now_secs());
-        std::thread::spawn(move || {
-            for ev in turn {
-                forward.event(ev);
-            }
-        });
+        self.forward(turn, forward);
     }
 }
 
@@ -393,6 +488,8 @@ struct Forward {
     streamed: bool,
     /// When the running turn started, in Unix seconds.
     started: Option<u64>,
+    /// Where the running turn's progress is kept for a handover.
+    progress: Running,
 }
 
 impl Forward {
@@ -401,6 +498,7 @@ impl Forward {
         store: Arc<Mutex<Store>>,
         conversation_id: String,
         latest: Option<String>,
+        progress: Running,
     ) -> Self {
         Self {
             events,
@@ -409,7 +507,47 @@ impl Forward {
             latest,
             streamed: false,
             started: None,
+            progress,
         }
+    }
+
+    /// Picks up a turn a handover passed on where it was, or starts like `new`.
+    fn resumed(
+        events: UnboundedSender<ServerEvent>,
+        store: Arc<Mutex<Store>>,
+        conversation_id: String,
+        progress: &Running,
+    ) -> Self {
+        let latest = store
+            .lock()
+            .unwrap()
+            .get(&conversation_id)
+            .and_then(|meta| meta.session_id.clone());
+        let was = progress
+            .lock()
+            .unwrap()
+            .get(&conversation_id)
+            .copied()
+            .unwrap_or_default();
+        Self {
+            streamed: was.streamed,
+            started: was.started,
+            ..Self::new(events, store, conversation_id, latest, progress.clone())
+        }
+    }
+
+    fn note(&self) {
+        self.progress.lock().unwrap().insert(
+            self.conversation_id.clone(),
+            Progress {
+                started: self.started,
+                streamed: self.streamed,
+            },
+        );
+    }
+
+    fn done(&self) {
+        self.progress.lock().unwrap().remove(&self.conversation_id);
     }
 
     fn emit(&self, event: ServerEvent) {
@@ -421,6 +559,7 @@ impl Forward {
         match ev {
             EngineEvent::Started { session_id } => {
                 self.started.get_or_insert_with(crate::sessions::now_secs);
+                self.note();
                 self.latest = Some(session_id.clone());
                 self.store
                     .lock()
@@ -435,6 +574,7 @@ impl Forward {
             EngineEvent::Delivered { joined } => {
                 if !joined {
                     self.started = Some(crate::sessions::now_secs());
+                    self.note();
                 }
                 self.emit(ServerEvent::Delivered { conversation_id });
             }
@@ -448,7 +588,10 @@ impl Forward {
                 text,
             }),
             EngineEvent::Delta { text } => {
-                self.streamed = true;
+                if !self.streamed {
+                    self.streamed = true;
+                    self.note();
+                }
                 self.emit(ServerEvent::Delta {
                     conversation_id,
                     text,
@@ -567,6 +710,7 @@ impl Forward {
                     started,
                     ended: crate::sessions::now_secs(),
                 });
+                self.done();
                 self.emit(ServerEvent::Completed {
                     conversation_id,
                     is_error,
@@ -575,10 +719,13 @@ impl Forward {
                 });
                 self.emit(conversations_event(&self.store));
             }
-            EngineEvent::Error { detail } => self.emit(ServerEvent::Error {
-                conversation_id: Some(conversation_id),
-                detail,
-            }),
+            EngineEvent::Error { detail } => {
+                self.done();
+                self.emit(ServerEvent::Error {
+                    conversation_id: Some(conversation_id),
+                    detail,
+                })
+            }
         }
     }
 }

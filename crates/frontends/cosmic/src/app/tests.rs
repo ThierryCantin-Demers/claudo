@@ -2352,3 +2352,60 @@ fn a_button_back_to_the_bottom_shows_once_scrolled_well_up() {
     h.send(vec![]);
     assert!(jumps(&mut h).is_empty(), "gone once back down");
 }
+
+#[test]
+fn a_turn_handed_over_from_the_replaced_app_shows_as_working() {
+    let charlie = "ccccc333-0000-4000-8000-000000000000";
+    let mut app = two_tiles();
+    app.conversations.push(ConversationInfo {
+        id: charlie.to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let working = |id: &str| {
+        Message::Events(vec![ServerEvent::Working {
+            conversation_id: id.to_string(),
+        }])
+    };
+    let _ = app.update(working(charlie));
+    let view = &app.views[charlie];
+    assert!(
+        view.streaming && view.loading,
+        "no tile shows it, yet it works"
+    );
+
+    let _ = app.update(working(ALPHA));
+    assert!(app.views[ALPHA].streaming);
+    let _ = app.update(Message::Events(vec![ServerEvent::Completed {
+        conversation_id: ALPHA.to_string(),
+        is_error: false,
+        context: Default::default(),
+        time: None,
+    }]));
+    let view = &app.views[ALPHA];
+    assert!(
+        !view.streaming && !view.partial,
+        "done, and its history reloaded"
+    );
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn restart_snapshot() {
+    let mut app = two_tiles();
+    app.update_ready = true;
+    let mut h = Harness::new(app);
+    let main = h.app.main_window();
+    let header = widget::container(
+        widget::Row::with_children(h.app.header_end_of(main))
+            .spacing(8)
+            .align_y(Alignment::Center),
+    )
+    .padding(8)
+    .into();
+    render_alone(&mut h.renderer, header, "restart-to-update");
+}

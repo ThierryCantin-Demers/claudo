@@ -3,6 +3,8 @@
 //! with `--resume`, so closing one loses nothing but startup time.
 
 use std::collections::HashMap;
+use std::io;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -12,7 +14,9 @@ use std::time::Duration;
 use claudo_protocol::{ConversationId, Decision};
 
 use crate::claude_bin;
+use crate::engine::cli::{Adopted, Incoming, SessionState};
 use crate::engine::{EngineEvent, Resume, Session, SessionConfig, UserMessage};
+use crate::handover::{Handed, Progress};
 
 /// Events of turns a conversation's process started on its own, such as for another
 /// agent's message, with the conversation they belong to.
@@ -93,12 +97,7 @@ impl LiveSessions {
             }
         }
 
-        let incoming = self.incoming.clone().map(|incoming| {
-            let conversation_id = conversation_id.to_owned();
-            Box::new(move |ev| {
-                let _ = incoming.send((conversation_id.clone(), ev));
-            }) as crate::engine::cli::Incoming
-        });
+        let incoming = self.incoming_for(conversation_id);
         let mut session = Session::spawn(config, resume, name, incoming)
             .map_err(|e| format!("failed to launch `{}`: {e}", claude_bin()))?;
         for scope in always {
@@ -112,6 +111,46 @@ impl LiveSessions {
             .map_err(|e| format!("claude exited before the turn was sent: {e}"))?;
         sessions.insert(conversation_id.to_owned(), session);
         Ok(turn)
+    }
+
+    /// Where a conversation's process reports the turns it starts on its own.
+    fn incoming_for(&self, conversation_id: &str) -> Option<Incoming> {
+        self.incoming.clone().map(|incoming| {
+            let conversation_id = conversation_id.to_owned();
+            Box::new(move |ev| {
+                let _ = incoming.send((conversation_id.clone(), ev));
+            }) as Incoming
+        })
+    }
+
+    /// Take over a conversation's process from the app this one replaced.
+    pub fn adopt(&self, conversation_id: &str, state: SessionState) -> Adopted {
+        let (session, adopted) = Session::adopt(state, self.incoming_for(conversation_id));
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(conversation_id.to_owned(), session);
+        adopted
+    }
+
+    /// Replace this process with `exe`, handing it every process still running, each with
+    /// what `progress` knew of its conversation's running turn. Returns only if that failed,
+    /// and then everything goes on as it was.
+    pub fn exec(&self, exe: &Path, progress: impl Fn(&str) -> Progress) -> io::Error {
+        let sessions = self.sessions.lock().unwrap();
+        let mut paused = Vec::new();
+        let mut handed = Vec::new();
+        for (conversation, session) in sessions.iter() {
+            if let Some((reader, state)) = session.pause() {
+                paused.push(reader);
+                handed.push(Handed {
+                    conversation: conversation.clone(),
+                    state,
+                    progress: progress(conversation),
+                });
+            }
+        }
+        crate::handover::exec(exe, handed)
     }
 
     /// Take a conversation's process away, so no later turn reaches it.

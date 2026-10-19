@@ -505,6 +505,9 @@ pub enum Command {
         request_id: String,
         decision: Decision,
     },
+    /// Replace the running app with the binary now installed where it was started from,
+    /// handing it every agent as it is. Answered only by an `Error` if that fails.
+    Restart,
 }
 
 /// Backend -> frontend.
@@ -595,6 +598,11 @@ pub enum ServerEvent {
         call: ToolCall,
         /// What `Decision::AllowAlways` stops asking about, such as `gh issue create`.
         scope: String,
+    },
+    /// A turn was already running when this app took the conversation's agent over from
+    /// the one it replaced; its events follow from where they were.
+    Working {
+        conversation_id: ConversationId,
     },
     /// A turn Claude Code began by itself starts, for this reason.
     Notice {

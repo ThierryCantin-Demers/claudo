@@ -1106,6 +1106,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "claudo-protocol",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

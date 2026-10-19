@@ -6,9 +6,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{ChildStderr, ChildStdin, Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -20,6 +22,7 @@ use claudo_protocol::{
     Attachment, Background, CliCommand, Compaction, ContextUsage, Decision, Finding, ModelOption,
     Profile, Quota, QuotaWindow, Review, TaskStatus, ToolCall,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -250,7 +253,7 @@ pub enum EngineEvent {
 
 /// The flags a `claude` process starts with. They hold for its whole life, so a
 /// turn asking for different ones needs a new process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub cwd: PathBuf,
     pub profile: Profile,
@@ -291,14 +294,18 @@ pub type Incoming = Box<dyn Fn(EngineEvent) + Send + Sync>;
 /// process finish a running turn and then exit.
 pub struct Session {
     config: SessionConfig,
-    pid: u32,
     shared: Arc<Shared>,
 }
 
 /// State shared with the thread reading the process's stdout.
 struct Shared {
+    pid: u32,
     /// `None` once the session is dropped.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: Mutex<Option<File>>,
+    /// Its stdin, stdout and stderr, which a handover passes on.
+    fds: [RawFd; 3],
+    /// Full auto, where the CLI asks about nothing but what the ask rules cover.
+    bypass: bool,
     turns: Mutex<Turns>,
     /// Signalled once the process has exited.
     exited: Condvar,
@@ -312,11 +319,34 @@ struct Shared {
     shown: Mutex<HashSet<String>>,
     /// Calls running in the background, which keep the process alive with stdin closed.
     background: Mutex<HashSet<String>>,
+    /// The reader reads and handles output only while holding this, so a handover that
+    /// holds it finds no line half handled.
+    reading: Mutex<Reading>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Pending {
     input: Value,
     scope: String,
+    /// What the approval asked about, for an app taking the session over to ask again.
+    call: ToolCall,
+}
+
+/// What the reader keeps between the lines it reads.
+#[derive(Default)]
+struct Reading {
+    /// Read, but not a whole line yet.
+    unread: Vec<u8>,
+    /// The CLI starts a turn of its own for background commands that ended, and echoes no
+    /// message for it, so it opens with these.
+    notices: Vec<String>,
+    /// A turn's `result` sums the usage of every request it made; its context is the last
+    /// request's.
+    last_request: u64,
+    /// Forked commands' subagents followed, by task: their session, and what stops it.
+    following: HashMap<String, (String, Arc<AtomicBool>)>,
+    /// The output ended, so the process is done and nothing is handed over.
+    closed: bool,
 }
 
 /// Turns are told apart by the ids the CLI reports as it starts each message, since it
@@ -365,6 +395,65 @@ impl Turns {
     }
 }
 
+/// A session as a handover passes it to the process replacing this one: everything but
+/// its channels, which the new process makes anew.
+#[derive(Serialize, Deserialize)]
+pub struct SessionState {
+    config: SessionConfig,
+    pid: u32,
+    fds: [RawFd; 3],
+    /// Output read but not yet a whole line, in base64.
+    unread: String,
+    queued: Vec<String>,
+    running: Option<Running>,
+    reports_ids: bool,
+    approvals: HashMap<String, Pending>,
+    always: HashSet<String>,
+    shown: HashSet<String>,
+    background: HashSet<String>,
+    notices: Vec<String>,
+    last_request: u64,
+    /// Subagents followed: their task, then their session.
+    following: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Running {
+    Client,
+    /// One the CLI began itself, such as for another agent's message.
+    Incoming,
+}
+
+impl SessionState {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn fds(&self) -> [RawFd; 3] {
+        self.fds
+    }
+
+    pub fn running(&self) -> Option<Running> {
+        self.running
+    }
+}
+
+/// What a session taken over from the process this one replaced was doing.
+pub struct Adopted {
+    /// The running turn's events, when the client started it.
+    pub running: Option<Receiver<EngineEvent>>,
+    /// The events of messages sent but not started yet, oldest first.
+    pub queued: Vec<Receiver<EngineEvent>>,
+    /// Approvals the running turn waits on: request id, call and scope.
+    pub approvals: Vec<(String, ToolCall, String)>,
+}
+
+/// The reader's state held, so nothing more is read until the process is replaced or this
+/// is dropped.
+pub(crate) struct Paused<'a> {
+    _reading: std::sync::MutexGuard<'a, Reading>,
+}
+
 const STDERR_TAIL_LINES: usize = 20;
 
 /// Calls that wait for the user's answer under every permission profile, Full auto included.
@@ -386,6 +475,9 @@ impl Session {
         let mut cmd = Command::new(claude_bin());
         cmd.current_dir(&config.cwd)
             .env("CLAUDE_CODE_SESSION_NAME", name)
+            // What a handover tells the process replacing this one is not the agent's.
+            .env_remove(crate::handover::FILE_VAR)
+            .env_remove(crate::handover::KEPT_VAR)
             .arg("-p")
             .args(["--input-format", "stream-json"])
             .args(["--output-format", "stream-json"])
@@ -418,197 +510,178 @@ impl Session {
         }
 
         let mut child = cmd.spawn()?;
-        let pid = child.id();
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-        let shared = Arc::new(Shared {
-            stdin: Mutex::new(Some(stdin)),
-            turns: Mutex::default(),
-            exited: Condvar::new(),
-            incoming,
-            last_activity: Mutex::new(Instant::now()),
-            approvals: Mutex::default(),
-            always: Mutex::default(),
-            shown: Mutex::default(),
-            background: Mutex::default(),
-        });
+        let pipe = |fd: Option<OwnedFd>| File::from(fd.expect("piped"));
+        let files = [
+            pipe(child.stdin.take().map(OwnedFd::from)),
+            pipe(child.stdout.take().map(OwnedFd::from)),
+            pipe(child.stderr.take().map(OwnedFd::from)),
+        ];
+        let state = SessionState {
+            config,
+            pid: child.id(),
+            fds: files.each_ref().map(AsRawFd::as_raw_fd),
+            unread: String::new(),
+            queued: Vec::new(),
+            running: None,
+            reports_ids: false,
+            approvals: HashMap::new(),
+            always: HashSet::new(),
+            shown: HashSet::new(),
+            background: HashSet::new(),
+            notices: Vec::new(),
+            last_request: 0,
+            following: Vec::new(),
+        };
+        let (session, ..) = Self::start(state, files, incoming);
         // Without it the process joins the other agents only once its first turn ends.
-        shared.write(&json!({
+        session.shared.write(&json!({
             "type": "control_request",
             "request_id": Uuid::new_v4().to_string(),
             "request": { "subtype": "initialize" },
         }))?;
+        Ok(session)
+    }
+
+    /// Take over a session the process this one replaced was running, its pipes inherited
+    /// across the exec.
+    pub fn adopt(state: SessionState, incoming: Option<Incoming>) -> (Self, Adopted) {
+        // SAFETY: a handover passes these descriptors to this process alone, open and owned
+        // by nothing else here.
+        let files = state.fds.map(|fd| unsafe { File::from_raw_fd(fd) });
+        for file in &files {
+            set_cloexec(file.as_raw_fd(), true);
+        }
+        let (session, running, queued) = Self::start(state, files, incoming);
+        let approvals = session
+            .shared
+            .approvals
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, pending)| (id.clone(), pending.call.clone(), pending.scope.clone()))
+            .collect();
+        let adopted = Adopted {
+            running,
+            queued,
+            approvals,
+        };
+        (session, adopted)
+    }
+
+    /// Starts reading a process's output, from where `state` says it was. Returns the
+    /// session with the events of its running client turn and of its queued messages.
+    fn start(
+        state: SessionState,
+        [stdin, stdout, stderr]: [File; 3],
+        incoming: Option<Incoming>,
+    ) -> (
+        Self,
+        Option<Receiver<EngineEvent>>,
+        Vec<Receiver<EngineEvent>>,
+    ) {
+        let mut receivers = Vec::new();
+        let mut channel = || {
+            let (tx, rx) = mpsc::channel();
+            receivers.push(rx);
+            tx
+        };
+        let running = state.running.map(|running| match running {
+            Running::Client => Route::Client(channel()),
+            Running::Incoming => Route::Incoming,
+        });
+        let queued = state.queued.into_iter().map(|id| (id, channel())).collect();
+        let mut receivers = receivers.into_iter();
+        let running_events = matches!(running, Some(Route::Client(_)))
+            .then(|| receivers.next())
+            .flatten();
+        let following: HashMap<String, (String, Arc<AtomicBool>)> = state
+            .following
+            .into_iter()
+            .map(|(task, session)| (task, (session, Arc::new(AtomicBool::new(false)))))
+            .collect();
+        let shared = Arc::new(Shared {
+            pid: state.pid,
+            stdin: Mutex::new(Some(stdin)),
+            fds: state.fds,
+            bypass: state.config.profile == Profile::FullAuto,
+            turns: Mutex::new(Turns {
+                queued,
+                running,
+                exited: false,
+                reports_ids: state.reports_ids,
+            }),
+            exited: Condvar::new(),
+            incoming,
+            last_activity: Mutex::new(Instant::now()),
+            approvals: Mutex::new(state.approvals),
+            always: Mutex::new(state.always),
+            shown: Mutex::new(state.shown),
+            background: Mutex::new(state.background),
+            reading: Mutex::new(Reading {
+                unread: BASE64_STANDARD.decode(&state.unread).unwrap_or_default(),
+                notices: state.notices,
+                last_request: state.last_request,
+                following: HashMap::new(),
+                closed: false,
+            }),
+        });
+        for (task, (session, stop)) in following {
+            shared.follow(&task, &session, &stop);
+            shared
+                .reading
+                .lock()
+                .unwrap()
+                .following
+                .insert(task, (session, stop));
+        }
 
         // Drained continuously: a long-lived process would block once the pipe filled.
         let stderr = thread::spawn(move || stderr_tail(stderr));
         let reader = shared.clone();
-        let bypass = config.profile == Profile::FullAuto;
         thread::spawn(move || {
-            // The CLI starts a turn of its own for background commands that ended, and
-            // echoes no message for it, so it opens with these.
-            let mut notices: Vec<String> = Vec::new();
-            // A turn's `result` sums the usage of every request it made; its context is the
-            // last request's.
-            let mut last_request = 0;
-            let mut following: HashMap<String, Arc<AtomicBool>> = HashMap::new();
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                reader.touch();
-                let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if let Some((task, session)) = forked_task(&v) {
-                    let stop = Arc::new(AtomicBool::new(false));
-                    following.insert(task.clone(), stop.clone());
-                    let shared = reader.clone();
-                    thread::spawn(move || follow_subagent(&shared, &session, &task, &stop));
-                }
-                if let Some(stop) = ended_task(&v).and_then(|task| following.remove(task)) {
-                    stop.store(true, Ordering::Relaxed);
-                }
-                if let Some(context) = request_context(&v) {
-                    last_request = context;
-                }
-                if let Some(message) = started_message(&v) {
-                    let mut turns = reader.turns.lock().unwrap();
-                    turns.reports_ids = true;
-                    if let Some(joined) = turns.begin(message) {
-                        reader.route(&turns, EngineEvent::Delivered { joined });
-                    }
-                    notices.clear();
-                    continue;
-                }
-                notices.extend(ended_notice(&v));
-                if v.get("type").and_then(Value::as_str) == Some("control_cancel_request") {
-                    if let Some(id) = v.get("request_id").and_then(Value::as_str) {
-                        reader.approvals.lock().unwrap().remove(id);
-                    }
-                    continue;
-                }
-                let events = match permission_prompt(&v, bypass) {
-                    Some(Prompt::Ask {
-                        request_id,
-                        call,
-                        input,
-                        scope,
-                    }) => {
-                        if reader.always.lock().unwrap().contains(&scope) {
-                            let _ = reader.write(&allow(&request_id, input));
-                            Vec::new()
-                        } else {
-                            reader.approvals.lock().unwrap().insert(
-                                request_id.clone(),
-                                Pending {
-                                    input,
-                                    scope: scope.clone(),
-                                },
-                            );
-                            vec![EngineEvent::ApprovalNeeded {
-                                request_id,
-                                call: *call,
-                                scope,
-                            }]
-                        }
-                    }
-                    Some(Prompt::Refuse { request_id, tool }) => {
-                        let message = format!(
-                            "Claude requested permissions to use {tool}, but you haven't granted it yet."
-                        );
-                        let _ = reader.write(&deny(&request_id, &message));
-                        Vec::new()
-                    }
-                    None => decode(&v),
-                };
-                for mut ev in events {
-                    if let EngineEvent::Background {
-                        call_id,
-                        background,
-                    } = &ev
-                    {
-                        let mut running = reader.background.lock().unwrap();
-                        match background.status {
-                            TaskStatus::Running => running.insert(call_id.clone()),
-                            _ => running.remove(call_id),
-                        };
-                    }
-                    if let EngineEvent::ToolStarted(call) = &ev
-                        && !reader.first_shown(&call.call_id)
-                    {
-                        continue;
-                    }
-                    if let EngineEvent::Completed { context, .. } = &mut ev {
-                        context.used = std::mem::take(&mut last_request);
-                        reader.shown.lock().unwrap().clear();
-                    }
-                    let completed = matches!(ev, EngineEvent::Completed { .. });
-                    let mut turns = reader.turns.lock().unwrap();
-                    let incoming =
-                        matches!(ev, EngineEvent::Incoming { .. } | EngineEvent::Typed { .. });
-                    if turns.running.is_none()
-                        && (incoming || matches!(ev, EngineEvent::Started { .. }))
-                    {
-                        // A CLI that reports no message ids: turns run in the order sent.
-                        let next = turns
-                            .queued
-                            .front()
-                            .map(|(id, _)| id.clone())
-                            .filter(|_| !turns.reports_ids && !incoming);
-                        turns.start(next.as_deref());
-                        if !incoming
-                            && matches!(turns.running, Some(Route::Incoming))
-                            && !notices.is_empty()
-                        {
-                            let notice = EngineEvent::Notice {
-                                text: notices.join("\n"),
-                            };
-                            reader.route(&turns, notice);
-                        }
-                        notices.clear();
-                    }
-                    reader.route(&turns, ev);
-                    if completed {
-                        turns.running = None;
-                    }
-                }
-            }
-
-            for stop in following.values() {
-                stop.store(true, Ordering::Relaxed);
-            }
-            let status = child.wait();
-            let err = stderr.join().unwrap_or_default();
-            let mut turns = reader.turns.lock().unwrap();
-            turns.exited = true;
-            reader.exited.notify_all();
-            let detail = if err.trim().is_empty() {
-                match status {
-                    Ok(s) => format!("claude exited without completing the turn ({s})"),
-                    Err(e) => format!("waiting on claude failed: {e}"),
-                }
-            } else {
-                err.trim().to_string()
-            };
-            if turns.running.is_some() {
-                reader.route(
-                    &turns,
-                    EngineEvent::Error {
-                        detail: detail.clone(),
-                    },
-                );
-            }
-            turns.running = None;
-            for (_, sink) in std::mem::take(&mut turns.queued) {
-                let _ = sink.send(EngineEvent::Error {
-                    detail: detail.clone(),
-                });
-            }
+            reader.read(stdout);
+            reader.ended(stderr.join().unwrap_or_default());
         });
-
-        Ok(Self {
-            config,
-            pid,
+        let session = Self {
+            config: state.config,
             shared,
-        })
+        };
+        (session, running_events, receivers.collect())
+    }
+
+    /// Holds the reader still and returns the session as a handover passes it on, or
+    /// `None` once its process is done.
+    pub(crate) fn pause(&self) -> Option<(Paused<'_>, SessionState)> {
+        let reading = self.shared.reading.lock().unwrap();
+        if reading.closed {
+            return None;
+        }
+        let turns = self.shared.turns.lock().unwrap();
+        let state = SessionState {
+            config: self.config.clone(),
+            pid: self.shared.pid,
+            fds: self.shared.fds,
+            unread: BASE64_STANDARD.encode(&reading.unread),
+            queued: turns.queued.iter().map(|(id, _)| id.clone()).collect(),
+            running: turns.running.as_ref().map(|route| match route {
+                Route::Client(_) => Running::Client,
+                Route::Incoming => Running::Incoming,
+            }),
+            reports_ids: turns.reports_ids,
+            approvals: self.shared.approvals.lock().unwrap().clone(),
+            always: self.shared.always.lock().unwrap().clone(),
+            shown: self.shared.shown.lock().unwrap().clone(),
+            background: self.shared.background.lock().unwrap().clone(),
+            notices: reading.notices.clone(),
+            last_request: reading.last_request,
+            following: reading
+                .following
+                .iter()
+                .map(|(task, (session, _))| (task.clone(), session.clone()))
+                .collect(),
+        };
+        drop(turns);
+        Some((Paused { _reading: reading }, state))
     }
 
     /// Start a turn, or queue it behind the running one. Its events arrive on the
@@ -694,7 +767,7 @@ impl Session {
 
     /// Answer an `ApprovalNeeded`; the waiting call then runs or fails. Returns its scope.
     pub fn answer(&self, request_id: &str, decision: Decision) -> io::Result<String> {
-        let Pending { input, scope } = self
+        let Pending { input, scope, .. } = self
             .shared
             .approvals
             .lock()
@@ -722,7 +795,7 @@ impl Session {
     }
 
     pub fn pid(&self) -> u32 {
-        self.pid
+        self.shared.pid
     }
 
     pub fn is_alive(&self) -> bool {
@@ -794,6 +867,223 @@ impl Shared {
         writeln!(stdin, "{message}")?;
         stdin.flush()
     }
+
+    fn follow(self: &Arc<Self>, task: &str, session: &str, stop: &Arc<AtomicBool>) {
+        let (shared, task, session, stop) = (
+            self.clone(),
+            task.to_string(),
+            session.to_string(),
+            stop.clone(),
+        );
+        thread::spawn(move || follow_subagent(&shared, &session, &task, &stop));
+    }
+
+    /// Handles each line of the process's output as it arrives, until the output ends.
+    fn read(self: &Arc<Self>, mut stdout: File) {
+        let mut chunk = vec![0; 64 * 1024];
+        while readable(stdout.as_raw_fd()) {
+            let mut reading = self.reading.lock().unwrap();
+            let n = match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            reading.unread.extend_from_slice(&chunk[..n]);
+            while let Some(end) = reading.unread.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<u8> = reading.unread.drain(..=end).collect();
+                self.touch();
+                if let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                    self.handle(&mut reading, &v);
+                }
+            }
+        }
+        self.reading.lock().unwrap().closed = true;
+    }
+
+    fn handle(self: &Arc<Self>, reading: &mut Reading, v: &Value) {
+        if let Some((task, session)) = forked_task(v) {
+            let stop = Arc::new(AtomicBool::new(false));
+            self.follow(&task, &session, &stop);
+            reading.following.insert(task, (session, stop));
+        }
+        if let Some((_, stop)) = ended_task(v).and_then(|task| reading.following.remove(task)) {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(context) = request_context(v) {
+            reading.last_request = context;
+        }
+        if let Some(message) = started_message(v) {
+            let mut turns = self.turns.lock().unwrap();
+            turns.reports_ids = true;
+            if let Some(joined) = turns.begin(message) {
+                self.route(&turns, EngineEvent::Delivered { joined });
+            }
+            reading.notices.clear();
+            return;
+        }
+        reading.notices.extend(ended_notice(v));
+        if v.get("type").and_then(Value::as_str) == Some("control_cancel_request") {
+            if let Some(id) = v.get("request_id").and_then(Value::as_str) {
+                self.approvals.lock().unwrap().remove(id);
+            }
+            return;
+        }
+        let events = match permission_prompt(v, self.bypass) {
+            Some(Prompt::Ask {
+                request_id,
+                call,
+                input,
+                scope,
+            }) => {
+                if self.always.lock().unwrap().contains(&scope) {
+                    let _ = self.write(&allow(&request_id, input));
+                    Vec::new()
+                } else {
+                    self.approvals.lock().unwrap().insert(
+                        request_id.clone(),
+                        Pending {
+                            input,
+                            scope: scope.clone(),
+                            call: (*call).clone(),
+                        },
+                    );
+                    vec![EngineEvent::ApprovalNeeded {
+                        request_id,
+                        call: *call,
+                        scope,
+                    }]
+                }
+            }
+            Some(Prompt::Refuse { request_id, tool }) => {
+                let message = format!(
+                    "Claude requested permissions to use {tool}, but you haven't granted it yet."
+                );
+                let _ = self.write(&deny(&request_id, &message));
+                Vec::new()
+            }
+            None => decode(v),
+        };
+        for mut ev in events {
+            if let EngineEvent::Background {
+                call_id,
+                background,
+            } = &ev
+            {
+                let mut running = self.background.lock().unwrap();
+                match background.status {
+                    TaskStatus::Running => running.insert(call_id.clone()),
+                    _ => running.remove(call_id),
+                };
+            }
+            if let EngineEvent::ToolStarted(call) = &ev
+                && !self.first_shown(&call.call_id)
+            {
+                continue;
+            }
+            if let EngineEvent::Completed { context, .. } = &mut ev {
+                context.used = std::mem::take(&mut reading.last_request);
+                self.shown.lock().unwrap().clear();
+            }
+            let completed = matches!(ev, EngineEvent::Completed { .. });
+            let mut turns = self.turns.lock().unwrap();
+            let incoming = matches!(ev, EngineEvent::Incoming { .. } | EngineEvent::Typed { .. });
+            if turns.running.is_none() && (incoming || matches!(ev, EngineEvent::Started { .. })) {
+                // A CLI that reports no message ids: turns run in the order sent.
+                let next = turns
+                    .queued
+                    .front()
+                    .map(|(id, _)| id.clone())
+                    .filter(|_| !turns.reports_ids && !incoming);
+                turns.start(next.as_deref());
+                if !incoming
+                    && matches!(turns.running, Some(Route::Incoming))
+                    && !reading.notices.is_empty()
+                {
+                    let notice = EngineEvent::Notice {
+                        text: reading.notices.join("\n"),
+                    };
+                    self.route(&turns, notice);
+                }
+                reading.notices.clear();
+            }
+            self.route(&turns, ev);
+            if completed {
+                turns.running = None;
+            }
+        }
+    }
+
+    /// Reaps the process once its output has ended, and fails whatever was waiting on it.
+    fn ended(&self, stderr: String) {
+        for (_, stop) in self.reading.lock().unwrap().following.values() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        let status = wait(self.pid);
+        let mut turns = self.turns.lock().unwrap();
+        turns.exited = true;
+        self.exited.notify_all();
+        let detail = if stderr.trim().is_empty() {
+            match status {
+                Ok(s) => format!("claude exited without completing the turn ({s})"),
+                Err(e) => format!("waiting on claude failed: {e}"),
+            }
+        } else {
+            stderr.trim().to_string()
+        };
+        if turns.running.is_some() {
+            self.route(
+                &turns,
+                EngineEvent::Error {
+                    detail: detail.clone(),
+                },
+            );
+        }
+        turns.running = None;
+        for (_, sink) in std::mem::take(&mut turns.queued) {
+            let _ = sink.send(EngineEvent::Error {
+                detail: detail.clone(),
+            });
+        }
+    }
+}
+
+/// Waits until `fd` has something to read, or has closed.
+fn readable(fd: RawFd) -> bool {
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: one valid `pollfd`, for the duration of the call.
+        match unsafe { libc::poll(&mut poll, 1, -1) } {
+            1 => return true,
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Reaps the process by pid, which `Child::wait` cannot do for one adopted from a handover.
+pub(crate) fn wait(pid: u32) -> io::Result<ExitStatus> {
+    let mut status = 0;
+    loop {
+        // SAFETY: `status` outlives the call.
+        if unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) } != -1 {
+            return Ok(ExitStatus::from_raw(status));
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+pub(crate) fn set_cloexec(fd: RawFd, cloexec: bool) {
+    let flag = if cloexec { libc::FD_CLOEXEC } else { 0 };
+    // SAFETY: changes only the descriptor's flags; a closed one makes it fail harmlessly.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, flag) };
 }
 
 /// A `can_use_tool` request. The CLI sends one for every call that would prompt, but only
@@ -967,7 +1257,7 @@ fn deny(request_id: &str, message: &str) -> Value {
     )
 }
 
-fn stderr_tail(stderr: ChildStderr) -> String {
+fn stderr_tail(stderr: File) -> String {
     let mut tail = VecDeque::with_capacity(STDERR_TAIL_LINES);
     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
         if tail.len() == STDERR_TAIL_LINES {

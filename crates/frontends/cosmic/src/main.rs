@@ -468,6 +468,11 @@ mod app {
                     self.since.get_or_insert_with(std::time::Instant::now);
                     self.items.push(Entry::Notice(text));
                 }
+                ServerEvent::Working { .. } => {
+                    self.streaming = true;
+                    self.partial = true;
+                    self.since.get_or_insert_with(std::time::Instant::now);
+                }
                 ServerEvent::Delta { text, .. } => {
                     self.retrying = None;
                     self.push_assistant(&text);
@@ -780,6 +785,8 @@ mod app {
         beside: bool,
         /// A window opened for a later launch, to bring forward once it exists.
         launched: Option<window::Id>,
+        /// A new build is installed, so the header offers to restart into it.
+        update_ready: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1013,6 +1020,10 @@ mod app {
         NewWindow,
         /// claudo was launched again while this one runs.
         Launched,
+        /// See whether a new build was installed over this one.
+        CheckUpdate,
+        /// Replace this app with the new build, handing it every agent.
+        Restart,
         /// A new chat in a project folder the user picks.
         NewChatIn,
         /// Where a conversation that has not started works.
@@ -2041,6 +2052,9 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Working {
+                    ref conversation_id,
+                }
                 | ServerEvent::Compacting {
                     ref conversation_id,
                 }
@@ -2112,6 +2126,14 @@ mod app {
                         let mut view = self.revived(&id);
                         view.partial = true;
                         self.views.insert(id.clone(), view);
+                    }
+                    // A turn the app this one replaced was running: its history so far comes
+                    // now, and again once it ends.
+                    if matches!(ev, ServerEvent::Working { .. }) && !self.views.contains_key(&id) {
+                        let mut view = self.revived(&id);
+                        view.loading = true;
+                        self.views.insert(id.clone(), view);
+                        self.cmd(Command::OpenConversation { id: id.clone() });
                     }
                     if let Some(view) = self.views.get_mut(&id) {
                         view.apply(ev);
@@ -4283,6 +4305,7 @@ mod app {
                 folders: Vec::new(),
                 beside,
                 launched: None,
+                update_ready: false,
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -4339,6 +4362,7 @@ mod app {
                 Message::Connected(commands) => self.commands = Some(commands),
                 Message::Second => {}
                 Message::Minute => {
+                    self.update_ready = instance::replaced();
                     self.minutes += 1;
                     if self.minutes.is_multiple_of(usage::USAGE_REFRESH_MINUTES) {
                         return self.update(Message::RefreshUsage);
@@ -4644,6 +4668,11 @@ mod app {
                         session_id,
                         request,
                     });
+                }
+                Message::CheckUpdate => self.update_ready = instance::replaced(),
+                Message::Restart => {
+                    self.persist();
+                    self.cmd(Command::Restart);
                 }
                 Message::Launched => {
                     self.current = self.main_window();
@@ -5238,8 +5267,18 @@ mod app {
         /// Commands button.
         fn header_end_of(&self, w: window::Id) -> Vec<Element<'_, Message>> {
             let layout = self.window(w);
+            let restart = self.update_ready.then(|| {
+                widget::tooltip(
+                    widget::button::suggested("Restart to update")
+                        .leading_icon(widget::icon::from_name("view-refresh-symbolic"))
+                        .on_press(Message::Restart),
+                    widget::text("A new build of claudo is installed. Agents keep working through the restart."),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into()
+            });
             if layout.page != Page::Chat {
-                return Vec::new();
+                return restart.into_iter().collect();
             }
             let context = self
                 .focused(w)
@@ -5247,8 +5286,9 @@ mod app {
                 .filter(|_| layout.tiles.len() == 1)
                 .and_then(|c| context_label(&c.context))
                 .map(|label| widget::text(label).size(12.0).class(dim()).into());
-            context
+            restart
                 .into_iter()
+                .chain(context)
                 .chain([self.commands_button(w)])
                 .collect()
         }
@@ -5340,6 +5380,7 @@ mod app {
             Event::Window(cosmic::iced::window::Event::Resized(size)) => {
                 Some(Message::Resized(id, size))
             }
+            Event::Window(cosmic::iced::window::Event::Focused) => Some(Message::CheckUpdate),
             Event::Keyboard(Key::KeyPressed { key, modifiers, .. }) if modifiers.control() => {
                 match key.as_ref() {
                     K::Character("+") | K::Character("=") => Some(Message::Zoom(1.1)),

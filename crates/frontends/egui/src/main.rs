@@ -346,6 +346,12 @@ impl ClaudoApp {
                     }
                 }
 
+                ServerEvent::Working { conversation_id } => {
+                    if self.is_current(&conversation_id) {
+                        self.streaming = true;
+                    }
+                }
+
                 ServerEvent::Notice {
                     conversation_id,
                     text,

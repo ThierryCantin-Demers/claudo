@@ -329,6 +329,17 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
   ends. Only that process reports its end, so one running a call in the background is
   never closed for idling nor replaced for new flags (a message keeps the flags it has).
   A conversation reopened with no process of this claudo's shows such a call as ended.
+- **Restarting into a new build hands every process over.** Once the binary claudo runs
+  from is replaced (`/proc/self/exe` reads as deleted), the header offers "Restart to
+  update", which execs the new build in the same process, so each `claude` child keeps its
+  pid and pipes. `LiveSessions::exec` holds every reader's `reading` lock, writes each
+  session's state to `$XDG_RUNTIME_DIR/claudo-handover-<pid>.json` and clears FD_CLOEXEC on
+  its pipes; the new build's `Backend::new` adopts them, says `Working` for turns in flight
+  and asks pending approvals again. A build that cannot read the file closes the pipes
+  `CLAUDO_HANDOVER_KEPT` lists, so the agents finish their turn alone. The reader reads and
+  handles output only while holding `reading`, and reaps by pid with `waitpid`: without
+  either, a handover loses a half-read line or leaves an adopted process unreaped.
+  `examples/handover_probe` and `restart_probe` check it on the real CLI.
 - **Several claudo instances share `conversations.json`.** Each writes the whole list, so a
   save first takes in what another wrote: the conversations it added, and its version of
   each one this instance has not changed since it last read or wrote the file. Startup takes

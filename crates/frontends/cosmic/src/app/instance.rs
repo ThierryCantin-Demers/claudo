@@ -57,6 +57,16 @@ pub fn launches() -> impl Stream<Item = Message> {
     }
 }
 
+/// A new build is installed where this one was started from: a binary replaced while it
+/// runs is read as deleted, and a file is there again.
+pub fn replaced() -> bool {
+    std::fs::read_link("/proc/self/exe").is_ok_and(|exe| {
+        exe.to_str()
+            .and_then(|exe| exe.strip_suffix(" (deleted)"))
+            .is_some_and(|path| Path::new(path).is_file())
+    })
+}
+
 /// The executable's path; once a rebuild replaces the file, a running claudo's ends in
 /// ` (deleted)`, so the new one counts as another build.
 fn build() -> String {
