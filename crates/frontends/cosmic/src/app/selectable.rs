@@ -130,7 +130,7 @@ impl<'a> Selectable<'a> {
             font: None,
             color: None,
             width: Length::Fill,
-            wrapping: Wrapping::Word,
+            wrapping: Wrapping::WordOrGlyph,
             joiner: "\n\n",
             conversation,
             block,

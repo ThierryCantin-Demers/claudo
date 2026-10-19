@@ -413,6 +413,15 @@ fn snapshots() {
     h.snapshot("usage-narrow");
 
     let mut app = two_tiles();
+    let token = "ZVJBbtwwDPxKsfcKybW+Bf1F0QMtcW0iEmWQlDdG0b+Hjq1Ntr0IojhDDof6cxlzw0WITS8".repeat(4);
+    app.views
+        .get_mut(ALPHA)
+        .expect("a view")
+        .items
+        .push(Entry::User(format!("my current build is {token}")));
+    Harness::new(app).snapshot("long-word");
+
+    let mut app = two_tiles();
     let main = app.main_window();
     let _ = app.update(Message::In(
         main,
