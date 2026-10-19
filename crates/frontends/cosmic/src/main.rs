@@ -3218,7 +3218,14 @@ mod app {
                 )
                 .class(cosmic::theme::Container::custom(|theme| {
                     let cosmic = theme.cosmic();
+                    // The theme's own background is see-through, and so would the text
+                    // under the button be.
+                    let solid = Color {
+                        a: 1.0,
+                        ..cosmic.bg_color().into()
+                    };
                     container::Style {
+                        background: Some(solid.into()),
                         border: Border {
                             radius: cosmic.corner_radii.radius_xl.into(),
                             width: 1.0,
