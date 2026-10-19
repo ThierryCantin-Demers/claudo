@@ -277,7 +277,9 @@ index, so the named widget must sit below the reordered parent's direct child. T
 both through `Intercept`; `src/app/tests.rs` checks a dragged tile keeps its scroll. Inside a
 tile, a named widget whose index changes gets an empty state and panics ("Downcast on
 stateless state") even wrapped in a container, so keep its index fixed: the message box puts
-attachments after the editor, not before.
+attachments after the editor, not before. A slot above it that changes widget type also
+loses the editor's state, its focus included, so the label over the message box is always a
+container and only its content changes.
 
 **Several windows.** Each window has a `WindowLayout` keyed by its `window::Id`; messages
 from a window's view and keys pressed in it arrive as `Message::In(window, ..)`. libcosmic

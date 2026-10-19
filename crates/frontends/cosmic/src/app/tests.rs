@@ -926,13 +926,19 @@ fn ctrl_backspace_and_delete_remove_whole_words() {
 }
 
 #[test]
-fn up_and_down_recall_sent_prompts() {
+fn up_and_down_recall_sent_prompts_from_an_empty_box() {
     use keyboard::key::{Code, Named};
+    let long = "A prompt long enough to wrap over several lines of the message box, \
+                so going up and down moves through it as it is laid out before going \
+                on to the prompt before or after it. "
+        .repeat(3);
     let mut app = two_tiles();
     let view = app.views.get_mut(ALPHA).expect("Alpha");
     view.items.push(Entry::User("try again".to_string()));
     view.items.push(Entry::User("try again".to_string()));
-    view.draft = text_editor::Content::with_text("half\ntyped");
+    view.items.push(Entry::User(long.clone()));
+    view.items.push(Entry::User("first\nsecond".to_string()));
+    view.draft = text_editor::Content::with_text(&long);
     view.draft
         .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
     let mut h = Harness::new(app);
@@ -941,24 +947,56 @@ fn up_and_down_recall_sent_prompts() {
     let up = || key(Named::ArrowUp, Code::ArrowUp, none);
     let down = || key(Named::ArrowDown, Code::ArrowDown, none);
     let draft = |h: &Harness| h.app.views[ALPHA].draft.text();
+    let cursor = |h: &Harness| h.app.views[ALPHA].draft.cursor().position;
 
+    let end = cursor(&h);
+    for _ in 0..6 {
+        h.send(vec![up()]);
+    }
+    assert_eq!(draft(&h), long, "a draft is never swapped for a prompt");
+    assert_ne!(cursor(&h), end, "Up moves up its wrapped lines");
+    assert_eq!(h.app.views[ALPHA].recalled, 0);
+
+    h.app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::new();
     h.send(vec![up()]);
-    assert_eq!(draft(&h), "half\ntyped", "Up first moves within the draft");
+    assert_eq!(draft(&h), "first\nsecond");
+    h.send(vec![down()]);
+    assert_eq!(
+        draft(&h),
+        "first\nsecond",
+        "Down goes through the prompt's lines first"
+    );
+    h.send(vec![up()]);
+    h.send(vec![up()]);
+    assert_eq!(draft(&h), long);
+    let top = cursor(&h);
+    h.send(vec![down()]);
+    assert_eq!(
+        draft(&h),
+        long,
+        "a wrapped prompt is gone through line by line"
+    );
+    assert_ne!(cursor(&h), top);
+    h.send(vec![up()]);
     h.send(vec![up()]);
     assert_eq!(draft(&h), "try again");
     h.send(vec![up()]);
     assert_eq!(draft(&h), "Alpha question 29", "a repeat is recalled once");
+
+    h.send(vec![key(Named::Escape, Code::Escape, none)]);
+    assert_eq!(draft(&h), "", "Escape empties the box");
+    assert_eq!(h.app.views[ALPHA].recalled, 0);
+
+    h.send(vec![up()]);
     h.send(vec![down()]);
-    assert_eq!(draft(&h), "try again");
     h.send(vec![down()]);
     assert_eq!(
         draft(&h),
-        "half\ntyped",
-        "past the newest is the user's draft"
+        "",
+        "past the newest prompt the box is empty again"
     );
-    h.send(vec![down()]);
-    assert_eq!(draft(&h), "half\ntyped");
 
+    h.send(vec![up()]);
     h.send(vec![up()]);
     h.send(vec![up()]);
     h.send(vec![key(Named::Enter, Code::Enter, none)]);
@@ -966,6 +1004,18 @@ fn up_and_down_recall_sent_prompts() {
     assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "try again"));
     assert_eq!(view.draft.text(), "");
     assert_eq!(view.recalled, 0);
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn recalled_prompt_snapshot() {
+    let mut app = two_tiles();
+    app.layout_mut().tiles.truncate(1);
+    let view = app.views.get_mut(ALPHA).expect("Alpha");
+    view.draft = text_editor::Content::new();
+    view.step(true);
+    view.step(true);
+    Harness::new(app).snapshot("recalled-prompt");
 }
 
 fn bash(id: &str, command: &str, description: &str) -> ToolCall {

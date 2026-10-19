@@ -198,8 +198,6 @@ mod app {
         partial: bool,
         /// How many prompts back the draft was recalled from; 0 when it is the user's own.
         recalled: usize,
-        /// The user's own draft while a recalled prompt replaces it.
-        stash: String,
         /// Items whose row in the Commands panel is expanded.
         commands_open: std::collections::HashSet<usize>,
         /// The Commands panel shows only this conversation's title.
@@ -240,7 +238,6 @@ mod app {
                 error: None,
                 partial: false,
                 recalled: 0,
-                stash: String::new(),
                 commands_open: Default::default(),
                 commands_collapsed: false,
                 finished_collapsed: false,
@@ -272,8 +269,23 @@ mod app {
             prompts
         }
 
-        /// Replace the draft with the prompt before or after the one shown, back to the
-        /// user's own draft past the newest.
+        /// Up or Down while the message box shows a sent prompt, or Up while it is empty:
+        /// through the prompt's lines as laid out, then on to the prompt before or after it.
+        fn step(&mut self, older: bool) {
+            use text_editor::{Action, Motion};
+            if self.recalled > 0 {
+                let before = self.draft.cursor().position;
+                self.draft
+                    .perform(Action::Move(if older { Motion::Up } else { Motion::Down }));
+                if self.draft.cursor().position != before {
+                    return;
+                }
+            }
+            self.recall(older);
+        }
+
+        /// Replace the draft with the prompt before or after the one shown, emptying it past
+        /// the newest. The cursor lands where pressing on goes further.
         fn recall(&mut self, older: bool) {
             let back = if older {
                 self.recalled + 1
@@ -283,17 +295,25 @@ mod app {
             if back == self.recalled || back > self.prompts().len() {
                 return;
             }
-            if self.recalled == 0 {
-                self.stash = self.draft.text();
-            }
             let text = match back {
-                0 => std::mem::take(&mut self.stash),
+                0 => String::new(),
                 _ => self.prompts()[back - 1].to_string(),
             };
             self.recalled = back;
             self.draft = text_editor::Content::with_text(&text);
-            self.draft
-                .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+            self.draft.perform(text_editor::Action::Move(if older {
+                text_editor::Motion::DocumentStart
+            } else {
+                text_editor::Motion::DocumentEnd
+            }));
+        }
+
+        /// Empty the message box of a sent prompt it shows.
+        fn unrecall(&mut self) {
+            if self.recalled > 0 {
+                self.recalled = 0;
+                self.draft = text_editor::Content::new();
+            }
         }
 
         /// True while a turn runs and no text is appearing, so something must show it is alive.
@@ -931,11 +951,13 @@ mod app {
             run: bool,
         },
         MenuClose(ConversationId),
-        /// Up or Down at the message box's edge: an earlier or later prompt.
+        /// Up or Down in an empty message box or one showing a sent prompt.
         Recall {
             conversation: ConversationId,
             older: bool,
         },
+        /// Escape while the message box shows a sent prompt: it empties.
+        Unrecall(ConversationId),
         /// A press in a transcript's text, starting a selection there.
         SelectStart(ConversationId, Mark),
         /// The cursor dragged the selection's end here.
@@ -2839,6 +2861,7 @@ mod app {
             let size = 14.0 * self.zoom;
             let (model, effort, profile) = self.effective(id);
             let menu_open = !self.command_matches(view).is_empty();
+            let recalled = view.recalled > 0;
             let placeholder = if view.streaming {
                 "Message Claude while it works…"
             } else if view.items.is_empty() {
@@ -2970,19 +2993,27 @@ mod app {
             )
             .padding(if compact { [10, 10] } else { [14, 16] })
             .width(Length::Fill)
-            .class(cosmic::theme::Container::custom(|theme| {
+            .class(cosmic::theme::Container::custom(move |theme| {
                 let cosmic = theme.cosmic();
                 container::Style {
                     background: Some(Color::from(cosmic.bg_component_color()).into()),
                     border: Border {
                         radius: cosmic.corner_radii.radius_m.into(),
                         width: 1.0,
-                        color: cosmic.bg_divider().into(),
+                        color: match recalled {
+                            true => cosmic.accent_color().into(),
+                            false => cosmic.bg_divider().into(),
+                        },
                     },
                     ..container::Style::default()
                 }
             }));
-            let column = widget::Column::with_children(vec![boxed.into()])
+            // Always a container, so the editor below keeps its state when the label goes.
+            let label = widget::container(match recalled {
+                true => recalled_label(view.recalled, view.prompts().len(), self.zoom),
+                false => widget::space::vertical().height(0).into(),
+            });
+            let column = widget::Column::with_children(vec![label.into(), boxed.into()])
                 .max_width(COLUMN_WIDTH * self.zoom);
             widget::container(column)
                 .center_x(Length::Fill)
@@ -3695,6 +3726,31 @@ mod app {
         widget::container(bubble).align_right(Length::Fill).into()
     }
 
+    /// Over the message box while it shows a prompt already sent, `back` prompts ago.
+    fn recalled_label<'a>(back: usize, prompts: usize, zoom: f32) -> Element<'a, Message> {
+        let size = 12.5 * zoom;
+        let accent: Color = cosmic::theme::active().cosmic().accent_text_color().into();
+        widget::Row::with_children(vec![
+            widget::icon::from_name("document-open-recent-symbolic")
+                .size((14.0 * zoom) as u16)
+                .into(),
+            widget::text(format!("Earlier prompt, {back} of {prompts}"))
+                .size(size)
+                .font(cosmic::font::semibold())
+                .class(cosmic::theme::Text::Color(accent))
+                .into(),
+            widget::space::horizontal().into(),
+            widget::text("Up and Down to browse, Esc to clear")
+                .size(size)
+                .class(dim())
+                .into(),
+        ])
+        .spacing(6.0 * zoom)
+        .align_y(Alignment::Center)
+        .padding([0.0, 8.0 * zoom, 6.0 * zoom, 8.0 * zoom])
+        .into()
+    }
+
     /// Another agent's message: an outlined card on Claude's side, so it never passes
     /// for one the user wrote.
     fn notice_row(text: &str, size: f32) -> Element<'_, Message> {
@@ -4006,8 +4062,8 @@ mod app {
         widget::Id::new(format!("composer-{conversation}"))
     }
 
-    /// Enter sends, and Up and Down past the first or last line recall prompts; Shift+Enter
-    /// and everything else keep the editor's own bindings.
+    /// Enter sends; Up in an empty box recalls the prompts sent, and Up, Down and Escape move
+    /// among them. Shift+Enter and everything else keep the editor's own bindings.
     fn composer_keys(
         press: text_editor::KeyPress,
         conversation: &ConversationId,
@@ -4058,28 +4114,26 @@ mod app {
         if enter && focused && !modifiers.shift() {
             return Some(Binding::Custom(Message::Send(conversation.clone())));
         }
-        let line = draft.cursor().position.line;
+        let recalled = view.recalled > 0;
         let older = match press.key {
             keyboard::Key::Named(Named::ArrowUp)
-                if line == 0 && view.recalled < view.prompts().len() =>
+                if recalled || (draft.text().is_empty() && !view.prompts().is_empty()) =>
             {
                 Some(true)
             }
-            keyboard::Key::Named(Named::ArrowDown)
-                if line + 1 == draft.line_count() && view.recalled > 0 =>
-            {
-                Some(false)
-            }
+            keyboard::Key::Named(Named::ArrowDown) if recalled => Some(false),
             _ => None,
         };
-        if let Some(older) = older
-            && focused
-            && modifiers.is_empty()
-        {
-            return Some(Binding::Custom(Message::Recall {
-                conversation: conversation.clone(),
-                older,
-            }));
+        if focused && modifiers.is_empty() {
+            if let Some(older) = older {
+                return Some(Binding::Custom(Message::Recall {
+                    conversation: conversation.clone(),
+                    older,
+                }));
+            }
+            if recalled && matches!(press.key, keyboard::Key::Named(Named::Escape)) {
+                return Some(Binding::Custom(Message::Unrecall(conversation.clone())));
+            }
         }
         // iced's editor deletes one character whatever the modifiers; with Ctrl it is a word,
         // or the selection when there is one.
@@ -4357,7 +4411,12 @@ mod app {
                     older,
                 } => {
                     if let Some(view) = self.views.get_mut(&conversation) {
-                        view.recall(older);
+                        view.step(older);
+                    }
+                }
+                Message::Unrecall(conversation) => {
+                    if let Some(view) = self.views.get_mut(&conversation) {
+                        view.unrecall();
                     }
                 }
                 Message::Stop(conversation_id) => self.cmd(Command::Stop { conversation_id }),
