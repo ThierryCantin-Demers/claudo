@@ -131,7 +131,7 @@ impl Operation for ScrollOnce {
     }
 }
 
-/// Whether the scrollable it holds is far enough from its bottom to offer the way back.
+/// Whether the scrollable it holds has left its bottom, past a scroll too small to mean it.
 #[derive(Default)]
 struct FarUp(Option<bool>);
 
@@ -151,11 +151,11 @@ impl Operation for FarUp {
         _state: &mut dyn Scrollable,
     ) {
         let from_bottom = content.height - bounds.height - translation.y;
-        self.0.get_or_insert(from_bottom > bounds.height / 2.0);
+        self.0.get_or_insert(from_bottom > LEFT_BOTTOM);
     }
 }
 
-/// Holds a transcript, and over it a button back to the bottom once it is scrolled well up.
+/// Holds a transcript, and over it a button back to the bottom once it is scrolled up.
 /// A middle click starts it scrolling toward the pointer, faster the farther the pointer
 /// moves from where it was clicked; another click stops it, and so does letting go of the
 /// button after moving with it held.
@@ -193,6 +193,9 @@ fn speed(dy: f32) -> f32 {
     let d = (dy.abs() - DEAD_ZONE).max(0.0);
     (6.0 * d + 0.04 * d * d).copysign(dy)
 }
+
+/// How far up from the bottom a transcript is before the button back shows: a line or two.
+const LEFT_BOTTOM: f32 = 40.0;
 
 /// Room between the button and the transcript's bottom edge.
 const BUTTON_MARGIN: f32 = 16.0;
@@ -342,6 +345,7 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Scroller<'_> {
             }
             _ => {}
         }
+        let taken_before = shell.is_event_captured();
         if state.far_up {
             back.as_widget_mut().update(
                 &mut tree.children[1],
@@ -354,7 +358,8 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Scroller<'_> {
                 viewport,
             );
         }
-        if !shell.is_event_captured() {
+        // A press on the button is not one on the text under it.
+        if taken_before || !shell.is_event_captured() {
             transcript.as_widget_mut().update(
                 &mut tree.children[0],
                 event,

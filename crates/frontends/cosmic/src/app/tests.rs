@@ -2318,7 +2318,7 @@ fn autoscroll_snapshot() {
 }
 
 #[test]
-fn a_button_back_to_the_bottom_shows_once_scrolled_well_up() {
+fn a_button_back_to_the_bottom_shows_once_scrolled_up() {
     use cosmic::iced::advanced::widget::operation::black_box;
     let button_at = (548.0, 774.0);
     let mut h = Harness::new(two_tiles());
@@ -2339,12 +2339,8 @@ fn a_button_back_to_the_bottom_shows_once_scrolled_well_up() {
     assert!(jumps(&mut h).is_empty(), "none at the bottom");
 
     h.move_to(560.0, 400.0);
-    h.send(vec![wheel(2.0)]);
-    assert!(jumps(&mut h).is_empty(), "nor a little way up");
-
-    h.move_to(560.0, 400.0);
-    h.send(vec![wheel(30.0)]);
-    assert_eq!(jumps(&mut h), [scroll::Jump::Bottom]);
+    h.send(vec![wheel(1.0)]);
+    assert_eq!(jumps(&mut h), [scroll::Jump::Bottom], "one notch up");
 
     let mut op = scroll::jump_in(ALPHA, scroll::Jump::Bottom);
     h.frame(|ui, renderer| ui.operate(renderer, &mut black_box(&mut op)));
