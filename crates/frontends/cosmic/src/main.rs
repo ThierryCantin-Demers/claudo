@@ -796,6 +796,8 @@ mod app {
         titled: u64,
         /// The windows reopened at launch still have to go back to their workspaces.
         placing: bool,
+        /// They are being sent back.
+        restoring: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1039,8 +1041,10 @@ mod app {
         CheckUpdate,
         /// Replace this app with the new build, handing it every agent.
         Restart,
-        /// Where each window was found, by title.
+        /// Where each window is now, by title.
         Placed(HashMap<String, placement::Spot>),
+        /// The windows reopened at launch were sent back to their workspaces.
+        Restored,
         /// A new chat in a project folder the user picks.
         NewChatIn,
         /// Where a conversation that has not started works.
@@ -1442,9 +1446,19 @@ mod app {
                     })
                     .collect();
                 if !spots.is_empty() {
-                    std::thread::spawn(move || {
-                        placement::restore(spots, std::time::Duration::from_secs(10))
-                    });
+                    self.restoring = true;
+                    self.tasks.push(Task::perform(
+                        async move {
+                            let (done, restored) =
+                                cosmic::iced::futures::channel::oneshot::channel();
+                            std::thread::spawn(move || {
+                                placement::restore(spots, std::time::Duration::from_secs(10));
+                                let _ = done.send(());
+                            });
+                            let _ = restored.await;
+                        },
+                        |()| cosmic::Action::App(Message::Restored),
+                    ));
                 }
             }
         }
@@ -1471,20 +1485,7 @@ mod app {
             self.titles.retain(|w, _| self.windows.contains_key(w));
         }
 
-        /// Finds where each window is, away from the event loop.
-        fn find_windows(&self) -> Task<Message> {
-            let titles: Vec<String> = self.titles.values().cloned().collect();
-            Task::perform(
-                async move {
-                    let (found, spots) = cosmic::iced::futures::channel::oneshot::channel();
-                    std::thread::spawn(move || found.send(placement::read(&titles)));
-                    spots.await.unwrap_or_default()
-                },
-                |spots| cosmic::Action::App(Message::Placed(spots)),
-            )
-        }
-
-        /// Notes where each window was found. Returns whether any moved.
+        /// Notes where each window is. Returns whether any moved.
         fn placed(&mut self, spots: HashMap<String, placement::Spot>) -> bool {
             let mut moved = false;
             for (w, title) in &self.titles {
@@ -4457,6 +4458,7 @@ mod app {
                 titles: HashMap::new(),
                 titled: 0,
                 placing: !beside,
+                restoring: false,
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -4471,6 +4473,7 @@ mod app {
             let mut subscriptions = vec![
                 named("backend", backend_worker),
                 named("launches", instance::launches),
+                named("placements", placements),
                 window_events(),
                 // Also keeps the usage reset times current.
                 cosmic::iced::time::every(std::time::Duration::from_secs(60))
@@ -4514,7 +4517,6 @@ mod app {
                 Message::Second => {}
                 Message::Minute => {
                     self.update_ready = instance::replaced();
-                    self.tasks.push(self.find_windows());
                     self.minutes += 1;
                     if self.minutes.is_multiple_of(usage::USAGE_REFRESH_MINUTES) {
                         return self.update(Message::RefreshUsage);
@@ -4823,16 +4825,17 @@ mod app {
                 }
                 Message::CheckUpdate => self.update_ready = instance::replaced(),
                 Message::Restart => {
-                    let titles: Vec<String> = self.titles.values().cloned().collect();
-                    self.placed(placement::read(&titles));
                     self.persist();
                     self.cmd(Command::Restart);
                 }
+                // Until the reopened windows are back where they were, where they are is not
+                // where to put them next time.
                 Message::Placed(spots) => {
-                    if self.placed(spots) {
+                    if !self.placing && !self.restoring && self.placed(spots) {
                         self.persist();
                     }
                 }
+                Message::Restored => self.restoring = false,
                 Message::Launched => {
                     self.current = self.main_window();
                     let task = self.update(Message::NewWindow);
@@ -5668,6 +5671,10 @@ mod app {
 
     /// Worker: owns the backend, streams events as messages. The first message
     /// hands the UI a command sender.
+    fn placements() -> impl Stream<Item = Message> {
+        placement::watch().map(Message::Placed)
+    }
+
     fn backend_worker() -> impl cosmic::iced::futures::Stream<Item = Message> {
         stream::channel(
             64,

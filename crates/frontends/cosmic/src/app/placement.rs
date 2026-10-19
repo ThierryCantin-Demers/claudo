@@ -29,6 +29,8 @@ use cosmic::cctk::wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
     ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
 };
+use cosmic::iced::futures::Stream;
+use cosmic::iced::futures::channel::mpsc;
 use serde::{Deserialize, Serialize};
 
 use super::ClaudoApp;
@@ -41,19 +43,26 @@ pub struct Spot {
     pub workspace: String,
 }
 
-/// Where each of claudo's windows titled in `titles` is now.
-pub fn read(titles: &[String]) -> HashMap<String, Spot> {
-    let Some((mut desktop, mut queue)) = Desktop::connect() else {
-        return HashMap::new();
-    };
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let _ = desktop.settle(&mut queue, deadline, |desktop| {
-        titles.iter().all(|title| desktop.spot(title).is_some())
+/// Where each of claudo's windows is, by title, each time one lands on another workspace,
+/// from a thread that waits on the compositor in between.
+pub fn watch() -> impl Stream<Item = HashMap<String, Spot>> {
+    let (found, spots) = mpsc::unbounded();
+    std::thread::spawn(move || {
+        let Some((mut desktop, mut queue)) = Desktop::connect() else {
+            return;
+        };
+        let mut last = HashMap::new();
+        while queue.blocking_dispatch(&mut desktop).is_ok() {
+            let now = desktop.claudo_spots();
+            if now != last {
+                if found.unbounded_send(now.clone()).is_err() {
+                    return;
+                }
+                last = now;
+            }
+        }
     });
-    titles
-        .iter()
-        .filter_map(|title| Some((title.clone(), desktop.spot(title)?)))
-        .collect()
+    spots
 }
 
 /// Moves each window titled as a key of `spots` to its spot, once it has shown with that
@@ -160,6 +169,14 @@ impl Desktop {
         self.windows
             .values()
             .find(|window| window.app_id == ClaudoApp::APP_ID && window.title == title)
+    }
+
+    fn claudo_spots(&self) -> HashMap<String, Spot> {
+        self.windows
+            .values()
+            .filter(|window| window.app_id == ClaudoApp::APP_ID && !window.title.is_empty())
+            .filter_map(|window| Some((window.title.clone(), self.spot(&window.title)?)))
+            .collect()
     }
 
     fn spot(&self, title: &str) -> Option<Spot> {
@@ -435,5 +452,14 @@ mod tests {
             }
         }
         assert!(!desktop.workspaces.is_empty(), "workspaces are listed");
+    }
+
+    #[test]
+    #[ignore = "reads the running desktop; run with --ignored --nocapture"]
+    fn the_watch_reports_where_claudo_windows_are() {
+        use cosmic::iced::futures::StreamExt;
+        let first = cosmic::iced::futures::executor::block_on(watch().next());
+        println!("{first:#?}");
+        assert!(first.is_some_and(|spots| !spots.is_empty()));
     }
 }
