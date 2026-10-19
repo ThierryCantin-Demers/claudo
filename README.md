@@ -51,6 +51,9 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - COSMIC: send a message while Claude works. It waits under the reply and reaches Claude at its next step, as in the terminal, or starts the next turn if Claude is already finishing.
 - COSMIC: tool calls made one after another fold into one row ("6 calls · Bash ×6"), which opens to each call; while it runs, its newest call shows below it.
+- Code reviews (`/code-review`) show as a list of findings, each with its rank, file and line and what is wrong, its failure scenario folded under it.
+- COSMIC: links open in the browser, whether written as markdown or as a bare address, in replies, your own messages and tool output.
+- COSMIC: one claudo at a time. Launching it again while it runs opens a new window with a new chat in the running one.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Remote Control (COSMIC: Settings): your agents also show in the Claude app and on claude.ai/code, where you can follow them and message them.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.
@@ -83,7 +86,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 | Archive a conversation | Right-click it in the sidebar → Archive; it moves under Archived at the end of the list, kept whole. Unarchive, or a new message in it, brings it back |
 | Delete a conversation | Right-click it in the sidebar → Delete…, then confirm |
 | Delete or archive several at once | Ctrl+click them in the sidebar (or right-click → Select), Shift+click to pick a run of them, then Delete… or Archive at the top of the sidebar; Escape lets go |
-| Reuse an earlier message | Up in the message box (on its first line); Down goes back toward your draft |
+| Reuse an earlier message | Up in an empty message box, again for older ones; Down goes back toward an empty box, Escape empties it. An accent border and a label mark a message already sent, and editing it makes it a new draft |
 | Scroll a conversation | PageUp/PageDown by a page; Home/End to the top or bottom, or Ctrl+Home/End while the message box holds text; a middle click scrolls toward the pointer, faster the farther it goes, until the next click or until you let go after moving |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
