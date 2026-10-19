@@ -13,12 +13,18 @@ fn main() {
 
 #[cfg(feature = "cosmic")]
 fn main() -> cosmic::iced::Result {
+    use app::instance::Launch;
+    let beside = match app::instance::launch() {
+        Launch::Handed => return Ok(()),
+        Launch::First => false,
+        Launch::Beside => true,
+    };
     let ui = app::UiState::load();
     let mut settings = cosmic::app::Settings::default();
     if let Some((width, height)) = ui.window {
         settings = settings.size(cosmic::iced::Size::new(width, height));
     }
-    cosmic::app::run::<app::ClaudoApp>(settings, ui)
+    cosmic::app::run::<app::ClaudoApp>(settings, app::Flags { ui, beside })
 }
 
 #[cfg(feature = "cosmic")]
@@ -750,6 +756,10 @@ mod app {
         sessions: Option<Vec<SessionInfo>>,
         /// Project folders worked in lately, offered to a conversation before it starts.
         folders: Vec<String>,
+        /// Another build runs and keeps the saved windows, so this one saves none over them.
+        beside: bool,
+        /// A window opened for a later launch, to bring forward once it exists.
+        launched: Option<window::Id>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -757,6 +767,12 @@ mod app {
         Chat,
         Settings,
         Sessions,
+    }
+
+    pub struct Flags {
+        pub ui: UiState,
+        /// Another build of claudo runs and keeps the windows as they were left.
+        pub beside: bool,
     }
 
     /// Where the window was left, restored on the next launch.
@@ -969,6 +985,8 @@ mod app {
         NewChat(Placement),
         /// A new chat in a new window.
         NewWindow,
+        /// claudo was launched again while this one runs.
+        Launched,
         /// A new chat in a project folder the user picks.
         NewChatIn,
         /// Where a conversation that has not started works.
@@ -1878,6 +1896,9 @@ mod app {
         }
 
         fn persist(&self) {
+            if self.beside {
+                return;
+            }
             let mut drafts = self.drafts.clone();
             for (id, view) in &self.views {
                 let text = view.draft.text();
@@ -4096,7 +4117,7 @@ mod app {
 
     impl Application for ClaudoApp {
         type Executor = cosmic::executor::Default;
-        type Flags = UiState;
+        type Flags = Flags;
         type Message = Message;
         const APP_ID: &'static str = "com.claudo.Cosmic";
 
@@ -4108,7 +4129,11 @@ mod app {
             &mut self.core
         }
 
-        fn init(core: Core, ui: UiState) -> (Self, Task<Message>) {
+        fn init(core: Core, Flags { mut ui, beside }: Flags) -> (Self, Task<Message>) {
+            if beside {
+                ui.tiles.clear();
+                ui.windows.clear();
+            }
             let main = core.main_window_id().unwrap_or(window::Id::RESERVED);
             let app = ClaudoApp {
                 core,
@@ -4160,6 +4185,8 @@ mod app {
                 cli_commands: Vec::new(),
                 sessions: None,
                 folders: Vec::new(),
+                beside,
+                launched: None,
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -4173,6 +4200,7 @@ mod app {
         fn subscription(&self) -> Subscription<Message> {
             let mut subscriptions = vec![
                 named("backend", backend_worker),
+                named("launches", instance::launches),
                 window_events(),
                 // Also keeps the usage reset times current.
                 cosmic::iced::time::every(std::time::Duration::from_secs(60))
@@ -4510,6 +4538,12 @@ mod app {
                         request,
                     });
                 }
+                Message::Launched => {
+                    self.current = self.main_window();
+                    let task = self.update(Message::NewWindow);
+                    self.launched = Some(self.current);
+                    return task;
+                }
                 Message::NewWindow => {
                     let current = self.layout();
                     let layout = WindowLayout {
@@ -4563,6 +4597,10 @@ mod app {
                         if self.blurred {
                             self.tasks.push(window::enable_blur(w));
                         }
+                    }
+                    if self.launched == Some(w) {
+                        self.launched = None;
+                        self.raise(w);
                     }
                 }
                 Message::Focus(id) => {
@@ -5266,6 +5304,7 @@ mod app {
     mod folder;
     mod frozen;
     mod furigana;
+    pub mod instance;
     mod links;
     mod review;
     mod selectable;

@@ -67,6 +67,11 @@ ps aux | grep 'target/.*claudo' | grep -v grep
 
 Note that `ps` on a backgrounded shell PID shows the wrapper shell, not the app.
 
+**One claudo per build.** Launching the binary that is already running opens a new window
+in it and exits (`src/app/instance.rs`, a socket in `$XDG_RUNTIME_DIR`). Any other binary,
+including one rebuilt since, runs beside it in one window and saves no window layout, so a
+dev run neither reopens the user's windows nor overwrites them.
+
 **`ps -o pcpu` is an average since process start**, not instantaneous. Sample
 `/proc/<pid>/stat` deltas for real CPU numbers.
 

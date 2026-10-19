@@ -263,7 +263,13 @@ fn two_tiles() -> ClaudoApp {
     // SAFETY: set before anything else reads the environment in this test binary.
     unsafe { std::env::set_var("XDG_STATE_HOME", &state) };
 
-    let (mut app, _) = ClaudoApp::init(Core::default(), UiState::default());
+    let (mut app, _) = ClaudoApp::init(
+        Core::default(),
+        Flags {
+            ui: UiState::default(),
+            beside: false,
+        },
+    );
     app.status = Some(SystemStatus {
         claude_installed: true,
         claude_version: None,
@@ -1398,6 +1404,23 @@ fn a_new_chat_can_open_in_a_new_window() {
 }
 
 #[test]
+fn launching_claudo_again_opens_a_window_with_a_new_chat() {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let _ = app.update(Message::Launched);
+    assert_eq!(app.windows.len(), 2);
+    let (w, _) = *app
+        .pending
+        .values()
+        .next()
+        .expect("a chat is being created");
+    assert_ne!(w, main, "for the new window");
+    assert_eq!(app.launched, Some(w));
+    let _ = app.update(Message::WindowOpened(w));
+    assert_eq!(app.launched, None, "brought forward once it exists");
+}
+
+#[test]
 fn windows_reopen_as_they_were_left() {
     let _ = two_tiles();
     let conversations = || {
@@ -1420,7 +1443,20 @@ fn windows_reopen_as_they_were_left() {
         windows: vec![saved(BRAVO), saved("gone")],
         ..UiState::default()
     };
-    let (mut app, _) = ClaudoApp::init(Core::default(), ui);
+    let flags = |beside| Flags {
+        ui: ui.clone(),
+        beside,
+    };
+    let (mut beside, _) = ClaudoApp::init(Core::default(), flags(true));
+    beside.conversations = conversations().to_vec();
+    beside.restore_tiles();
+    assert_eq!(
+        beside.windows.len(),
+        1,
+        "another build running keeps the saved windows"
+    );
+
+    let (mut app, _) = ClaudoApp::init(Core::default(), flags(false));
     assert_eq!(app.windows.len(), 3, "both saved windows open at launch");
     app.conversations = conversations().to_vec();
     app.restore_tiles();
