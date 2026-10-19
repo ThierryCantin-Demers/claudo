@@ -2407,3 +2407,30 @@ fn restart_snapshot() {
     h.app.layout_mut().sidebar_width = SIDEBAR_MIN;
     h.snapshot("restart-to-update-narrow");
 }
+
+#[test]
+fn each_window_is_titled_apart_and_remembers_its_workspace() {
+    let (mut app, main, second) = two_windows();
+    let _ = app.update(Message::CheckUpdate);
+    assert_eq!(app.titles[&main], "Alpha · claudo");
+    assert_eq!(app.titles[&second], "Bravo · claudo");
+
+    let spot = |workspace: &str| placement::Spot {
+        output: "DP-1".to_string(),
+        workspace: workspace.to_string(),
+    };
+    let _ = app.update(Message::Placed(HashMap::from([
+        (app.titles[&main].clone(), spot("1")),
+        (app.titles[&second].clone(), spot("3")),
+    ])));
+    assert_eq!(app.window(main).spot, Some(spot("1")));
+    let saved = app.window(second).saved();
+    assert_eq!(WindowLayout::restored(&saved).spot, Some(spot("3")));
+
+    app.conversations[1].title = "Alpha".to_string();
+    let _ = app.update(Message::CheckUpdate);
+    assert_eq!(
+        app.titles[&second], "Alpha · claudo (2)",
+        "two windows never share a title"
+    );
+}

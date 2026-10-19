@@ -56,7 +56,7 @@ mod app {
         Alignment, Border, Color, Length, Padding, Point, Size, Subscription, keyboard, stream,
     };
     use cosmic::widget::{self, markdown, menu, text_editor};
-    use cosmic::{Application, Element};
+    use cosmic::{Application, ApplicationExt, Element};
     use selectable::{Collect, Mark, Selectable, Selection};
 
     const PROFILES: [Profile; 3] = [Profile::Safe, Profile::AcceptEdits, Profile::FullAuto];
@@ -611,6 +611,8 @@ mod app {
         drop_at: Option<f32>,
         /// The window exists; until then it cannot take a blur.
         opened: bool,
+        /// The workspace it was last seen on, to go back to after a restart.
+        spot: Option<placement::Spot>,
     }
 
     impl Default for WindowLayout {
@@ -627,6 +629,7 @@ mod app {
                 drag: None,
                 drop_at: None,
                 opened: false,
+                spot: None,
             }
         }
     }
@@ -787,6 +790,12 @@ mod app {
         launched: Option<window::Id>,
         /// A new build is installed, so the sidebar offers to restart into it.
         update_ready: bool,
+        /// Each window's title as last set.
+        titles: HashMap<window::Id, String>,
+        /// What the titles were made from, so a frame that changes none of it makes none.
+        titled: u64,
+        /// The windows reopened at launch still have to go back to their workspaces.
+        placing: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -820,6 +829,8 @@ mod app {
         drafts: HashMap<ConversationId, String>,
         /// The windows besides the main one, in the order they opened.
         windows: Vec<SavedWindow>,
+        /// The main window's workspace.
+        spot: Option<placement::Spot>,
     }
 
     /// A window besides the main one, as it was left.
@@ -833,6 +844,7 @@ mod app {
         commands_open: bool,
         commands_width: f32,
         size: Option<(f32, f32)>,
+        spot: Option<placement::Spot>,
     }
 
     impl Default for SavedWindow {
@@ -851,6 +863,7 @@ mod app {
                 commands_open: self.commands_open,
                 commands_width: self.commands_width,
                 size: self.size,
+                spot: self.spot.clone(),
             }
         }
 
@@ -863,6 +876,7 @@ mod app {
                 commands_open: saved.commands_open,
                 commands_width: saved.commands_width,
                 size: saved.size,
+                spot: saved.spot.clone(),
                 ..Self::default()
             }
         }
@@ -883,6 +897,7 @@ mod app {
                 show_archived: false,
                 drafts: HashMap::new(),
                 windows: Vec::new(),
+                spot: None,
             }
         }
     }
@@ -1024,6 +1039,8 @@ mod app {
         CheckUpdate,
         /// Replace this app with the new build, handing it every agent.
         Restart,
+        /// Where each window was found, by title.
+        Placed(HashMap<String, placement::Spot>),
         /// A new chat in a project folder the user picks.
         NewChatIn,
         /// Where a conversation that has not started works.
@@ -1392,6 +1409,93 @@ mod app {
                     (*id, format!("window {} · {}", n + 1, truncate(title, 40)))
                 })
                 .collect()
+        }
+
+        /// Gives each window the focused conversation's title, made unique: the compositor's
+        /// window list knows windows by title alone. Once the windows reopened at launch
+        /// have theirs, sends each back to the workspace it was on.
+        fn retitle(&mut self) {
+            use std::hash::{DefaultHasher, Hasher};
+            let key = self
+                .windows
+                .keys()
+                .map(|w| {
+                    let mut h = DefaultHasher::new();
+                    w.hash(&mut h);
+                    self.focused(*w)
+                        .and_then(|id| self.info(id))
+                        .map(|c| &c.title)
+                        .hash(&mut h);
+                    h.finish()
+                })
+                .fold(0, u64::wrapping_add);
+            if std::mem::replace(&mut self.titled, key) != key {
+                self.set_titles();
+            }
+            if self.placing && self.restore.is_empty() {
+                self.placing = false;
+                let spots: HashMap<String, placement::Spot> = self
+                    .windows
+                    .iter()
+                    .filter_map(|(w, layout)| {
+                        Some((self.titles.get(w)?.clone(), layout.spot.clone()?))
+                    })
+                    .collect();
+                if !spots.is_empty() {
+                    std::thread::spawn(move || {
+                        placement::restore(spots, std::time::Duration::from_secs(10))
+                    });
+                }
+            }
+        }
+
+        fn set_titles(&mut self) {
+            let mut taken = std::collections::HashSet::new();
+            for w in self.window_order() {
+                let base = match self.focused(w).and_then(|id| self.info(id)) {
+                    Some(conversation) => format!("{} · claudo", conversation.title),
+                    None => "claudo".to_string(),
+                };
+                let mut title = base.clone();
+                let mut n = 2;
+                while !taken.insert(title.clone()) {
+                    title = format!("{base} ({n})");
+                    n += 1;
+                }
+                if self.titles.get(&w) != Some(&title) {
+                    self.titles.insert(w, title.clone());
+                    let task = self.set_window_title(title, w);
+                    self.tasks.push(task);
+                }
+            }
+            self.titles.retain(|w, _| self.windows.contains_key(w));
+        }
+
+        /// Finds where each window is, away from the event loop.
+        fn find_windows(&self) -> Task<Message> {
+            let titles: Vec<String> = self.titles.values().cloned().collect();
+            Task::perform(
+                async move {
+                    let (found, spots) = cosmic::iced::futures::channel::oneshot::channel();
+                    std::thread::spawn(move || found.send(placement::read(&titles)));
+                    spots.await.unwrap_or_default()
+                },
+                |spots| cosmic::Action::App(Message::Placed(spots)),
+            )
+        }
+
+        /// Notes where each window was found. Returns whether any moved.
+        fn placed(&mut self, spots: HashMap<String, placement::Spot>) -> bool {
+            let mut moved = false;
+            for (w, title) in &self.titles {
+                if let (Some(layout), Some(spot)) = (self.windows.get_mut(w), spots.get(title))
+                    && layout.spot.as_ref() != Some(spot)
+                {
+                    layout.spot = Some(spot.clone());
+                    moved = true;
+                }
+            }
+            moved
         }
 
         /// libcosmic blurs the main window's background once the compositor says it can, and
@@ -1956,6 +2060,7 @@ mod app {
                 window: main.size,
                 show_archived: self.show_archived,
                 drafts,
+                spot: main.spot.clone(),
                 windows: {
                     let mut others: Vec<_> = self
                         .windows
@@ -4316,6 +4421,7 @@ mod app {
                         commands_open: ui.commands_open,
                         commands_width: ui.commands_width,
                         size: ui.window,
+                        spot: ui.spot.clone(),
                         ..WindowLayout::default()
                     },
                 )]),
@@ -4348,6 +4454,9 @@ mod app {
                 beside,
                 launched: None,
                 update_ready: false,
+                titles: HashMap::new(),
+                titled: 0,
+                placing: !beside,
             };
             let mut app = app;
             for saved in &ui.windows {
@@ -4405,6 +4514,7 @@ mod app {
                 Message::Second => {}
                 Message::Minute => {
                     self.update_ready = instance::replaced();
+                    self.tasks.push(self.find_windows());
                     self.minutes += 1;
                     if self.minutes.is_multiple_of(usage::USAGE_REFRESH_MINUTES) {
                         return self.update(Message::RefreshUsage);
@@ -4713,8 +4823,15 @@ mod app {
                 }
                 Message::CheckUpdate => self.update_ready = instance::replaced(),
                 Message::Restart => {
+                    let titles: Vec<String> = self.titles.values().cloned().collect();
+                    self.placed(placement::read(&titles));
                     self.persist();
                     self.cmd(Command::Restart);
+                }
+                Message::Placed(spots) => {
+                    if self.placed(spots) {
+                        self.persist();
+                    }
                 }
                 Message::Launched => {
                     self.current = self.main_window();
@@ -5072,6 +5189,7 @@ mod app {
                 }
             }
             self.follow_blur();
+            self.retitle();
             let mut tasks = std::mem::take(&mut self.tasks);
             if let Some(id) = self.focus_composer.take() {
                 tasks.push(widget::text_input::focus(composer_id(&id)));
@@ -5494,6 +5612,7 @@ mod app {
     mod furigana;
     pub mod instance;
     mod links;
+    mod placement;
     mod review;
     mod scroll;
     mod selectable;

@@ -13,7 +13,7 @@ path = "src/main.rs"
 # so a plain `cargo build --workspace` never compiles it.
 [features]
 default = []
-cosmic = ["dep:libcosmic", "dep:serde", "dep:jiff"]
+cosmic = ["dep:libcosmic", "dep:serde", "dep:jiff", "dep:libc"]
 # Hot-patches `view` and `update` while running under `cargo hot` (`cargo xtask cosmic --hot`).
 hot = ["cosmic", "dep:iced", "dep:iced_core", "iced_core/hot", "dep:iced_debug"]
 
@@ -23,6 +23,7 @@ claudo-transport.workspace = true
 serde = { workspace = true, optional = true }
 # Already in libcosmic's tree; formats turn times in the user's time zone.
 jiff = { version = "0.2", optional = true }
+libc = { version = "0.2", optional = true }
 libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true, features = ["markdown", "highlighter", "wgpu", "xdg-portal"] }
 # libcosmic's own iced, named only to turn on its `hot` feature; same source, so one crate.
 iced = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true, features = ["hot"] }

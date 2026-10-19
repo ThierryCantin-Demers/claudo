@@ -289,7 +289,12 @@ the main window hands its role to another with `core.set_main_window_id`, which 
 libcosmic from exiting. Bring a window forward with `raise`, never `window::gain_focus`
 alone, which winit's Wayland backend leaves empty. A tile dragged past its window's edge becomes a Wayland drag and
 drop (`app/tile_drag.rs`): a window learns nothing of the cursor outside it, so only the
-compositor can say which window the tile was dropped on.
+compositor can say which window the tile was dropped on. A window cannot place itself on
+Wayland either, so `app/placement.rs` reads which workspace each window is on through
+COSMIC's toplevel protocols, on a Wayland connection of its own, every minute and before a
+restart, and moves the reopened windows back. That list knows windows by title alone, so
+each window is titled with its focused conversation, made unique. Where a window sits on
+its workspace is the compositor's to decide and is not restored.
 
 **Dev builds optimize dependencies** (`[profile.dev.package."*"] opt-level = 3`) because
 unoptimized text shaping made the cosmic frontend feel like it had a one second delay.
