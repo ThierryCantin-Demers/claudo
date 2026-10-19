@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use claudo_protocol::{
     Attachment, Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides, Profile,
-    ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
+    Review, ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -363,6 +363,16 @@ impl ClaudoApp {
                 } => {
                     if self.is_current(&conversation_id) {
                         self.push_assistant_text(&text);
+                    }
+                }
+
+                ServerEvent::Review {
+                    conversation_id,
+                    review,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        self.assistant_idx = None;
+                        self.items.push(Item::Review(review));
                     }
                 }
 
@@ -1060,6 +1070,11 @@ impl ClaudoApp {
                                 }
                                 ui.separator();
                             }
+                            Item::Review(review) => {
+                                ui.strong("Claude");
+                                review_card(ui, &mut self.md_cache, idx, &review);
+                                ui.separator();
+                            }
                             Item::Thinking(text) => {
                                 egui::CollapsingHeader::new(egui::RichText::new("Thinking").weak())
                                     .id_salt(("thinking", idx))
@@ -1224,6 +1239,40 @@ fn model_label(model: &str) -> String {
 const RED: egui::Color32 = egui::Color32::from_rgb(0xd0, 0x4a, 0x4a);
 const AMBER: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x9a, 0x2a);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(0x3f, 0xb9, 0x50);
+
+fn review_card(ui: &mut egui::Ui, cache: &mut CommonMarkCache, idx: usize, review: &Review) {
+    if !review.preface.is_empty() {
+        CommonMarkViewer::new().show(ui, cache, &review.preface);
+    }
+    let count = review.findings.len();
+    ui.weak(match count {
+        1 => "1 finding".to_string(),
+        n => format!("{n} findings, most severe first"),
+    });
+    for (n, finding) in review.findings.iter().enumerate() {
+        ui.add_space(6.0);
+        let place = match &finding.line {
+            Some(line) => format!("{}:{line}", finding.file),
+            None => finding.file.clone(),
+        };
+        ui.horizontal(|ui| {
+            ui.strong(format!("{}.", n + 1));
+            ui.label(egui::RichText::new(place).monospace().weak());
+        });
+        CommonMarkViewer::new().show(ui, cache, &finding.summary);
+        if let Some(scenario) = &finding.failure_scenario {
+            egui::CollapsingHeader::new(egui::RichText::new("Failure scenario").weak())
+                .id_salt(("finding", idx, n))
+                .show(ui, |ui| {
+                    CommonMarkViewer::new().show(ui, cache, scenario);
+                });
+        }
+    }
+    if !review.afterword.is_empty() {
+        ui.add_space(6.0);
+        CommonMarkViewer::new().show(ui, cache, &review.afterword);
+    }
+}
 
 fn tool_card(ui: &mut egui::Ui, tc: &ToolCall) {
     let color = match (&tc.result, tc.is_error) {

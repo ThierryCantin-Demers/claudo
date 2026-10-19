@@ -190,6 +190,12 @@ and its `result`. The subagent writes its transcript live to
 the meantime, dropping the replayed ones by call id. The main transcript keeps only the
 prompt and a `system` / `local_command` line with the result.
 
+`/code-review`'s subagent answers with a JSON array of findings, which the CLI writes into
+its result as markdown: `13 findings, most severe first:`, then items like
+``1. `src/a.rs:12`: summary``, each with `Failure scenario: ...` indented under it, and any
+text the reviewer wrote before. `cli::review` reads that list back into a `Review`, live and
+from the transcript; text it cannot read stays a plain reply.
+
 **Approvals go through the control protocol on stdin.** Each process starts with
 `--settings '{"permissions":{"ask":[...]}}'` (the `ASK_RULES` in `cli.rs`: `gh pr create`,
 `gh issue create` and GitHub MCP's create tools) and `--permission-prompt-tool stdio`. The CLI

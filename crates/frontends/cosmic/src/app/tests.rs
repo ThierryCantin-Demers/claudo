@@ -2007,3 +2007,98 @@ fn addresses_and_markdown_links_open_when_clicked() {
     let typed = Selectable::plain("https://x.io/typed", 14.0, &conversation, (0, 0), None);
     assert_eq!(clicked(&mut renderer, typed.into()), ["https://x.io/typed"]);
 }
+
+fn reviewed() -> ClaudoApp {
+    let mut app = two_tiles();
+    let finding = |file: &str, line: Option<&str>, summary: &str, scenario: Option<&str>| {
+        claudo_protocol::Finding {
+            file: file.to_string(),
+            line: line.map(str::to_string),
+            summary: summary.to_string(),
+            failure_scenario: scenario.map(str::to_string),
+        }
+    };
+    let review = claudo_protocol::Review {
+        preface: "I reviewed PR #1848 at head `15db4cc99`. The most serious is the lost device."
+            .to_string(),
+        findings: vec![
+            finding(
+                "crates/cubecl-runtime/src/tune/tuner.rs",
+                Some("480"),
+                "When a device is lost, the tune is unmarked, so every later launch of that \
+                 key runs the whole tune again.",
+                Some(
+                    "A GPU poisoned mid-forward: each key misses, re-registers and walks \
+                     every candidate until `sync` reports the poison.",
+                ),
+            ),
+            finding(
+                "crates/cubecl-runtime/src/tune/local.rs",
+                Some("55"),
+                "`get_or_open` returns `by_id[id]` whatever `operations` is.",
+                Some("Two candidate lists on one part never share a tuner."),
+            ),
+            finding("README.md", None, "A stale line.", None),
+        ],
+        afterword: String::new(),
+    };
+    let view = app.views.get_mut(ALPHA).expect("a view");
+    view.items
+        .push(Entry::User("/code-review xhigh".to_string()));
+    view.items
+        .push(Entry::Review(Box::new(review::Shown::new(review))));
+    app
+}
+
+#[test]
+fn a_review_lists_its_findings_and_unfolds_their_scenarios() {
+    let mut h = Harness::new(reviewed());
+    let idx = h.app.views[ALPHA].items.len() - 1;
+    let whole = Message::SelectRange(
+        ALPHA.to_string(),
+        Mark {
+            block: (idx, 0),
+            offset: 0,
+        },
+        Mark {
+            block: (idx + 1, 0),
+            offset: 0,
+        },
+    );
+    let _ = h.app.update(whole.clone());
+    let folded = h.selected();
+    assert!(
+        folded.starts_with("I reviewed PR #1848 at head 15db4cc99.")
+            && folded.contains(
+                "\n\n1. crates/cubecl-runtime/src/tune/tuner.rs:480\n\nWhen a device is lost"
+            )
+            && folded.contains("\n\n3. README.md\n\nA stale line."),
+        "{folded:?}"
+    );
+    assert!(!folded.contains("A GPU poisoned"), "{folded:?}");
+
+    let _ = h
+        .app
+        .update(Message::ToggleFinding(ALPHA.to_string(), idx, None));
+    let _ = h.app.update(whole);
+    let unfolded = h.selected();
+    assert!(
+        unfolded.contains("whole tune again.\n\nA GPU poisoned mid-forward")
+            && unfolded.contains("Two candidate lists"),
+        "{unfolded:?}"
+    );
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn review_snapshot() {
+    let mut app = reviewed();
+    app.layout_mut().tiles.truncate(1);
+    let mut h = Harness::new(app);
+    h.snapshot("review");
+    let idx = h.app.views[ALPHA].items.len() - 1;
+    let _ = h
+        .app
+        .update(Message::ToggleFinding(ALPHA.to_string(), idx, Some(0)));
+    h.snapshot("review-one-open");
+}

@@ -20,7 +20,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::engine::cli::{
-    attachment, backgrounded, command_echo, command_output, compaction, incoming,
+    attachment, backgrounded, command_echo, command_output, compaction, incoming, review,
     task_notification, tool_call, unix_millis,
 };
 
@@ -715,6 +715,11 @@ fn find_transcript(session_id: &str) -> Option<PathBuf> {
         .map(|(_, file)| file)
 }
 
+/// What a command printed, as a reply: a code review's findings, or its text.
+fn reply(output: &str) -> Item {
+    review(output).map_or_else(|| Item::Assistant(output.to_string()), Item::Review)
+}
+
 fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
     let Ok(content) = fs::read_to_string(path) else {
         return (Vec::new(), None);
@@ -753,7 +758,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                 } else if let Some(output) = command_output(text)
                     && !output.is_empty()
                 {
-                    items.push(Item::Assistant(output.to_string()));
+                    items.push(reply(output));
                 }
             }
             // What Claude Code tells the model around a slash command, not the user's words.
@@ -779,7 +784,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                 }
                 Some(Value::String(s)) if let Some(output) = command_output(s) => {
                     if !output.is_empty() {
-                        items.push(Item::Assistant(output.to_string()));
+                        items.push(reply(output));
                     }
                 }
                 Some(Value::String(s)) => match task_notification(s) {
@@ -866,7 +871,9 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
             // Only a reply moves a turn's end: the lines between turns, such as a queued
             // message's, are written when the next one starts.
             && (kind == Some("assistant")
-                || items[pushed..].iter().any(|item| matches!(item, Item::Assistant(_))))
+                || items[pushed..]
+                    .iter()
+                    .any(|item| matches!(item, Item::Assistant(_) | Item::Review(_))))
         {
             turn.ended = at;
         }
@@ -1053,7 +1060,7 @@ mod tests {
         let queued = line(serde_json::json!({ "type": "queue-operation", "timestamp": at(700) }));
         let forked = line(serde_json::json!({
             "type": "system", "subtype": "local_command", "timestamp": at(900),
-            "content": "<local-command-stdout>14 findings</local-command-stdout>",
+            "content": "<local-command-stdout>1 finding:\n\n1. `a.rs:2`: Off by one.</local-command-stdout>",
         }));
         let transcript = [
             prompt(0, "one"),
@@ -1081,8 +1088,8 @@ mod tests {
         assert!(
             items
                 .iter()
-                .any(|i| matches!(i, Item::Assistant(t) if t == "14 findings")),
-            "a forked skill's result is its reply"
+                .any(|i| matches!(i, Item::Review(r) if r.findings[0].summary == "Off by one.")),
+            "a forked review's result is its findings"
         );
         assert!(
             matches!(items[3], Item::Ended(_)),

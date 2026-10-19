@@ -61,6 +61,7 @@ fn main() {
             Item::File(file) => println!("  FILE {} ({})", file.name, file.media_type),
             Item::Ended(time) => println!("  ENDED {} -> {}", time.started, time.ended),
             Item::Assistant(t) => println!("  ASSISTANT: {}", clip(t)),
+            Item::Review(review) => println!("  REVIEW: {} findings", review.findings.len()),
             Item::Tool(tc) => println!(
                 "  TOOL {} err={} result={}",
                 tc.name,

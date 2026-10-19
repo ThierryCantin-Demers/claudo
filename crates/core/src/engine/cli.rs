@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use claudo_protocol::{
-    Attachment, Background, CliCommand, Compaction, ContextUsage, Decision, ModelOption, Profile,
-    Quota, QuotaWindow, TaskStatus, ToolCall,
+    Attachment, Background, CliCommand, Compaction, ContextUsage, Decision, Finding, ModelOption,
+    Profile, Quota, QuotaWindow, Review, TaskStatus, ToolCall,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -1193,6 +1193,77 @@ pub(crate) fn command_output(text: &str) -> Option<&str> {
     Some(if output == "Compacted" { "" } else { output })
 }
 
+/// A code review's findings, from the list the CLI writes `/code-review`'s JSON as:
+/// `13 findings, most severe first:`, then items like ``1. `src/a.rs:12`: summary``, each
+/// with `Failure scenario: ...` indented under it. `None` for text with no such list.
+pub(crate) fn review(text: &str) -> Option<Review> {
+    let mut lines = text.split_inclusive('\n');
+    let mut start = 0;
+    let (count, mut end) = loop {
+        let line = lines.next()?;
+        if let Some(count) = findings_header(line.trim_end()) {
+            break (count, start + line.len());
+        }
+        start += line.len();
+    };
+
+    let mut items: Vec<(usize, Vec<&str>)> = Vec::new();
+    for line in lines {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        let number = format!("{}. ", items.len() + 1);
+        if let Some(first) = bare.strip_prefix(&number) {
+            items.push((number.len(), vec![first]));
+        } else if let Some((indent, body)) = items.last_mut()
+            && (bare.is_empty() || bare.starts_with(&" ".repeat(*indent)))
+        {
+            body.push(bare.get(*indent..).unwrap_or(""));
+        } else if !(bare.is_empty() && items.is_empty()) {
+            break;
+        }
+        end += line.len();
+    }
+    if items.len() != count {
+        return None;
+    }
+    let findings = items
+        .iter()
+        .map(|(_, body)| finding(body.join("\n").trim()))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Review {
+        preface: text[..start].trim().to_string(),
+        findings,
+        afterword: text[end..].trim().to_string(),
+    })
+}
+
+/// How many findings a line such as `13 findings, most severe first:` announces.
+fn findings_header(line: &str) -> Option<usize> {
+    let (count, rest) = line.split_once(' ')?;
+    let count = count.parse().ok()?;
+    let rest = rest.strip_prefix(if count == 1 { "finding" } else { "findings" })?;
+    matches!(rest, ":" | ", most severe first:").then_some(count)
+}
+
+fn finding(item: &str) -> Option<Finding> {
+    let (place, rest) = item.strip_prefix('`')?.split_once("`: ")?;
+    let (summary, failure_scenario) = match rest.split_once("\n\nFailure scenario: ") {
+        Some((summary, scenario)) => (summary, Some(scenario.to_string())),
+        None => (rest, None),
+    };
+    let (file, line) = match place.rsplit_once(':') {
+        Some((file, line)) if line.starts_with(|c: char| c.is_ascii_digit()) => {
+            (file, Some(line.to_string()))
+        }
+        _ => (place, None),
+    };
+    Some(Finding {
+        file: file.to_string(),
+        line,
+        summary: summary.to_string(),
+        failure_scenario,
+    })
+}
+
 /// A background call starting (`task_started`) or ending (`task_notification`).
 fn background_task(v: &Value) -> Option<EngineEvent> {
     let field = |key| v.get(key).and_then(Value::as_str);
@@ -1481,6 +1552,88 @@ mod tests {
 
     fn line(json: &str) -> Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// The CLI's own rendering of a review's JSON, as its bundle writes it.
+    fn findings_list(findings: &[(&str, Option<&str>, &str, Option<&str>)]) -> String {
+        let items: Vec<String> = findings
+            .iter()
+            .enumerate()
+            .map(|(i, (file, line, summary, scenario))| {
+                let place = line.map_or(file.to_string(), |line| format!("{file}:{line}"));
+                let scenario =
+                    scenario.map_or(String::new(), |s| format!("\n\nFailure scenario: {s}"));
+                let number = format!("{}. ", i + 1);
+                let indent = format!("\n{}", " ".repeat(number.len()));
+                let item = format!("{number}`{place}`: {summary}{scenario}");
+                let mut indented = String::new();
+                let mut rest = item.as_str();
+                while let Some(at) = rest.find('\n') {
+                    indented.push_str(&rest[..at]);
+                    let next = &rest[at + 1..];
+                    let blank = next.is_empty() || next.starts_with('\n');
+                    indented.push_str(if blank { "\n" } else { &indent });
+                    rest = next;
+                }
+                indented + rest
+            })
+            .collect();
+        let n = findings.len();
+        let header = match n {
+            1 => "1 finding:".to_string(),
+            n => format!("{n} findings, most severe first:"),
+        };
+        format!("{header}\n\n{}", items.join("\n\n"))
+    }
+
+    #[test]
+    fn a_reviews_findings_come_back_from_the_list_the_cli_writes() {
+        let list = findings_list(&[
+            (
+                "crates/runtime/src/tune/tuner.rs",
+                Some("480"),
+                "A lost device tunes `k`\nagain on every launch.",
+                Some("One GPU:\n\nevery key tunes again."),
+            ),
+            ("README.md", None, "A stale line.", None),
+        ]);
+        let text = format!("I reviewed PR #1848.\n\n{list}\n\nOne more thing outside it.");
+        let review = review(&text).expect("a review");
+        assert_eq!(review.preface, "I reviewed PR #1848.");
+        assert_eq!(review.afterword, "One more thing outside it.");
+        assert_eq!(
+            review.findings,
+            [
+                Finding {
+                    file: "crates/runtime/src/tune/tuner.rs".to_string(),
+                    line: Some("480".to_string()),
+                    summary: "A lost device tunes `k`\nagain on every launch.".to_string(),
+                    failure_scenario: Some("One GPU:\n\nevery key tunes again.".to_string()),
+                },
+                Finding {
+                    file: "README.md".to_string(),
+                    line: None,
+                    summary: "A stale line.".to_string(),
+                    failure_scenario: None,
+                },
+            ]
+        );
+
+        let many: Vec<_> = (1..=12)
+            .map(|_| ("a.rs", Some("1-3"), "Wrong.\nTwice.", Some("Always.")))
+            .collect();
+        let review = super::review(&findings_list(&many)).expect("twelve findings");
+        assert_eq!(review.findings.len(), 12);
+        assert_eq!(review.findings[11].summary, "Wrong.\nTwice.");
+        assert_eq!(review.findings[11].line.as_deref(), Some("1-3"));
+
+        let one = findings_list(&[("a.rs", Some("2"), "Off by one.", None)]);
+        assert_eq!(super::review(&one).map(|r| r.findings.len()), Some(1));
+        assert!(super::review("No findings.").is_none());
+        assert!(super::review("14 findings").is_none());
+        assert!(
+            super::review("3 findings, most severe first:\n\n1. `a.rs:1`: Only one.").is_none()
+        );
     }
 
     #[test]

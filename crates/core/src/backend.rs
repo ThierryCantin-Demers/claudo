@@ -544,9 +544,15 @@ impl Forward {
                 // A local command such as `/context` answers in its result alone.
                 let streamed = std::mem::take(&mut self.streamed);
                 if let Some(text) = text.filter(|_| !streamed) {
-                    self.emit(ServerEvent::Delta {
-                        conversation_id: conversation_id.clone(),
-                        text,
+                    self.emit(match crate::engine::cli::review(&text) {
+                        Some(review) => ServerEvent::Review {
+                            conversation_id: conversation_id.clone(),
+                            review,
+                        },
+                        None => ServerEvent::Delta {
+                            conversation_id: conversation_id.clone(),
+                            text,
+                        },
                     });
                 }
                 {

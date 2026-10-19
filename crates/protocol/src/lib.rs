@@ -260,6 +260,30 @@ pub enum Item {
     File(Attachment),
     /// The turn before it ended.
     Ended(TurnTime),
+    Review(Review),
+}
+
+/// A code review's findings, as `/code-review` reports them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Review {
+    /// What the reviewer wrote before its findings, as markdown.
+    pub preface: String,
+    /// Most severe first.
+    pub findings: Vec<Finding>,
+    /// What it wrote after them, as markdown.
+    pub afterword: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Finding {
+    /// Relative to the repository reviewed.
+    pub file: String,
+    /// A line or a range of them, such as `480` or `12-20`.
+    pub line: Option<String>,
+    /// The defect, as markdown.
+    pub summary: String,
+    /// The inputs or state that make it go wrong, as markdown.
+    pub failure_scenario: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,6 +568,11 @@ pub enum ServerEvent {
     ThinkingDelta {
         conversation_id: ConversationId,
         text: String,
+    },
+    /// A code review's findings, in place of the text that lists them.
+    Review {
+        conversation_id: ConversationId,
+        review: Review,
     },
     ToolStarted {
         conversation_id: ConversationId,

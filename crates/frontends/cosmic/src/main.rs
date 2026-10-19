@@ -95,6 +95,7 @@ mod app {
             open: bool,
         },
         Reply(Box<Reply>),
+        Review(Box<review::Shown>),
         Tool {
             call: ToolCall,
             open: bool,
@@ -162,6 +163,7 @@ mod app {
                 Item::Tool(call) => Entry::Tool { call, open: false },
                 Item::File(file) => Entry::File(attach::Shown::new(file)),
                 Item::Ended(time) => Entry::Ended(time),
+                Item::Review(review) => Entry::Review(Box::new(review::Shown::new(review))),
             }
         }
     }
@@ -443,6 +445,12 @@ mod app {
                 ServerEvent::Delta { text, .. } => {
                     self.retrying = None;
                     self.push_assistant(&text);
+                }
+                ServerEvent::Review { review, .. } => {
+                    self.retrying = None;
+                    self.finish_reply();
+                    self.items
+                        .push(Entry::Review(Box::new(review::Shown::new(review))));
                 }
                 ServerEvent::Retrying {
                     attempt,
@@ -877,6 +885,8 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        /// Expand or collapse a review finding's failure scenario, or with `None` all of them.
+        ToggleFinding(ConversationId, usize, Option<usize>),
         /// Open or fold the run of calls that starts at this entry.
         ToggleGroup(ConversationId, usize),
         Minute,
@@ -2003,6 +2013,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Review {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::ThinkingDelta {
                     ref conversation_id,
                     ..
@@ -3032,6 +3046,18 @@ mod app {
                             selection: self.selection.as_ref(),
                             next: std::cell::Cell::new(0),
                         },
+                    ),
+                    Entry::Review(review) => review.view(
+                        &selectable::Viewer {
+                            conversation: id,
+                            entry: idx,
+                            selection: self.selection.as_ref(),
+                            next: std::cell::Cell::new(0),
+                        },
+                        settings,
+                        |finding| Message::ToggleFinding(id.clone(), idx, finding),
+                        size,
+                        self.zoom,
                     ),
                     Entry::Thinking { text, open } => {
                         let body = open.then(|| {
@@ -4321,6 +4347,22 @@ mod app {
                         view.groups_open.insert(first);
                     }
                 }
+                Message::ToggleFinding(id, idx, finding) => {
+                    if let Some(Entry::Review(review)) = self
+                        .views
+                        .get_mut(&id)
+                        .and_then(|view| view.items.get_mut(idx))
+                    {
+                        match finding {
+                            Some(n) => {
+                                if let Some(finding) = review.findings.get_mut(n) {
+                                    finding.open = !finding.open;
+                                }
+                            }
+                            None => review.toggle_all(),
+                        }
+                    }
+                }
                 Message::Toggle(id, idx) => {
                     if let Some(
                         Entry::Tool { open, .. }
@@ -5225,6 +5267,7 @@ mod app {
     mod frozen;
     mod furigana;
     mod links;
+    mod review;
     mod selectable;
     mod sessions;
     mod slash;
