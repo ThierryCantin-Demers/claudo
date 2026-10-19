@@ -24,14 +24,14 @@ pub(super) fn tile_id(conversation: &str) -> widget::Id {
 }
 
 /// Tracks whether an operation is inside one tile, which `Intercept` reports as a container.
-struct InTile {
+pub(super) struct InTile {
     tile: widget::Id,
     entering: bool,
-    inside: bool,
+    pub inside: bool,
 }
 
 impl InTile {
-    fn new(conversation: &str) -> Self {
+    pub fn new(conversation: &str) -> Self {
         Self {
             tile: tile_id(conversation),
             entering: false,
@@ -39,12 +39,12 @@ impl InTile {
         }
     }
 
-    fn container(&mut self, id: Option<&widget::Id>) {
+    pub fn container(&mut self, id: Option<&widget::Id>) {
         self.entering = id == Some(&self.tile);
     }
 
     /// Going into a widget's children; returns whether the operation was inside before.
-    fn enter(&mut self) -> bool {
+    pub fn enter(&mut self) -> bool {
         let outer = self.inside;
         self.inside |= std::mem::take(&mut self.entering);
         outer

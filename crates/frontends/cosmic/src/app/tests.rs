@@ -50,9 +50,10 @@ impl Harness {
         out
     }
 
-    fn send(&mut self, events: Vec<Event>) {
+    /// What the view answers `events` with, left for the caller to apply.
+    fn messages(&mut self, events: Vec<Event>) -> Vec<Message> {
         let cursor = mouse::Cursor::Available(self.cursor);
-        let messages = self.frame(|ui, renderer| {
+        self.frame(|ui, renderer| {
             let mut messages = Vec::new();
             let _ = ui.update(
                 &events,
@@ -62,8 +63,11 @@ impl Harness {
                 &mut messages,
             );
             messages
-        });
-        for message in messages {
+        })
+    }
+
+    fn send(&mut self, events: Vec<Event>) {
+        for message in self.messages(events) {
             let _ = self.app.update(message);
         }
     }
@@ -2187,4 +2191,118 @@ fn review_snapshot() {
         .app
         .update(Message::ToggleFinding(ALPHA.to_string(), idx, Some(0)));
     h.snapshot("review-one-open");
+}
+
+#[test]
+fn page_keys_and_home_and_end_move_the_focused_transcript() {
+    use cosmic::iced::advanced::widget::operation::black_box;
+    use keyboard::key::{Code, Named};
+    let mut h = Harness::new(two_tiles());
+    h.focus(composer_id(ALPHA));
+    let none = keyboard::Modifiers::empty();
+    let jumps = |h: &mut Harness, named, code, modifiers| -> Vec<scroll::Jump> {
+        h.messages(vec![key(named, code, modifiers)])
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::In(_, message) => match *message {
+                    Message::Jump(id, jump) if id == ALPHA => Some(jump),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        jumps(&mut h, Named::End, Code::End, none),
+        [scroll::Jump::Bottom]
+    );
+    h.app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("typed");
+    assert!(
+        jumps(&mut h, Named::Home, Code::Home, none).is_empty(),
+        "Home moves in the text there is"
+    );
+    let ctrl = keyboard::Modifiers::CTRL;
+    assert_eq!(
+        jumps(&mut h, Named::Home, Code::Home, ctrl),
+        [scroll::Jump::Top]
+    );
+    assert_eq!(
+        jumps(&mut h, Named::PageUp, Code::PageUp, none),
+        [scroll::Jump::PageUp]
+    );
+
+    let jump = |h: &mut Harness, to| {
+        let mut op = scroll::jump_in(ALPHA, to);
+        h.frame(|ui, renderer| ui.operate(renderer, &mut black_box(&mut op)));
+        h.offsets()[0]
+    };
+    let bottom = h.offsets()[0];
+    let page = bottom - jump(&mut h, scroll::Jump::PageUp);
+    assert!(
+        page > 300.0 && page < 900.0,
+        "most of a tile's height: {page}"
+    );
+    assert_eq!(jump(&mut h, scroll::Jump::Top), 0.0);
+    assert!((jump(&mut h, scroll::Jump::PageDown) - page).abs() <= 1.0);
+    assert_eq!(jump(&mut h, scroll::Jump::Bottom), bottom);
+}
+
+#[test]
+fn a_middle_click_scrolls_toward_the_pointer_until_the_next_click() {
+    use cosmic::iced::window::Event as Window;
+    let start = std::time::Instant::now();
+    let frame = |ms| {
+        Event::Window(Window::RedrawRequested(
+            start + std::time::Duration::from_millis(ms),
+        ))
+    };
+    let middle = |pressed| {
+        Event::Mouse(if pressed {
+            mouse::Event::ButtonPressed(mouse::Button::Middle)
+        } else {
+            mouse::Event::ButtonReleased(mouse::Button::Middle)
+        })
+    };
+    let mut h = Harness::new(two_tiles());
+    h.move_to(560.0, 400.0);
+    h.send(vec![wheel(30.0)]);
+    let up = h.offsets()[0];
+
+    h.send(vec![middle(true), middle(false)]);
+    h.move_to(560.0, 600.0);
+    h.send(vec![frame(0), frame(100), frame(200)]);
+    let down = h.offsets()[0];
+    assert!(
+        down > up + 100.0,
+        "toward the pointer, below: {up} -> {down}"
+    );
+
+    h.move_to(560.0, 300.0);
+    h.send(vec![frame(300), frame(400)]);
+    assert!(h.offsets()[0] < down, "and back up once it is above");
+
+    h.send(vec![button(true), button(false)]);
+    let stopped = h.offsets()[0];
+    h.send(vec![frame(500), frame(600)]);
+    assert_eq!(h.offsets()[0], stopped, "a click stops it");
+
+    h.send(vec![middle(true)]);
+    h.move_to(560.0, 700.0);
+    h.send(vec![frame(700), frame(800), middle(false)]);
+    let released = h.offsets()[0];
+    assert!(released > stopped, "held and moved, it scrolls");
+    h.send(vec![frame(900), frame(1000)]);
+    assert_eq!(h.offsets()[0], released, "and letting go stops it");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn autoscroll_snapshot() {
+    let mut h = Harness::new(two_tiles());
+    h.move_to(560.0, 400.0);
+    h.send(vec![Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Middle,
+    ))]);
+    h.move_to(560.0, 520.0);
+    h.snapshot("autoscroll");
 }

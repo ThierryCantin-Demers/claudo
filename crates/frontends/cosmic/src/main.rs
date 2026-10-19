@@ -958,6 +958,10 @@ mod app {
         },
         /// Escape while the message box shows a sent prompt: it empties.
         Unrecall(ConversationId),
+        /// Move a conversation's transcript by a page or to an end.
+        Jump(ConversationId, scroll::Jump),
+        /// The same, for the window's focused tile.
+        JumpFocused(scroll::Jump),
         /// A press in a transcript's text, starting a selection there.
         SelectStart(ConversationId, Mark),
         /// The cursor dragged the selection's end here.
@@ -3183,10 +3187,12 @@ mod app {
                 .spacing(18.0 * self.zoom)
                 .padding([24, 16])
                 .max_width(COLUMN_WIDTH * self.zoom);
-            widget::scrollable(widget::container(column).center_x(Length::Fill))
-                .anchor_bottom()
-                .height(Length::Fill)
-                .into()
+            scroll::Autoscroll::new(
+                widget::scrollable(widget::container(column).center_x(Length::Fill))
+                    .anchor_bottom()
+                    .height(Length::Fill),
+            )
+            .into()
         }
     }
 
@@ -4063,7 +4069,8 @@ mod app {
     }
 
     /// Enter sends; Up in an empty box recalls the prompts sent, and Up, Down and Escape move
-    /// among them. Shift+Enter and everything else keep the editor's own bindings.
+    /// among them; PageUp, PageDown, Home and End move the transcript. Shift+Enter and
+    /// everything else keep the editor's own bindings.
     fn composer_keys(
         press: text_editor::KeyPress,
         conversation: &ConversationId,
@@ -4113,6 +4120,14 @@ mod app {
         }
         if enter && focused && !modifiers.shift() {
             return Some(Binding::Custom(Message::Send(conversation.clone())));
+        }
+        // Pages always move the transcript; Home and End do once there is no text to move in,
+        // or with Ctrl.
+        if focused && let Some(jump) = scroll::jump_key(&press.key, modifiers) {
+            let end = matches!(jump, scroll::Jump::Top | scroll::Jump::Bottom);
+            if !end || modifiers.control() || draft.text().is_empty() {
+                return Some(Binding::Custom(Message::Jump(conversation.clone(), jump)));
+            }
         }
         let recalled = view.recalled > 0;
         let older = match press.key {
@@ -4417,6 +4432,12 @@ mod app {
                 Message::Unrecall(conversation) => {
                     if let Some(view) = self.views.get_mut(&conversation) {
                         view.unrecall();
+                    }
+                }
+                Message::Jump(conversation, jump) => return self.jump(&conversation, jump),
+                Message::JumpFocused(jump) => {
+                    if let Some(conversation) = self.focused(self.current) {
+                        return self.jump(conversation, jump);
                     }
                 }
                 Message::Stop(conversation_id) => self.cmd(Command::Stop { conversation_id }),
@@ -5254,7 +5275,16 @@ mod app {
     fn window_events() -> Subscription<Message> {
         static CTRL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-        cosmic::iced::event::listen_with(|event, _status, id| {
+        cosmic::iced::event::listen_with(|event, status, id| {
+            // Paging keys a focused editor or input took are its own.
+            if let cosmic::iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key, modifiers, ..
+            }) = &event
+                && let Some(jump) = scroll::jump_key(key, *modifiers)
+            {
+                return (status == cosmic::iced::event::Status::Ignored)
+                    .then(|| Message::In(id, Box::new(Message::JumpFocused(jump))));
+            }
             let message = shortcut(event, id, &CTRL)?;
             Some(match message {
                 Message::Resized(..) | Message::Modifiers(_) | Message::Zoom(_) => message,
@@ -5366,6 +5396,7 @@ mod app {
     pub mod instance;
     mod links;
     mod review;
+    mod scroll;
     mod selectable;
     mod sessions;
     mod slash;
