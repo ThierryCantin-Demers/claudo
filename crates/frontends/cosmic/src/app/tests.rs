@@ -1960,3 +1960,50 @@ fn a_message_typed_in_the_claude_app_shows_as_the_users_own() {
     assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "how is it going?"));
     assert!(view.streaming, "its turn is running");
 }
+
+/// The links a press and release near the top left corner of `element` opens.
+fn clicked(renderer: &mut cosmic::Renderer, element: Element<'_, Message>) -> Vec<String> {
+    let mut ui = UserInterface::build(element, WINDOW, Cache::default(), renderer);
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &[button(true), button(false)],
+        mouse::Cursor::Available(Point::new(12.0, 9.0)),
+        renderer,
+        &mut clipboard::Null,
+        &mut messages,
+    );
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::Link(url) => Some(url),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn addresses_and_markdown_links_open_when_clicked() {
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let conversation = ALPHA.to_string();
+    let mut reply = |text: &str| {
+        let reply = Reply::complete(text.to_string());
+        let viewer = selectable::Viewer {
+            conversation: &conversation,
+            entry: 0,
+            selection: None,
+            next: std::cell::Cell::new(0),
+        };
+        let element = markdown::view_with(reply.markdown.items(), markdown_settings(14.0), &viewer);
+        clicked(&mut renderer, element)
+    };
+
+    assert_eq!(
+        reply("https://github.com/tracel-ai/burn/pull/6111, as asked."),
+        ["https://github.com/tracel-ai/burn/pull/6111"]
+    );
+    assert_eq!(reply("[docs](https://docs.rs) here"), ["https://docs.rs"]);
+    assert!(reply("Opened https://x.io/p").is_empty());
+
+    let typed = Selectable::plain("https://x.io/typed", 14.0, &conversation, (0, 0), None);
+    assert_eq!(clicked(&mut renderer, typed.into()), ["https://x.io/typed"]);
+}

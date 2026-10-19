@@ -220,7 +220,8 @@ newline.
 **Selectable text**: iced's text and markdown widgets cannot be selected, so COSMIC
 transcripts draw their text with `Selectable` (`src/app/selectable.rs`), a rich-text widget
 on cosmic-text's hit testing and highlight runs, and render markdown through its `Viewer`.
-New transcript text should go through it too, or it cannot be selected or copied. It also
+New transcript text should go through it too, or it cannot be selected or copied, and
+web addresses in it become links (`src/app/links.rs`: markdown only links them inside `<>`). It also
 draws furigana (`src/app/furigana.rs`): a reply's `<ruby>` elements reach it as Unicode's
 interlinear annotation characters, the only form the markdown parser keeps, and it lays out
 the words alone and draws each reading over them. cosmic-text has one line height per

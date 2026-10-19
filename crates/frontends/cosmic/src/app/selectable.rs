@@ -22,6 +22,7 @@ use cosmic::{Element, Theme};
 
 use super::Message;
 use super::furigana::{self, Ruby};
+use super::links;
 
 /// A place in a transcript: a block of text, as its entry and its position within the
 /// entry, and a byte offset into the block.
@@ -164,7 +165,7 @@ impl<'a> Selectable<'a> {
         self
     }
 
-    fn joiner(mut self, joiner: &'static str) -> Self {
+    pub fn joiner(mut self, joiner: &'static str) -> Self {
         self.joiner = joiner;
         self
     }
@@ -182,6 +183,8 @@ struct State {
     paragraph: Paragraph,
     /// Readings to draw over the paragraph's words, which it lays out without them.
     rubies: Vec<Ruby>,
+    /// Each laid out span's link: an address in text is split out as a span of its own.
+    links: Vec<Option<markdown::Uri>>,
     last_click: Option<Click>,
     pressed_link: Option<usize>,
     hovered_link: Option<usize>,
@@ -205,6 +208,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
             spans: Vec::new(),
             paragraph: Paragraph::default(),
             rubies: Vec::new(),
+            links: Vec::new(),
             last_click: None,
             pressed_link: None,
             hovered_link: None,
@@ -230,8 +234,9 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
         layout::sized(limits, self.width, Length::Shrink, |limits| {
             let bounds = limits.max();
             if state.spans != spans {
-                let (shown, rubies) = furigana::split(spans);
+                let (shown, rubies) = shown(spans);
                 state.rubies = rubies;
+                state.links = shown.iter().map(|span| span.link.clone()).collect();
                 let line_height = line_height(&state.rubies);
                 state.paragraph = Paragraph::with_spans(text(
                     &shown[..],
@@ -251,7 +256,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
                     Difference::None => {}
                     Difference::Bounds => state.paragraph.resize(bounds),
                     Difference::Shape => {
-                        let (shown, _) = furigana::split(spans);
+                        let (shown, _) = shown(spans);
                         state.paragraph = Paragraph::with_spans(text(
                             &shown[..],
                             bounds,
@@ -395,12 +400,10 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
             .position_in(layout.bounds())
             .map(|point| Point::new(point.x, point.y + lift));
         let link_at = |state: &State, point: Point| {
-            state.paragraph.hit_span(point).filter(|&span| {
-                self.spans
-                    .as_slice()
-                    .get(span)
-                    .is_some_and(|s| s.link.is_some())
-            })
+            state
+                .paragraph
+                .hit_span(point)
+                .filter(|&span| state.links.get(span).is_some_and(Option::is_some))
         };
         let mark = |offset| Mark {
             block: self.block,
@@ -455,7 +458,7 @@ impl Widget<Message, Theme, cosmic::Renderer> for Selectable<'_> {
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(link) = state.pressed_link.take()
                     && position.and_then(|point| link_at(state, point)) == Some(link)
-                    && let Some(url) = self.spans.as_slice()[link].link.clone()
+                    && let Some(url) = state.links[link].clone()
                 {
                     shell.publish(Message::Link(url));
                 }
@@ -546,7 +549,7 @@ pub struct Viewer<'a> {
 }
 
 impl<'a> Viewer<'a> {
-    fn block(&self, spans: impl Into<Spans<'a>>, size: Pixels) -> Selectable<'a> {
+    pub fn block(&self, spans: impl Into<Spans<'a>>, size: Pixels) -> Selectable<'a> {
         let index = self.next.get();
         self.next.set(index + 1);
         Selectable::new(
@@ -681,6 +684,13 @@ impl<'a> markdown::Viewer<'a, Message, Theme, cosmic::Renderer> for Viewer<'a> {
             .separator_x(0)
             .into()
     }
+}
+
+/// What a block lays out: its text without readings, its addresses made links.
+fn shown(spans: &[Span<'_, markdown::Uri>]) -> (Vec<Span<'static, markdown::Uri>>, Vec<Ruby>) {
+    let (shown, rubies) = furigana::split(spans);
+    let link = cosmic::theme::active().cosmic().accent_text_color().into();
+    (links::linked(shown, link), rubies)
 }
 
 /// A reading's size, relative to its words'.

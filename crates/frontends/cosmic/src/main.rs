@@ -5224,6 +5224,7 @@ mod app {
     mod folder;
     mod frozen;
     mod furigana;
+    mod links;
     mod selectable;
     mod sessions;
     mod slash;
