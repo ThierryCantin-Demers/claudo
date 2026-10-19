@@ -2999,9 +2999,6 @@ mod app {
                         widget::space::horizontal().into(),
                     ]
                 };
-            if let Some(label) = info.and_then(|c| context_label(&c.context)) {
-                row.push(widget::text(label).size(12.0).class(dim()).into());
-            }
             row.push(
                 widget::button::icon(widget::icon::from_name("window-close-symbolic"))
                     .on_press(Message::Close(id.clone()))
@@ -3285,6 +3282,10 @@ mod app {
                     small(model).into(),
                 ]
                 .into_iter()
+                .chain(
+                    self.info(id)
+                        .and_then(|c| context_ring::ring(&c.context, 18.0 * self.zoom)),
+                )
                 .chain(stop)
                 .chain(send)
                 .collect::<Vec<_>>(),
@@ -5613,23 +5614,12 @@ mod app {
             .into()
         }
 
-        /// The header bar's end: the focused conversation's context with one tile, and the
-        /// Commands button.
+        /// The header bar's end: the Commands button.
         fn header_end_of(&self, w: window::Id) -> Vec<Element<'_, Message>> {
-            let layout = self.window(w);
-            if layout.page != Page::Chat {
+            if self.window(w).page != Page::Chat {
                 return Vec::new();
             }
-            let context = self
-                .focused(w)
-                .and_then(|id| self.info(id))
-                .filter(|_| layout.tiles.len() == 1)
-                .and_then(|c| context_label(&c.context))
-                .map(|label| widget::text(label).size(12.0).class(dim()).into());
-            context
-                .into_iter()
-                .chain([self.commands_button(w)])
-                .collect()
+            vec![self.commands_button(w)]
         }
     }
 
@@ -5797,6 +5787,7 @@ mod app {
     mod carry;
     mod commands;
     mod compaction;
+    mod context_ring;
     mod folder;
     mod frozen;
     mod furigana;

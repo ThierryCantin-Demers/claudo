@@ -2715,3 +2715,16 @@ fn files_attached_to_an_unsent_message_are_saved_and_come_back() {
         "back with its conversation"
     );
 }
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn context_ring_snapshot() {
+    let mut app = two_tiles();
+    for (conversation, used, window) in [(0, 300_000, 1_000_000), (1, 180_000, 200_000)] {
+        app.conversations[conversation].context = claudo_protocol::ContextUsage {
+            used,
+            window: Some(window),
+        };
+    }
+    Harness::new(app).snapshot("context-ring");
+}
