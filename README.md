@@ -46,7 +46,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 ## Features
 
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.
-- Send images, PDFs and text files with a message: COSMIC pastes an image from the clipboard with Ctrl+V and picks files with the paperclip; egui picks files with Attach.
+- Send images, PDFs and text files with a message: COSMIC pastes an image from the clipboard with Ctrl+V and picks files with the paperclip, and keeps the files of an unsent message across restarts like its text; egui picks files with Attach.
 - Continue a session started in Claude Desktop or a terminal (COSMIC: right-click New chat, Continue a session; egui: Sessions…). Its first message forks it, so the original stays as it was.
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - COSMIC: send a message while Claude works. It waits under the reply and reaches Claude at its next step, as in the terminal, or starts the next turn if Claude is already finishing.
@@ -54,8 +54,8 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Code reviews (`/code-review`) show as a list of findings, each with its rank, file and line and what is wrong, its failure scenario folded under it.
 - COSMIC: links open in the browser, whether written as markdown or as a bare address, in replies, your own messages and tool output.
 - COSMIC: one claudo at a time. Launching it again while it runs opens a new window with a new chat in the running one.
-- Never two agents on one conversation: a message to one whose agent another claudo runs, or a killed claudo left running, waits for it to finish; COSMIC says which process it waits on and offers to stop it.
-- COSMIC: update without stopping agents. Once a new build is installed or rebuilt over the running one, an Update button beside Settings restarts into it, and every agent keeps working through the restart, mid-turn included.
+- Never two agents on one conversation: a message to one whose agent another claudo runs, or a killed claudo left running, waits for it to finish; COSMIC says which process it waits on, whether it is working or idle, and offers to stop it.
+- COSMIC: update without stopping agents. Once a new build is installed or rebuilt over the running one, an Update button beside Settings restarts into it, and every agent keeps working through the restart, mid-turn included, with its pending approvals and queued messages. A closed sidebar shows a dot on its toggle when an update is ready.
 - Permission profiles: Safe, Accept edits, Full auto.
 - Remote Control (COSMIC: Settings): your agents also show in the Claude app and on claude.ai/code, where you can follow them and message them.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.

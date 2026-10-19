@@ -289,6 +289,14 @@ pub struct Resume<'a> {
 /// message started.
 pub type Incoming = Box<dyn Fn(EngineEvent) + Send + Sync>;
 
+/// A conversation's lock, for the process to hold as long as it runs, and the file it keeps
+/// while it sits idle, so an app waiting on the conversation can say whether stopping it
+/// loses work.
+pub struct Held {
+    pub lock: File,
+    pub idle: PathBuf,
+}
+
 /// One long-lived `claude -p --input-format stream-json` process. Turns are
 /// written to its stdin; dropping the session closes stdin, which lets the
 /// process finish a running turn and then exit.
@@ -322,6 +330,10 @@ struct Shared {
     /// The reader reads and handles output only while holding this, so a handover that
     /// holds it finds no line half handled.
     reading: Mutex<Reading>,
+    /// Exists while the process sits idle, when it holds its conversation's lock.
+    idle: Option<PathBuf>,
+    /// What `idle` was last made to say.
+    marked: Mutex<Option<bool>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -353,8 +365,8 @@ struct Reading {
 /// also starts turns of its own, and queues the client's messages behind them.
 #[derive(Default)]
 struct Turns {
-    /// Messages written but not started yet, oldest first, by id.
-    queued: VecDeque<(String, Sender<EngineEvent>)>,
+    /// Messages written but not started yet, oldest first.
+    queued: VecDeque<Queued>,
     /// Where the running turn's events go; `None` between turns.
     running: Option<Route>,
     exited: bool,
@@ -366,6 +378,19 @@ struct Turns {
 enum Route {
     Client(Sender<EngineEvent>),
     Incoming,
+}
+
+struct Queued {
+    id: String,
+    sink: Sender<EngineEvent>,
+    sent: Sent,
+}
+
+/// A message as it was sent, for an app taking the session over to show while it waits.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Sent {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
 }
 
 impl Turns {
@@ -390,8 +415,8 @@ impl Turns {
         let i = self
             .queued
             .iter()
-            .position(|(id, _)| Some(id.as_str()) == message)?;
-        self.queued.remove(i).map(|(_, sink)| sink)
+            .position(|queued| Some(queued.id.as_str()) == message)?;
+        self.queued.remove(i).map(|queued| queued.sink)
     }
 }
 
@@ -405,6 +430,9 @@ pub struct SessionState {
     /// Output read but not yet a whole line, in base64.
     unread: String,
     queued: Vec<String>,
+    /// What each queued message says, by id.
+    #[serde(default)]
+    sent: HashMap<String, Sent>,
     running: Option<Running>,
     reports_ids: bool,
     approvals: HashMap<String, Pending>,
@@ -415,6 +443,8 @@ pub struct SessionState {
     last_request: u64,
     /// Subagents followed: their task, then their session.
     following: Vec<(String, String)>,
+    #[serde(default)]
+    idle: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,8 +472,8 @@ impl SessionState {
 pub struct Adopted {
     /// The running turn's events, when the client started it.
     pub running: Option<Receiver<EngineEvent>>,
-    /// The events of messages sent but not started yet, oldest first.
-    pub queued: Vec<Receiver<EngineEvent>>,
+    /// Messages sent but not started yet, oldest first, with their events.
+    pub queued: Vec<(Sent, Receiver<EngineEvent>)>,
     /// Approvals the running turn waits on: request id, call and scope.
     pub approvals: Vec<(String, ToolCall, String)>,
 }
@@ -475,17 +505,17 @@ impl Session {
         Self::spawn_holding(config, resume, name, incoming, None)
     }
 
-    /// Like `spawn`, the process taking `lock` over: it holds the lock as long as it runs,
+    /// Like `spawn`, the process taking `held` over: it holds the lock as long as it runs,
     /// whatever becomes of this app, and the file says its pid.
     pub fn spawn_holding(
         config: SessionConfig,
         resume: Option<Resume>,
         name: &str,
         incoming: Option<Incoming>,
-        lock: Option<File>,
+        held: Option<Held>,
     ) -> io::Result<Self> {
         let mut cmd = Command::new(claude_bin());
-        if let Some(fd) = lock.as_ref().map(AsRawFd::as_raw_fd) {
+        if let Some(fd) = held.as_ref().map(|held| held.lock.as_raw_fd()) {
             // SAFETY: only clears a flag on a descriptor this process owns, in the child
             // between fork and exec.
             unsafe {
@@ -534,10 +564,11 @@ impl Session {
         }
 
         let mut child = cmd.spawn()?;
-        if let Some(mut lock) = lock {
+        let idle = held.map(|Held { mut lock, idle }| {
             let _ = lock.set_len(0);
             let _ = write!(lock, "{}", child.id());
-        }
+            idle
+        });
         let pipe = |fd: Option<OwnedFd>| File::from(fd.expect("piped"));
         let files = [
             pipe(child.stdin.take().map(OwnedFd::from)),
@@ -550,6 +581,7 @@ impl Session {
             fds: files.each_ref().map(AsRawFd::as_raw_fd),
             unread: String::new(),
             queued: Vec::new(),
+            sent: HashMap::new(),
             running: None,
             reports_ids: false,
             approvals: HashMap::new(),
@@ -559,6 +591,7 @@ impl Session {
             notices: Vec::new(),
             last_request: 0,
             following: Vec::new(),
+            idle,
         };
         let (session, ..) = Self::start(state, files, incoming);
         // Without it the process joins the other agents only once its first turn ends.
@@ -579,34 +612,16 @@ impl Session {
         for file in &files {
             set_cloexec(file.as_raw_fd(), true);
         }
-        let (session, running, queued) = Self::start(state, files, incoming);
-        let approvals = session
-            .shared
-            .approvals
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, pending)| (id.clone(), pending.call.clone(), pending.scope.clone()))
-            .collect();
-        let adopted = Adopted {
-            running,
-            queued,
-            approvals,
-        };
-        (session, adopted)
+        Self::start(state, files, incoming)
     }
 
     /// Starts reading a process's output, from where `state` says it was. Returns the
-    /// session with the events of its running client turn and of its queued messages.
+    /// session with what it was doing.
     fn start(
         state: SessionState,
         [stdin, stdout, stderr]: [File; 3],
         incoming: Option<Incoming>,
-    ) -> (
-        Self,
-        Option<Receiver<EngineEvent>>,
-        Vec<Receiver<EngineEvent>>,
-    ) {
+    ) -> (Self, Adopted) {
         let mut receivers = Vec::new();
         let mut channel = || {
             let (tx, rx) = mpsc::channel();
@@ -617,11 +632,30 @@ impl Session {
             Running::Client => Route::Client(channel()),
             Running::Incoming => Route::Incoming,
         });
-        let queued = state.queued.into_iter().map(|id| (id, channel())).collect();
+        let mut sent = state.sent;
+        let queued: VecDeque<Queued> = state
+            .queued
+            .into_iter()
+            .map(|id| Queued {
+                sent: sent.remove(&id).unwrap_or_default(),
+                id,
+                sink: channel(),
+            })
+            .collect();
         let mut receivers = receivers.into_iter();
         let running_events = matches!(running, Some(Route::Client(_)))
             .then(|| receivers.next())
             .flatten();
+        let queued_events = queued
+            .iter()
+            .map(|queued| queued.sent.clone())
+            .zip(receivers)
+            .collect();
+        let approvals = state
+            .approvals
+            .iter()
+            .map(|(id, pending)| (id.clone(), pending.call.clone(), pending.scope.clone()))
+            .collect();
         let following: HashMap<String, (String, Arc<AtomicBool>)> = state
             .following
             .into_iter()
@@ -652,6 +686,8 @@ impl Session {
                 following: HashMap::new(),
                 closed: false,
             }),
+            idle: state.idle,
+            marked: Mutex::new(None),
         });
         for (task, (session, stop)) in following {
             shared.follow(&task, &session, &stop);
@@ -674,7 +710,12 @@ impl Session {
             config: state.config,
             shared,
         };
-        (session, running_events, receivers.collect())
+        let adopted = Adopted {
+            running: running_events,
+            queued: queued_events,
+            approvals,
+        };
+        (session, adopted)
     }
 
     /// Holds the reader still and returns the session as a handover passes it on, or
@@ -690,7 +731,16 @@ impl Session {
             pid: self.shared.pid,
             fds: self.shared.fds,
             unread: BASE64_STANDARD.encode(&reading.unread),
-            queued: turns.queued.iter().map(|(id, _)| id.clone()).collect(),
+            queued: turns
+                .queued
+                .iter()
+                .map(|queued| queued.id.clone())
+                .collect(),
+            sent: turns
+                .queued
+                .iter()
+                .map(|queued| (queued.id.clone(), queued.sent.clone()))
+                .collect(),
             running: turns.running.as_ref().map(|route| match route {
                 Route::Client(_) => Running::Client,
                 Route::Incoming => Running::Incoming,
@@ -707,6 +757,7 @@ impl Session {
                 .iter()
                 .map(|(task, (session, _))| (task.clone(), session.clone()))
                 .collect(),
+            idle: self.shared.idle.clone(),
         };
         drop(turns);
         Some((Paused { _reading: reading }, state))
@@ -723,9 +774,17 @@ impl Session {
             if turns.exited {
                 return Err(io::ErrorKind::BrokenPipe.into());
             }
-            turns.queued.push_back((id.clone(), tx));
+            turns.queued.push_back(Queued {
+                id: id.clone(),
+                sink: tx,
+                sent: Sent {
+                    text: message.text.to_owned(),
+                    attachments: message.attachments.to_vec(),
+                },
+            });
         }
         self.shared.touch();
+        self.shared.mark_idle();
 
         let text =
             (!message.text.is_empty()).then(|| json!({ "type": "text", "text": message.text }));
@@ -744,7 +803,7 @@ impl Session {
                 .lock()
                 .unwrap()
                 .queued
-                .retain(|(queued, _)| *queued != id);
+                .retain(|queued| queued.id != id);
             return Err(e);
         }
         Ok(rx)
@@ -859,6 +918,31 @@ impl Shared {
         *self.last_activity.lock().unwrap() = Instant::now();
     }
 
+    /// Keeps the idle file existing exactly while no turn runs or waits and nothing runs in
+    /// the background. Once the process has exited it is left alone: the conversation's
+    /// next agent may already keep it.
+    fn mark_idle(&self) {
+        let Some(path) = &self.idle else {
+            return;
+        };
+        let idle = {
+            let turns = self.turns.lock().unwrap();
+            if turns.exited {
+                return;
+            }
+            turns.running.is_none() && turns.queued.is_empty()
+        } && self.background.lock().unwrap().is_empty();
+        let mut marked = self.marked.lock().unwrap();
+        if *marked != Some(idle) {
+            *marked = Some(idle);
+            let _ = if idle {
+                File::create(path).map(drop)
+            } else {
+                std::fs::remove_file(path)
+            };
+        }
+    }
+
     /// Whether a call is new to the running turn, marking it shown.
     fn first_shown(&self, call_id: &str) -> bool {
         self.shown.lock().unwrap().insert(call_id.to_string())
@@ -925,6 +1009,7 @@ impl Shared {
                     self.handle(&mut reading, &v);
                 }
             }
+            self.mark_idle();
         }
         self.reading.lock().unwrap().closed = true;
     }
@@ -1021,7 +1106,7 @@ impl Shared {
                 let next = turns
                     .queued
                     .front()
-                    .map(|(id, _)| id.clone())
+                    .map(|queued| queued.id.clone())
                     .filter(|_| !turns.reports_ids && !incoming);
                 turns.start(next.as_deref());
                 if !incoming
@@ -1068,7 +1153,7 @@ impl Shared {
             );
         }
         turns.running = None;
-        for (_, sink) in std::mem::take(&mut turns.queued) {
+        for Queued { sink, .. } in std::mem::take(&mut turns.queued) {
             let _ = sink.send(EngineEvent::Error {
                 detail: detail.clone(),
             });
@@ -1872,6 +1957,14 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    fn queued(id: &str, sink: Sender<EngineEvent>) -> Queued {
+        Queued {
+            id: id.to_string(),
+            sink,
+            sent: Sent::default(),
+        }
+    }
+
     /// The CLI's own rendering of a review's JSON, as its bundle writes it.
     fn findings_list(findings: &[(&str, Option<&str>, &str, Option<&str>)]) -> String {
         let items: Vec<String> = findings
@@ -2338,8 +2431,8 @@ mod tests {
         let mut turns = Turns::default();
         let (first, _) = mpsc::channel();
         let (second, _) = mpsc::channel();
-        turns.queued.push_back(("a".to_string(), first));
-        turns.queued.push_back(("b".to_string(), second));
+        turns.queued.push_back(queued("a", first));
+        turns.queued.push_back(queued("b", second));
 
         turns.start(started_message(&started("peer")).unwrap());
         assert!(matches!(turns.running, Some(Route::Incoming)));
@@ -2369,8 +2462,8 @@ mod tests {
         let mut turns = Turns::default();
         let (first, first_events) = mpsc::channel();
         let (second, second_events) = mpsc::channel();
-        turns.queued.push_back(("a".to_string(), first));
-        turns.queued.push_back(("b".to_string(), second));
+        turns.queued.push_back(queued("a", first));
+        turns.queued.push_back(queued("b", second));
 
         assert_eq!(turns.begin(Some("a")), Some(false));
         assert_eq!(turns.begin(Some("peer")), None);

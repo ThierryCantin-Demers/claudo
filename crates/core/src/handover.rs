@@ -31,6 +31,15 @@ pub struct Handover {
     /// The replaced app's other children, such as an agent shutting down, which only the
     /// new build can reap.
     pub reap: Vec<u32>,
+    #[serde(default)]
+    pub waiting: Vec<Waited>,
+}
+
+/// Messages to a conversation another app's agent holds, oldest first.
+#[derive(Serialize, Deserialize)]
+pub struct Waited {
+    pub conversation: String,
+    pub messages: Vec<crate::backend::Outgoing>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,9 +67,9 @@ pub fn installed() -> Option<PathBuf> {
     ))
 }
 
-/// Replaces this process with `exe`, handing `sessions` over to it. Returns only if that
-/// failed, and then nothing changed.
-pub(crate) fn exec(exe: &Path, sessions: Vec<Handed>) -> io::Error {
+/// Replaces this process with `exe`, handing `sessions` and the messages `waiting` for
+/// other apps' agents over to it. Returns only if that failed, and then nothing changed.
+pub(crate) fn exec(exe: &Path, sessions: Vec<Handed>, waiting: Vec<Waited>) -> io::Error {
     let handed: HashSet<u32> = sessions.iter().map(|h| h.state.pid()).collect();
     let reap = children()
         .into_iter()
@@ -70,6 +79,7 @@ pub(crate) fn exec(exe: &Path, sessions: Vec<Handed>) -> io::Error {
         version: VERSION,
         sessions,
         reap,
+        waiting,
     };
     let file = path();
     if let Err(e) = write(&file, &handover) {

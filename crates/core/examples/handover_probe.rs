@@ -54,7 +54,7 @@ fn before(cwd: &std::path::Path, marker: &std::path::Path) {
     }
     println!("the command started; handing the agent over");
     let exe = std::env::current_exe().unwrap();
-    let error = live.exec(&exe, |_| Progress::default());
+    let error = live.exec(&exe, |_| Progress::default(), Vec::new());
     println!("FAIL the exec failed: {error}");
     std::process::exit(1);
 }

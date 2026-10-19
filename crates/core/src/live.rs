@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -15,9 +15,9 @@ use std::time::Duration;
 use claudo_protocol::{ConversationId, Decision};
 
 use crate::claude_bin;
-use crate::engine::cli::{Adopted, Incoming, SessionState};
+use crate::engine::cli::{Adopted, Held, Incoming, SessionState};
 use crate::engine::{EngineEvent, Resume, Session, SessionConfig, UserMessage};
-use crate::handover::{Handed, Progress};
+use crate::handover::{Handed, Progress, Waited};
 
 /// Events of turns a conversation's process started on its own, such as for another
 /// agent's message, with the conversation they belong to.
@@ -27,9 +27,9 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug)]
 pub enum SendError {
-    /// A process this app does not run, with this pid, is the conversation's agent: one a
-    /// killed claudo left running, or another claudo's.
-    Occupied(u32),
+    /// A process this app does not run is the conversation's agent: one a killed claudo
+    /// left running, or another claudo's.
+    Occupied,
     Failed(String),
 }
 
@@ -40,11 +40,18 @@ pub struct AgentLock(Option<File>);
 
 impl AgentLock {
     fn path(conversation_id: &str) -> PathBuf {
+        Self::dir().join(format!("{conversation_id}.lock"))
+    }
+
+    fn idle_path(conversation_id: &str) -> PathBuf {
+        Self::dir().join(format!("{conversation_id}.idle"))
+    }
+
+    fn dir() -> PathBuf {
         std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
             .join("claudo-agents")
-            .join(format!("{conversation_id}.lock"))
     }
 
     fn open(conversation_id: &str) -> io::Result<File> {
@@ -67,21 +74,48 @@ impl AgentLock {
             return Ok(Self(None));
         };
         match file.try_lock() {
-            Ok(()) => Ok(Self(Some(file))),
-            Err(TryLockError::WouldBlock) => {
-                let mut pid = String::new();
-                let _ = (&file).read_to_string(&mut pid);
-                Err(pid.trim().parse().unwrap_or(0))
+            Ok(()) => {
+                // Left by an agent that went while idle.
+                let _ = std::fs::remove_file(Self::idle_path(conversation_id));
+                Ok(Self(Some(file)))
             }
+            Err(TryLockError::WouldBlock) => Err(Self::holder(&file)),
             Err(TryLockError::Error(_)) => Ok(Self(None)),
         }
     }
 
-    /// Returns once whatever holds the conversation's lock has let go of it.
-    pub fn wait(conversation_id: &str) {
-        if let Ok(file) = Self::open(conversation_id) {
-            let _ = file.lock();
+    fn holder(mut file: &File) -> u32 {
+        let mut pid = String::new();
+        let _ = file
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| file.read_to_string(&mut pid));
+        pid.trim().parse().unwrap_or(0)
+    }
+
+    /// Returns once whatever holds the conversation's lock has let go of it. Until then,
+    /// `holder` hears the holder's pid and whether it sits idle, at first and whenever
+    /// either changes.
+    pub fn wait(conversation_id: &str, mut holder: impl FnMut(u32, bool)) {
+        let Ok(file) = Self::open(conversation_id) else {
+            return;
+        };
+        let idle = Self::idle_path(conversation_id);
+        let mut told = None;
+        while let Err(TryLockError::WouldBlock) = file.try_lock() {
+            let now = (Self::holder(&file), idle.exists());
+            if told != Some(now) {
+                told = Some(now);
+                holder(now.0, now.1);
+            }
+            thread::sleep(Duration::from_secs(1));
         }
+    }
+
+    fn held(self, conversation_id: &str) -> Option<Held> {
+        self.0.map(|lock| Held {
+            lock,
+            idle: Self::idle_path(conversation_id),
+        })
     }
 }
 
@@ -204,9 +238,11 @@ impl LiveSessions {
             sessions = self.sessions.lock().unwrap();
         }
 
-        let lock = AgentLock::take(conversation_id).map_err(SendError::Occupied)?;
+        let held = AgentLock::take(conversation_id)
+            .map_err(|_| SendError::Occupied)?
+            .held(conversation_id);
         let incoming = self.incoming_for(conversation_id);
-        let mut session = Session::spawn_holding(config, resume, name, incoming, lock.0)
+        let mut session = Session::spawn_holding(config, resume, name, incoming, held)
             .map_err(|e| SendError::Failed(format!("failed to launch `{}`: {e}", claude_bin())))?;
         for scope in always {
             session.allow_always(scope);
@@ -242,9 +278,15 @@ impl LiveSessions {
     }
 
     /// Replace this process with `exe`, handing it every process still running, each with
-    /// what `progress` knew of its conversation's running turn. Returns only if that failed,
-    /// and then everything goes on as it was.
-    pub fn exec(&self, exe: &Path, progress: impl Fn(&str) -> Progress) -> io::Error {
+    /// what `progress` knew of its conversation's running turn, and the messages `waiting`
+    /// for another app's agent. Returns only if that failed, and then everything goes on as
+    /// it was.
+    pub fn exec(
+        &self,
+        exe: &Path,
+        progress: impl Fn(&str) -> Progress,
+        waiting: Vec<Waited>,
+    ) -> io::Error {
         let sessions = self.sessions.lock().unwrap();
         let mut paused = Vec::new();
         let mut handed = Vec::new();
@@ -258,7 +300,7 @@ impl LiveSessions {
                 });
             }
         }
-        crate::handover::exec(exe, handed)
+        crate::handover::exec(exe, handed, waiting)
     }
 
     /// Take a conversation's process away, so no later turn reaches it.
@@ -329,6 +371,37 @@ mod tests {
         );
         drop(held);
         assert!(AgentLock::take(&conversation).is_ok(), "free once let go");
+        let _ = std::fs::remove_file(AgentLock::path(&conversation));
+    }
+
+    #[test]
+    fn a_wait_hears_when_the_holder_sits_idle_and_ends_when_it_lets_go() {
+        let conversation = format!("lock-test-{}", uuid::Uuid::new_v4());
+        let Ok(AgentLock(Some(mut held))) = AgentLock::take(&conversation) else {
+            panic!("a free conversation's lock");
+        };
+        write!(held, "4242").unwrap();
+        let (heard, hear) = mpsc::channel();
+        let waiter = {
+            let conversation = conversation.clone();
+            thread::spawn(move || {
+                AgentLock::wait(&conversation, |pid, idle| heard.send((pid, idle)).unwrap())
+            })
+        };
+        let next = || hear.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(next(), (4242, false));
+        File::create(AgentLock::idle_path(&conversation)).unwrap();
+        assert_eq!(next(), (4242, true));
+        drop(held);
+        waiter.join().unwrap();
+        assert!(
+            AgentLock::take(&conversation).is_ok(),
+            "free once the waiter is done"
+        );
+        assert!(
+            !AgentLock::idle_path(&conversation).exists(),
+            "the next agent starts with no idle file left over"
+        );
         let _ = std::fs::remove_file(AgentLock::path(&conversation));
     }
 }

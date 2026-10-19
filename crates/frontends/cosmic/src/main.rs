@@ -30,9 +30,9 @@ fn main() -> cosmic::iced::Result {
 #[cfg(feature = "cosmic")]
 mod app {
     use claudo_protocol::{
-        CliCommand, Command, Compaction, ConversationId, ConversationInfo, Decision, Effort, Item,
-        ModelOption, Overrides, Profile, Quota, ServerEvent, SessionId, SessionInfo, Settings,
-        SystemStatus, ToolCall, TurnTime,
+        Attachment, CliCommand, Command, Compaction, ConversationId, ConversationInfo, Decision,
+        Effort, Item, ModelOption, Overrides, Profile, Quota, ServerEvent, SessionId, SessionInfo,
+        Settings, SystemStatus, ToolCall, TurnTime,
     };
     use claudo_transport::{Commands, spawn_backend};
 
@@ -181,6 +181,13 @@ mod app {
         scope: String,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Holder {
+        pid: u32,
+        /// It sits between turns with nothing running.
+        idle: bool,
+    }
+
     /// Everything shown for one conversation, whichever tile shows it. It outlives its
     /// tile while a turn runs, so a background agent's progress is there on return.
     struct ConversationView {
@@ -198,9 +205,9 @@ mod app {
         partial: bool,
         /// How many prompts back the draft was recalled from; 0 when it is the user's own.
         recalled: usize,
-        /// The pid of an agent this app does not run that holds the conversation, which the
-        /// messages sent to it wait for.
-        waiting_for: Option<u32>,
+        /// An agent this app does not run that holds the conversation, which the messages
+        /// sent to it wait for.
+        waiting_for: Option<Holder>,
         /// The message put straight into the transcript has not been reported delivered,
         /// so the next `Delivered` is its, not the first queued one's.
         undelivered: bool,
@@ -478,11 +485,17 @@ mod app {
                     self.since.get_or_insert_with(std::time::Instant::now);
                     self.items.push(Entry::Notice(text));
                 }
-                ServerEvent::Waiting { pid, .. } => {
-                    self.waiting_for = Some(pid);
+                ServerEvent::Waiting { pid, idle, .. } => {
+                    self.waiting_for = Some(Holder { pid, idle });
                     self.streaming = true;
                     self.since.get_or_insert_with(std::time::Instant::now);
                 }
+                ServerEvent::Queued {
+                    text, attachments, ..
+                } => self.queued.push((
+                    text,
+                    attachments.into_iter().map(attach::Shown::new).collect(),
+                )),
                 ServerEvent::Working { .. } => {
                     self.streaming = true;
                     self.partial = true;
@@ -781,6 +794,8 @@ mod app {
         drafts: HashMap<ConversationId, String>,
         /// Files attached to the unsent message of conversations that have no view.
         unsent_files: HashMap<ConversationId, Vec<attach::Shown>>,
+        /// What the files attached to unsent messages were when last saved.
+        unsent_saved: u64,
         /// Each window's tiles to reopen, with its focused one, once the conversation list
         /// arrives.
         restore: Vec<(window::Id, Vec<Tile>, usize)>,
@@ -856,6 +871,10 @@ mod app {
         windows: Vec<SavedWindow>,
         /// The main window's workspace.
         spot: Option<placement::Spot>,
+        /// Files attached to unsent messages, which can be large, so they are kept apart and
+        /// written only when they change.
+        #[serde(skip)]
+        unsent: HashMap<ConversationId, Vec<Attachment>>,
     }
 
     /// A window besides the main one, as it was left.
@@ -923,22 +942,34 @@ mod app {
                 drafts: HashMap::new(),
                 windows: Vec::new(),
                 spot: None,
+                unsent: HashMap::new(),
             }
         }
     }
 
     const UI_STATE: &str = "ui";
+    const UNSENT: &str = "unsent";
 
     impl UiState {
         pub fn load() -> Self {
-            Self::store()
-                .and_then(|store| store.get(UI_STATE).ok())
-                .unwrap_or_default()
+            let Some(store) = Self::store() else {
+                return Self::default();
+            };
+            Self {
+                unsent: store.get(UNSENT).unwrap_or_default(),
+                ..store.get(UI_STATE).unwrap_or_default()
+            }
         }
 
         fn save(&self) {
             if let Some(store) = Self::store() {
                 let _ = store.set(UI_STATE, self);
+            }
+        }
+
+        fn save_unsent(unsent: &std::collections::BTreeMap<&str, Vec<&Attachment>>) {
+            if let Some(store) = Self::store() {
+                let _ = store.set(UNSENT, unsent);
             }
         }
 
@@ -1438,6 +1469,43 @@ mod app {
                     (*id, format!("window {} · {}", n + 1, truncate(title, 40)))
                 })
                 .collect()
+        }
+
+        /// The files attached to unsent messages, by conversation, and what tells them apart
+        /// without reading every byte.
+        fn unsent(&self) -> (std::collections::BTreeMap<&str, Vec<&Attachment>>, u64) {
+            use std::hash::{DefaultHasher, Hasher};
+            let unsent: std::collections::BTreeMap<&str, Vec<&Attachment>> = self
+                .views
+                .iter()
+                .map(|(id, view)| (id, &view.attachments))
+                .chain(&self.unsent_files)
+                .filter(|(_, files)| !files.is_empty())
+                .map(|(id, files)| (id.as_str(), files.iter().map(|f| &f.attachment).collect()))
+                .collect();
+            let mut h = DefaultHasher::new();
+            for (id, files) in &unsent {
+                id.hash(&mut h);
+                for file in files {
+                    file.name.hash(&mut h);
+                    file.data.as_ptr().hash(&mut h);
+                    file.data.len().hash(&mut h);
+                }
+            }
+            (unsent, h.finish())
+        }
+
+        /// Saves the files attached to unsent messages once they change, so a restart brings
+        /// them back with the text.
+        fn keep_unsent(&mut self) {
+            if self.beside {
+                return;
+            }
+            let (unsent, key) = self.unsent();
+            if key != self.unsent_saved {
+                UiState::save_unsent(&unsent);
+                self.unsent_saved = key;
+            }
         }
 
         /// Gives each window the focused conversation's title, made unique: the compositor's
@@ -2087,6 +2155,7 @@ mod app {
                 window: main.size,
                 show_archived: self.show_archived,
                 drafts,
+                unsent: HashMap::new(),
                 spot: main.spot.clone(),
                 windows: {
                     let mut others: Vec<_> = self
@@ -2187,6 +2256,10 @@ mod app {
                 | ServerEvent::Working {
                     ref conversation_id,
                 }
+                | ServerEvent::Queued {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Waiting {
                     ref conversation_id,
                     ..
@@ -2263,9 +2336,15 @@ mod app {
                         view.partial = true;
                         self.views.insert(id.clone(), view);
                     }
-                    // A turn the app this one replaced was running: its history so far comes
+                    // What the app this one replaced was doing: a turn's history so far comes
                     // now, and again once it ends.
-                    if matches!(ev, ServerEvent::Working { .. }) && !self.views.contains_key(&id) {
+                    if matches!(
+                        ev,
+                        ServerEvent::Working { .. }
+                            | ServerEvent::Queued { .. }
+                            | ServerEvent::Waiting { .. }
+                    ) && !self.views.contains_key(&id)
+                    {
                         let mut view = self.revived(&id);
                         view.loading = true;
                         self.views.insert(id.clone(), view);
@@ -2457,6 +2536,42 @@ mod app {
                 )
                 .into()
             })
+        }
+
+        /// Marked while the sidebar it hides offers to update.
+        fn sidebar_toggle(&self, w: window::Id) -> Element<'_, Message> {
+            let open = self.window(w).sidebar_open;
+            let toggle = widget::nav_bar_toggle()
+                .active(open)
+                .on_toggle(Message::ToggleSidebar);
+            if open || !self.update_ready {
+                return toggle.into();
+            }
+            let dot = widget::container(widget::space::horizontal())
+                .class(cosmic::theme::Container::custom(|theme| container::Style {
+                    background: Some(Color::from(theme.cosmic().accent_color()).into()),
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }))
+                .width(Length::Fixed(8.0))
+                .height(Length::Fixed(8.0));
+            widget::tooltip(
+                cosmic::iced::widget::Stack::with_children(vec![
+                    toggle.into(),
+                    // On the corner of the toggle's icon, which sits 16 by 8 inside it.
+                    widget::container(dot)
+                        .align_right(Length::Fill)
+                        .align_top(Length::Fill)
+                        .padding(cosmic::iced::Padding::ZERO.top(4).right(12))
+                        .into(),
+                ]),
+                widget::text("A new build of claudo is installed: Update is in the sidebar"),
+                widget::tooltip::Position::Bottom,
+            )
+            .into()
         }
 
         /// "New chat", with Shift for a new tile, Alt for a new window and a menu for the rest.
@@ -3357,7 +3472,7 @@ mod app {
                 }
             }
             match (view.waiting_for, view.activity()) {
-                (Some(pid), _) => rows.push(waiting_row(id, pid, self.pulse, size)),
+                (Some(holder), _) => rows.push(waiting_row(id, holder, self.pulse, size)),
                 (None, Some(label)) => rows.push(activity_row(label, self.pulse, size)),
                 (None, None) => {}
             }
@@ -4192,21 +4307,30 @@ mod app {
     /// Another agent holds the conversation, so what was sent waits for it, unless stopped.
     fn waiting_row<'a>(
         id: &ConversationId,
-        pid: u32,
+        Holder { pid, idle }: Holder,
         pulse: f32,
         size: f32,
     ) -> Element<'a, Message> {
-        widget::Row::with_children(vec![
-            pulse_dots(pulse, size),
-            widget::text(format!(
+        let says = if idle {
+            format!(
+                "Another claudo has an idle agent open on this conversation (process {pid}). \
+                 Your message goes once that claudo closes it, within 30 minutes, or right \
+                 away if you stop it: it is doing nothing."
+            )
+        } else {
+            format!(
                 "Another agent is still working in this conversation (process {pid}), left \
                  running by a claudo that closed or run by another one. Your message goes \
                  once it ends."
-            ))
-            .size(size)
-            .class(dim())
-            .width(Length::Fill)
-            .into(),
+            )
+        };
+        widget::Row::with_children(vec![
+            pulse_dots(pulse, size),
+            widget::text(says)
+                .size(size)
+                .class(dim())
+                .width(Length::Fill)
+                .into(),
             widget::button::destructive("Stop it")
                 .on_press(Message::StopStray(id.clone()))
                 .into(),
@@ -4498,7 +4622,13 @@ mod app {
                 picked: Vec::new(),
                 show_archived: ui.show_archived,
                 drafts: ui.drafts,
-                unsent_files: HashMap::new(),
+                unsent_files: ui
+                    .unsent
+                    .into_iter()
+                    .filter(|_| !beside)
+                    .map(|(id, files)| (id, files.into_iter().map(attach::Shown::new).collect()))
+                    .collect(),
+                unsent_saved: 0,
                 restore: vec![(main, ui.tiles.clone(), ui.focused)],
                 focus_composer: None,
                 quota: None,
@@ -4520,6 +4650,7 @@ mod app {
                 restoring: false,
             };
             let mut app = app;
+            app.unsent_saved = app.unsent().1;
             for saved in &ui.windows {
                 let w = app.open_window(WindowLayout::restored(saved));
                 app.restore.push((w, saved.tiles.clone(), saved.focused));
@@ -5255,6 +5386,7 @@ mod app {
             }
             self.follow_blur();
             self.retitle();
+            self.keep_unsent();
             let mut tasks = std::mem::take(&mut self.tasks);
             if let Some(id) = self.focus_composer.take() {
                 tasks.push(widget::text_input::focus(composer_id(&id)));
@@ -5284,10 +5416,8 @@ mod app {
         fn header_start(&self) -> Vec<Element<'_, Message>> {
             let main = self.main_window();
             let mut start = vec![
-                widget::nav_bar_toggle()
-                    .active(self.window(main).sidebar_open)
-                    .on_toggle(Message::In(main, Box::new(Message::ToggleSidebar)))
-                    .into(),
+                self.sidebar_toggle(main)
+                    .map(move |message| Message::In(main, Box::new(message))),
             ];
             start.extend(
                 self.window_color(main)
@@ -5317,7 +5447,6 @@ mod app {
             if !self.windows.contains_key(&id) {
                 return widget::space::horizontal().into();
             }
-            let layout = self.window(id);
             let mut header = widget::header_bar()
                 .focused(self.core.focus_chain().contains(&id))
                 .on_drag(Message::WindowDrag)
@@ -5325,11 +5454,7 @@ mod app {
                 .on_maximize(Message::WindowMaximize)
                 .on_minimize(Message::WindowMinimize)
                 .on_close(Message::CloseWindow)
-                .start(
-                    widget::nav_bar_toggle()
-                        .active(layout.sidebar_open)
-                        .on_toggle(Message::ToggleSidebar),
-                );
+                .start(self.sidebar_toggle(id));
             if let Some(color) = self.window_color(id) {
                 header = header.start(window_mark(Some(color), 10.0, 10.0));
             }

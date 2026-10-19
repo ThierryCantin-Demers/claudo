@@ -609,11 +609,22 @@ pub enum ServerEvent {
     Waiting {
         conversation_id: ConversationId,
         pid: u32,
+        /// It sits between turns with nothing running, so stopping it loses no work. Sent
+        /// again whenever that changes.
+        #[serde(default)]
+        idle: bool,
     },
     /// A turn was already running when this app took the conversation's agent over from
     /// the one it replaced; its events follow from where they were.
     Working {
         conversation_id: ConversationId,
+    },
+    /// A message the app this one replaced sent, which has not reached Claude yet. Its
+    /// `Delivered` comes once it does.
+    Queued {
+        conversation_id: ConversationId,
+        text: String,
+        attachments: Vec<Attachment>,
     },
     /// A turn Claude Code began by itself starts, for this reason.
     Notice {

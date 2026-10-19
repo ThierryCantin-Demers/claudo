@@ -2444,28 +2444,44 @@ fn a_message_waits_for_another_agent_and_what_follows_stays_queued() {
     };
     let event = |ev| Message::Events(vec![ev]);
     let alpha = || ALPHA.to_string();
+    let waiting = |idle| {
+        event(ServerEvent::Waiting {
+            conversation_id: alpha(),
+            pid: 655265,
+            idle,
+        })
+    };
     send(&mut app, "run the tests");
-    let _ = app.update(event(ServerEvent::Waiting {
-        conversation_id: alpha(),
-        pid: 655265,
-    }));
-    assert_eq!(app.views[ALPHA].waiting_for, Some(655265));
+    let _ = app.update(waiting(false));
+    assert_eq!(
+        app.views[ALPHA].waiting_for,
+        Some(Holder {
+            pid: 655265,
+            idle: false
+        })
+    );
     send(&mut app, "and the benches");
     assert_eq!(app.views[ALPHA].queued.len(), 1);
 
     let mut h = Harness::new(app);
-    let found = h.frame(|ui, renderer| {
-        use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
-        let mut texts = ShownTexts::default();
-        ui.operate(renderer, &mut black_box(&mut texts));
-        match Operation::<Vec<String>>::finish(&texts) {
-            Outcome::Some(texts) => texts,
-            _ => Vec::new(),
-        }
-    });
+    let says = |h: &mut Harness, what: &str| shown_texts(h).iter().any(|text| text.contains(what));
+    assert!(says(&mut h, "process 655265"), "says what it waits for");
+    assert!(says(&mut h, "still working"));
+    let _ = h.app.update(waiting(true));
     assert!(
-        found.iter().any(|text| text.contains("process 655265")),
-        "says what it waits for"
+        says(&mut h, "idle agent"),
+        "says when stopping it loses nothing"
+    );
+
+    let stop = h.where_is("Stop it").expect("a button to stop it");
+    h.move_to(stop.x, stop.y);
+    let clicked = h.messages(vec![button(true), button(false)]);
+    assert!(
+        clicked.iter().any(|message| matches!(
+            message,
+            Message::In(_, inner) if matches!(&**inner, Message::StopStray(id) if id == ALPHA)
+        )),
+        "{clicked:?}"
     );
 
     let _ = h.app.update(event(ServerEvent::Delivered {
@@ -2484,6 +2500,69 @@ fn a_message_waits_for_another_agent_and_what_follows_stays_queued() {
     assert!(h.app.views[ALPHA].queued.is_empty());
 }
 
+fn shown_texts(h: &mut Harness) -> Vec<String> {
+    h.frame(|ui, renderer| {
+        use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
+        let mut texts = ShownTexts::default();
+        ui.operate(renderer, &mut black_box(&mut texts));
+        match Operation::<Vec<String>>::finish(&texts) {
+            Outcome::Some(texts) => texts,
+            _ => Vec::new(),
+        }
+    })
+}
+
+impl Harness {
+    /// Where the first text that is `text` shows in the window, by its center.
+    fn where_is(&mut self, text: &str) -> Option<Point> {
+        use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
+        struct Find<'a> {
+            text: &'a str,
+            translation: cosmic::iced::Vector,
+            found: Option<Point>,
+        }
+        impl Operation<Option<Point>> for Find<'_> {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Option<Point>>)) {
+                operate(self);
+            }
+            fn scrollable(
+                &mut self,
+                _id: Option<&widget::Id>,
+                bounds: cosmic::iced::Rectangle,
+                content_bounds: cosmic::iced::Rectangle,
+                translation: cosmic::iced::Vector,
+                _state: &mut dyn cosmic::iced::advanced::widget::operation::Scrollable,
+            ) {
+                if content_bounds.height > bounds.height {
+                    self.translation = translation;
+                }
+            }
+            fn text(
+                &mut self,
+                _id: Option<&widget::Id>,
+                bounds: cosmic::iced::Rectangle,
+                text: &str,
+            ) {
+                if text == self.text && self.found.is_none() {
+                    self.found = Some(bounds.center() - self.translation);
+                }
+            }
+            fn finish(&self) -> Outcome<Option<Point>> {
+                Outcome::Some(self.found)
+            }
+        }
+        self.frame(|ui, renderer| {
+            let mut find = Find {
+                text,
+                translation: cosmic::iced::Vector::ZERO,
+                found: None,
+            };
+            ui.operate(renderer, &mut black_box(&mut find));
+            find.found
+        })
+    }
+}
+
 /// Every text the view shows, in order.
 #[derive(Default)]
 struct ShownTexts(Vec<String>);
@@ -2500,4 +2579,139 @@ impl Operation<Vec<String>> for ShownTexts {
     fn finish(&self) -> cosmic::iced::advanced::widget::operation::Outcome<Vec<String>> {
         cosmic::iced::advanced::widget::operation::Outcome::Some(self.0.clone())
     }
+}
+
+#[test]
+fn messages_not_yet_taken_at_an_update_stay_queued_in_the_new_build() {
+    let (charlie, delta) = (
+        "ccccc333-0000-4000-8000-000000000000",
+        "ddddd444-0000-4000-8000-000000000000",
+    );
+    let mut app = two_tiles();
+    for (id, title) in [(charlie, "Charlie"), (delta, "Delta")] {
+        app.conversations.push(ConversationInfo {
+            id: id.to_string(),
+            title: title.to_string(),
+            cwd: "/tmp".to_string(),
+            attached: false,
+            archived: false,
+            overrides: Overrides::default(),
+            context: Default::default(),
+        });
+    }
+    let image = claudo_protocol::Attachment::new("pasted.png".to_string(), "image/png", &[1, 2, 3]);
+    let _ = app.update(Message::Events(vec![
+        ServerEvent::Working {
+            conversation_id: charlie.to_string(),
+        },
+        ServerEvent::Queued {
+            conversation_id: charlie.to_string(),
+            text: "and the benches".to_string(),
+            attachments: vec![image],
+        },
+        ServerEvent::History {
+            conversation_id: charlie.to_string(),
+            items: vec![Item::User("run the tests".to_string())],
+        },
+    ]));
+    assert_eq!(
+        app.views[charlie].queued.len(),
+        1,
+        "the history does not drop it"
+    );
+    let _ = app.update(Message::Events(vec![ServerEvent::Delivered {
+        conversation_id: charlie.to_string(),
+    }]));
+    let view = &app.views[charlie];
+    assert!(view.queued.is_empty());
+    assert!(matches!(
+        &view.items[..],
+        [Entry::User(first), Entry::User(second), Entry::File(_)]
+            if first == "run the tests" && second == "and the benches"
+    ));
+
+    let _ = app.update(Message::Events(vec![
+        ServerEvent::Queued {
+            conversation_id: delta.to_string(),
+            text: "check the logs".to_string(),
+            attachments: Vec::new(),
+        },
+        ServerEvent::Waiting {
+            conversation_id: delta.to_string(),
+            pid: 655265,
+            idle: true,
+        },
+    ]));
+    let view = &app.views[delta];
+    assert!(
+        view.loading && view.queued.len() == 1 && view.waiting_for.is_some(),
+        "a message that waited for another agent still waits"
+    );
+}
+
+#[test]
+fn a_closed_sidebar_shows_an_update_is_ready_and_still_opens() {
+    let mut app = two_tiles();
+    app.layout_mut().sidebar_open = false;
+    app.update_ready = true;
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let header =
+        Element::from(widget::Row::with_children(app.header_start())).map(
+            |message| match message {
+                Message::In(_, inner) => *inner,
+                other => other,
+            },
+        );
+    let mut ui = UserInterface::build(header, WINDOW, Cache::default(), &mut renderer);
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &[button(true), button(false)],
+        mouse::Cursor::Available(Point::new(12.0, 12.0)),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut messages,
+    );
+    assert!(
+        matches!(messages[..], [Message::ToggleSidebar]),
+        "the dot leaves the toggle clickable: {messages:?}"
+    );
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn update_dot_snapshot() {
+    let mut app = two_tiles();
+    app.layout_mut().sidebar_open = false;
+    app.update_ready = true;
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let header = widget::container(widget::Row::with_children(app.header_start()))
+        .padding(8)
+        .into();
+    render_alone(&mut renderer, header, "update-dot");
+}
+
+#[test]
+fn files_attached_to_an_unsent_message_are_saved_and_come_back() {
+    let mut app = two_tiles();
+    let saved = app.unsent_saved;
+    let image = claudo_protocol::Attachment::new("pasted.png".to_string(), "image/png", &[1, 2, 3]);
+    let _ = app.update(Message::Attach(ALPHA.to_string(), Ok(vec![image.clone()])));
+    assert_ne!(app.unsent_saved, saved, "saved once attached");
+    assert_eq!(app.unsent().0[ALPHA], [&image]);
+
+    let (mut relaunched, _) = ClaudoApp::init(
+        Core::default(),
+        Flags {
+            ui: UiState {
+                unsent: HashMap::from([(ALPHA.to_string(), vec![image])]),
+                ..UiState::default()
+            },
+            beside: false,
+        },
+    );
+    assert_eq!(
+        relaunched.revived(ALPHA).attachments.len(),
+        1,
+        "back with its conversation"
+    );
 }

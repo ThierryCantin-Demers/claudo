@@ -14,11 +14,12 @@ use claudo_protocol::{
     Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, ServerEvent, TaskStatus,
     ToolCall, TurnTime,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{EngineEvent, Resume, SessionConfig, UserMessage};
-use crate::handover::{Handed, Handover, Progress};
-use crate::live::{IDLE_TIMEOUT, LiveSessions, SendError};
+use crate::handover::{Handed, Handover, Progress, Waited};
+use crate::live::{AgentLock, IDLE_TIMEOUT, LiveSessions, SendError};
 use crate::sessions::{Store, load_transcript};
 
 pub struct Backend {
@@ -36,7 +37,8 @@ type Running = Arc<Mutex<HashMap<String, Progress>>>;
 type Waiting = Arc<Mutex<HashMap<String, VecDeque<Outgoing>>>>;
 
 /// A message on its way to a conversation's agent.
-struct Outgoing {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Outgoing {
     text: String,
     profile: claudo_protocol::Profile,
     model: String,
@@ -130,12 +132,35 @@ impl Backend {
                     ),
                 );
             }
-            for turn in adopted.queued {
+            for (sent, turn) in adopted.queued {
+                self.emit(ServerEvent::Queued {
+                    conversation_id: conversation.clone(),
+                    text: sent.text,
+                    attachments: sent.attachments,
+                });
                 let latest = agents.session_id(&conversation);
                 agents.forward(turn, agents.fresh(conversation.clone(), latest));
             }
         }
         crate::handover::reap(handover.reap);
+        for Waited {
+            conversation,
+            messages,
+        } in handover.waiting
+        {
+            for message in &messages {
+                self.emit(ServerEvent::Queued {
+                    conversation_id: conversation.clone(),
+                    text: message.text.clone(),
+                    attachments: message.attachments.clone(),
+                });
+            }
+            self.waiting
+                .lock()
+                .unwrap()
+                .insert(conversation.clone(), messages.into());
+            self.agents().wait(conversation);
+        }
     }
 
     /// Replace this app with the build installed where it was started from, handing it
@@ -148,9 +173,21 @@ impl Backend {
             });
         };
         let progress = self.progress.lock().unwrap().clone();
-        let error = self
-            .live
-            .exec(&exe, |id| progress.get(id).copied().unwrap_or_default());
+        // Held until the exec, so no message leaves the queue for an agent meanwhile.
+        let waiting = self.waiting.lock().unwrap();
+        let waited = waiting
+            .iter()
+            .map(|(conversation, messages)| Waited {
+                conversation: conversation.clone(),
+                messages: messages.iter().cloned().collect(),
+            })
+            .collect();
+        let error = self.live.exec(
+            &exe,
+            |id| progress.get(id).copied().unwrap_or_default(),
+            waited,
+        );
+        drop(waiting);
         self.emit(ServerEvent::Error {
             conversation_id: None,
             detail: format!("Could not restart claudo: {error}"),
@@ -475,53 +512,49 @@ impl Agents {
             waiting.push_back(message);
             return;
         }
-        if let Err((message, pid)) = self.deliver(&conversation_id, message) {
+        if let Err(message) = self.deliver(&conversation_id, message) {
             self.waiting
                 .lock()
                 .unwrap()
                 .insert(conversation_id.clone(), VecDeque::from([message]));
-            self.wait(conversation_id, pid);
+            self.wait(conversation_id);
         }
     }
 
     /// Waits for the process holding the conversation to end, then sends what waited, in
     /// order, including what arrives meanwhile.
-    fn wait(&self, conversation_id: String, pid: u32) {
-        self.emit(ServerEvent::Waiting {
-            conversation_id: conversation_id.clone(),
-            pid,
-        });
+    fn wait(&self, conversation_id: String) {
         let agents = self.clone();
         std::thread::spawn(move || {
-            crate::live::AgentLock::wait(&conversation_id);
-            loop {
-                let next = {
-                    let mut waiting = agents.waiting.lock().unwrap();
-                    match waiting
-                        .get_mut(&conversation_id)
-                        .and_then(VecDeque::pop_front)
-                    {
-                        Some(message) => message,
-                        None => {
-                            waiting.remove(&conversation_id);
-                            return;
-                        }
-                    }
-                };
-                if let Err((message, pid)) = agents.deliver(&conversation_id, next) {
-                    if let Some(waiting) = agents.waiting.lock().unwrap().get_mut(&conversation_id)
-                    {
-                        waiting.push_front(message);
-                    }
-                    return agents.wait(conversation_id, pid);
+            AgentLock::wait(&conversation_id, |pid, idle| {
+                agents.emit(ServerEvent::Waiting {
+                    conversation_id: conversation_id.clone(),
+                    pid,
+                    idle,
+                });
+            });
+            // Held while each message goes, so a restart finds it either sent or still here.
+            let mut waiting = agents.waiting.lock().unwrap();
+            while let Some(message) = waiting
+                .get_mut(&conversation_id)
+                .and_then(VecDeque::pop_front)
+            {
+                if let Err(message) = agents.deliver(&conversation_id, message) {
+                    waiting
+                        .entry(conversation_id.clone())
+                        .or_default()
+                        .push_front(message);
+                    drop(waiting);
+                    return agents.wait(conversation_id);
                 }
             }
+            waiting.remove(&conversation_id);
         });
     }
 
     /// Hands a message to the conversation's agent, starting one if needed. Gives it back
-    /// with the holder's pid when a process this app does not run holds the conversation.
-    fn deliver(&self, conversation_id: &str, message: Outgoing) -> Result<(), (Outgoing, u32)> {
+    /// when a process this app does not run holds the conversation.
+    fn deliver(&self, conversation_id: &str, message: Outgoing) -> Result<(), Outgoing> {
         let Outgoing {
             text,
             profile,
@@ -571,7 +604,7 @@ impl Agents {
             UserMessage { text, attachments },
         ) {
             Ok(turn) => turn,
-            Err(SendError::Occupied(pid)) => return Err((message, pid)),
+            Err(SendError::Occupied) => return Err(message),
             Err(SendError::Failed(detail)) => {
                 self.emit(ServerEvent::Error {
                     conversation_id: Some(conversation_id.to_string()),
