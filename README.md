@@ -87,7 +87,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 | Delete a conversation | Right-click it in the sidebar → Delete…, then confirm |
 | Delete or archive several at once | Ctrl+click them in the sidebar (or right-click → Select), Shift+click to pick a run of them, then Delete… or Archive at the top of the sidebar; Escape lets go |
 | Reuse an earlier message | Up in an empty message box, again for older ones; Down goes back toward an empty box, Escape empties it. An accent border and a label mark a message already sent, and editing it makes it a new draft |
-| Scroll a conversation | PageUp/PageDown by a page; Home/End to the top or bottom, or Ctrl+Home/End while the message box holds text; a middle click scrolls toward the pointer, faster the farther it goes, until the next click or until you let go after moving |
+| Scroll a conversation | Scrolled well up, a round button at the bottom takes you back down; PageUp/PageDown by a page; Home/End to the top or bottom, or Ctrl+Home/End while the message box holds text; a middle click scrolls toward the pointer, faster the farther it goes, until the next click or until you let go after moving |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
 shows pulsing dots beside each agent still working, and an Approve badge beside one waiting

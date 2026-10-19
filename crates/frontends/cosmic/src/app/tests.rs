@@ -2297,6 +2297,16 @@ fn a_middle_click_scrolls_toward_the_pointer_until_the_next_click() {
 
 #[test]
 #[ignore = "writes images; run with --ignored"]
+fn back_to_bottom_snapshot() {
+    let mut h = Harness::new(two_tiles());
+    h.move_to(560.0, 400.0);
+    h.send(vec![wheel(30.0)]);
+    h.move_to(549.0, 766.0);
+    h.snapshot("back-to-bottom");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
 fn autoscroll_snapshot() {
     let mut h = Harness::new(two_tiles());
     h.move_to(560.0, 400.0);
@@ -2305,4 +2315,40 @@ fn autoscroll_snapshot() {
     ))]);
     h.move_to(560.0, 520.0);
     h.snapshot("autoscroll");
+}
+
+#[test]
+fn a_button_back_to_the_bottom_shows_once_scrolled_well_up() {
+    use cosmic::iced::advanced::widget::operation::black_box;
+    let button_at = (548.0, 774.0);
+    let mut h = Harness::new(two_tiles());
+    let bottom = h.offsets()[0];
+    let jumps = |h: &mut Harness| -> Vec<scroll::Jump> {
+        h.move_to(button_at.0, button_at.1);
+        h.messages(vec![button(true), button(false)])
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::In(_, message) => match *message {
+                    Message::Jump(id, jump) if id == ALPHA => Some(jump),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(jumps(&mut h).is_empty(), "none at the bottom");
+
+    h.move_to(560.0, 400.0);
+    h.send(vec![wheel(2.0)]);
+    assert!(jumps(&mut h).is_empty(), "nor a little way up");
+
+    h.move_to(560.0, 400.0);
+    h.send(vec![wheel(30.0)]);
+    assert_eq!(jumps(&mut h), [scroll::Jump::Bottom]);
+
+    let mut op = scroll::jump_in(ALPHA, scroll::Jump::Bottom);
+    h.frame(|ui, renderer| ui.operate(renderer, &mut black_box(&mut op)));
+    assert_eq!(h.offsets()[0], bottom);
+    h.send(vec![]);
+    assert!(jumps(&mut h).is_empty(), "gone once back down");
 }

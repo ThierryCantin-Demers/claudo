@@ -3187,10 +3187,37 @@ mod app {
                 .spacing(18.0 * self.zoom)
                 .padding([24, 16])
                 .max_width(COLUMN_WIDTH * self.zoom);
-            scroll::Autoscroll::new(
+            let back = widget::tooltip(
+                widget::container(
+                    widget::button::icon(widget::icon::from_name("go-down-symbolic"))
+                        .class(cosmic::theme::Button::Standard)
+                        .padding(8)
+                        .on_press(Message::Jump(id.clone(), scroll::Jump::Bottom)),
+                )
+                .class(cosmic::theme::Container::custom(|theme| {
+                    let cosmic = theme.cosmic();
+                    container::Style {
+                        border: Border {
+                            radius: cosmic.corner_radii.radius_xl.into(),
+                            width: 1.0,
+                            color: cosmic.bg_divider().into(),
+                        },
+                        shadow: cosmic::iced::Shadow {
+                            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                            offset: cosmic::iced::Vector::new(0.0, 2.0),
+                            blur_radius: 8.0,
+                        },
+                        ..container::Style::default()
+                    }
+                })),
+                widget::text("Back to the bottom (Ctrl+End)"),
+                widget::tooltip::Position::Top,
+            );
+            scroll::Scroller::new(
                 widget::scrollable(widget::container(column).center_x(Length::Fill))
                     .anchor_bottom()
                     .height(Length::Fill),
+                back,
             )
             .into()
         }

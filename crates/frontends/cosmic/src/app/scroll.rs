@@ -1,5 +1,5 @@
-//! Moving through a transcript without the wheel: a page at a time, to either end, or
-//! carried along by the middle button.
+//! Moving through a transcript without the wheel: a page at a time, to either end, back
+//! to the bottom from a button, or carried along by the middle button.
 
 use std::time::Instant;
 
@@ -55,6 +55,9 @@ struct JumpIn {
 
 impl Operation for JumpIn {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        if self.done {
+            return;
+        }
         let outer = self.tile.enter();
         operate(self);
         self.tile.inside = outer;
@@ -106,8 +109,11 @@ struct ScrollOnce {
 }
 
 impl Operation for ScrollOnce {
+    // The transcript is the first scrollable reached; what it holds need not be visited.
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
-        operate(self);
+        if !self.done {
+            operate(self);
+        }
     }
 
     fn scrollable(
@@ -125,17 +131,46 @@ impl Operation for ScrollOnce {
     }
 }
 
-/// Holds a transcript. A middle click starts it scrolling toward the pointer, faster the
-/// farther the pointer moves from where it was clicked; another click stops it, and so does
-/// letting go of the button after moving with it held.
-pub struct Autoscroll<'a> {
-    content: Element<'a, Message>,
+/// Whether the scrollable it holds is far enough from its bottom to offer the way back.
+#[derive(Default)]
+struct FarUp(Option<bool>);
+
+impl Operation for FarUp {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        if self.0.is_none() {
+            operate(self);
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&widget::Id>,
+        bounds: Rectangle,
+        content: Rectangle,
+        translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        let from_bottom = content.height - bounds.height - translation.y;
+        self.0.get_or_insert(from_bottom > bounds.height / 2.0);
+    }
 }
 
-impl<'a> Autoscroll<'a> {
-    pub fn new(content: impl Into<Element<'a, Message>>) -> Self {
+/// Holds a transcript, and over it a button back to the bottom once it is scrolled well up.
+/// A middle click starts it scrolling toward the pointer, faster the farther the pointer
+/// moves from where it was clicked; another click stops it, and so does letting go of the
+/// button after moving with it held.
+pub struct Scroller<'a> {
+    /// The transcript, then the button.
+    children: [Element<'a, Message>; 2],
+}
+
+impl<'a> Scroller<'a> {
+    pub fn new(
+        transcript: impl Into<Element<'a, Message>>,
+        back: impl Into<Element<'a, Message>>,
+    ) -> Self {
         Self {
-            content: content.into(),
+            children: [transcript.into(), back.into()],
         }
     }
 }
@@ -149,6 +184,8 @@ struct State {
     /// The pointer left the dead zone with the button held, so letting go stops.
     dragged: bool,
     last_frame: Option<Instant>,
+    /// The button back to the bottom shows.
+    far_up: bool,
 }
 
 /// Pixels a second for a pointer `dy` below the anchor, toward the top when negative.
@@ -157,7 +194,10 @@ fn speed(dy: f32) -> f32 {
     (6.0 * d + 0.04 * d * d).copysign(dy)
 }
 
-impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
+/// Room between the button and the transcript's bottom edge.
+const BUTTON_MARGIN: f32 = 16.0;
+
+impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Scroller<'_> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -167,15 +207,15 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
     }
 
     fn children(&self) -> Vec<Tree> {
-        vec![Tree::new(&self.content)]
+        self.children.iter().map(Tree::new).collect()
     }
 
     fn diff(&mut self, tree: &mut Tree) {
-        tree.diff_children(std::slice::from_mut(&mut self.content));
+        tree.diff_children(&mut self.children);
     }
 
     fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
+        self.children[0].as_widget().size()
     }
 
     fn layout(
@@ -184,9 +224,21 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
         renderer: &cosmic::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.content
+        let [transcript, back] = &mut self.children;
+        let transcript = transcript
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+        let size = transcript.size();
+        let back = back.as_widget_mut().layout(
+            &mut tree.children[1],
+            renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let at = Point::new(
+            (size.width - back.size().width) / 2.0,
+            size.height - back.size().height - BUTTON_MARGIN,
+        );
+        layout::Node::with_children(size, vec![transcript, back.move_to(at)])
     }
 
     fn operate(
@@ -196,9 +248,12 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
         renderer: &cosmic::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        self.children[0].as_widget_mut().operate(
+            &mut tree.children[0],
+            layout.child(0),
+            renderer,
+            operation,
+        );
     }
 
     fn update(
@@ -212,6 +267,8 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        let [transcript, back] = &mut self.children;
+        let (transcript_layout, back_layout) = (layout.child(0), layout.child(1));
         let state = tree.state.downcast_mut::<State>();
         let stop = |state: &mut State, shell: &mut Shell<'_, Message>| {
             state.anchor = None;
@@ -224,6 +281,7 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
                         anchor: Some(at),
                         pointer: at,
                         held: true,
+                        far_up: state.far_up,
                         ..State::default()
                     };
                     shell.capture_event();
@@ -274,9 +332,9 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
                     y: -speed(state.pointer.y - anchor.y) * seconds,
                     done: false,
                 };
-                self.content.as_widget_mut().operate(
+                transcript.as_widget_mut().operate(
                     &mut tree.children[0],
-                    layout,
+                    transcript_layout,
                     renderer,
                     &mut once,
                 );
@@ -284,16 +342,43 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
             }
             _ => {}
         }
-        self.content.as_widget_mut().update(
+        if state.far_up {
+            back.as_widget_mut().update(
+                &mut tree.children[1],
+                event,
+                back_layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
+        if !shell.is_event_captured() {
+            transcript.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                transcript_layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
+        let mut far_up = FarUp::default();
+        transcript.as_widget_mut().operate(
             &mut tree.children[0],
-            event,
-            layout,
-            cursor,
+            transcript_layout,
             renderer,
-            clipboard,
-            shell,
-            viewport,
+            &mut far_up,
         );
+        let state = tree.state.downcast_mut::<State>();
+        let far_up = far_up.0.unwrap_or(false);
+        if far_up != state.far_up {
+            state.far_up = far_up;
+            shell.request_redraw();
+        }
     }
 
     fn mouse_interaction(
@@ -304,12 +389,23 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
         viewport: &Rectangle,
         renderer: &cosmic::Renderer,
     ) -> mouse::Interaction {
-        if tree.state.downcast_ref::<State>().anchor.is_some() {
+        let state = tree.state.downcast_ref::<State>();
+        if state.anchor.is_some() {
             return mouse::Interaction::ResizingVertically;
         }
-        self.content.as_widget().mouse_interaction(
+        let [transcript, back] = &self.children;
+        if state.far_up && cursor.is_over(layout.child(1).bounds()) {
+            return back.as_widget().mouse_interaction(
+                &tree.children[1],
+                layout.child(1),
+                cursor,
+                viewport,
+                renderer,
+            );
+        }
+        transcript.as_widget().mouse_interaction(
             &tree.children[0],
-            layout,
+            layout.child(0),
             cursor,
             viewport,
             renderer,
@@ -327,16 +423,31 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
         viewport: &Rectangle,
     ) {
         use cosmic::iced::advanced::Renderer as _;
-        self.content.as_widget().draw(
+        let [transcript, back] = &self.children;
+        transcript.as_widget().draw(
             &tree.children[0],
             renderer,
             theme,
             style,
-            layout,
+            layout.child(0),
             cursor,
             viewport,
         );
-        let Some(anchor) = tree.state.downcast_ref::<State>().anchor else {
+        let state = tree.state.downcast_ref::<State>();
+        if state.far_up {
+            renderer.with_layer(layout.bounds(), |renderer| {
+                back.as_widget().draw(
+                    &tree.children[1],
+                    renderer,
+                    theme,
+                    style,
+                    layout.child(1),
+                    cursor,
+                    viewport,
+                );
+            });
+        }
+        let Some(anchor) = state.anchor else {
             return;
         };
         let cosmic = theme.cosmic();
@@ -382,19 +493,43 @@ impl Widget<Message, cosmic::Theme, cosmic::Renderer> for Autoscroll<'_> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, cosmic::Theme, cosmic::Renderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0],
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
+        let far_up = tree.state.downcast_ref::<State>().far_up;
+        let [transcript, back] = &mut self.children;
+        let [transcript_tree, back_tree] = &mut tree.children[..] else {
+            return None;
+        };
+        let mut overlays: Vec<_> = transcript
+            .as_widget_mut()
+            .overlay(
+                transcript_tree,
+                layout.child(0),
+                renderer,
+                viewport,
+                translation,
+            )
+            .into_iter()
+            .collect();
+        // A tooltip still open when the button went would float over nothing.
+        if far_up {
+            overlays.extend(back.as_widget_mut().overlay(
+                back_tree,
+                layout.child(1),
+                renderer,
+                viewport,
+                translation,
+            ));
+        }
+        match overlays.len() {
+            0 => None,
+            1 => overlays.pop(),
+            _ => Some(overlay::Group::with_children(overlays).overlay()),
+        }
     }
 }
 
-impl<'a> From<Autoscroll<'a>> for Element<'a, Message> {
-    fn from(autoscroll: Autoscroll<'a>) -> Self {
-        Element::new(autoscroll)
+impl<'a> From<Scroller<'a>> for Element<'a, Message> {
+    fn from(scroller: Scroller<'a>) -> Self {
+        Element::new(scroller)
     }
 }
 
