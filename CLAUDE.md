@@ -345,6 +345,14 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
   handles output only while holding `reading`, and reaps by pid with `waitpid`: without
   either, a handover loses a half-read line or leaves an adopted process unreaped.
   `examples/handover_probe` and `restart_probe` check it on the real CLI.
+- **One agent per conversation, whichever claudo runs it.** A process spawned for a
+  conversation inherits its lock (`$XDG_RUNTIME_DIR/claudo-agents/<conversation>.lock`, an
+  flock whose file holds the agent's pid) and keeps it as long as it runs, whatever becomes
+  of the app that started it; the CLI does not pass it on to the commands its tools run. A
+  message to a conversation whose lock another process holds, such as an agent a killed
+  claudo left running or another claudo's, waits for it to end (`ServerEvent::Waiting`),
+  and `Command::StopStray` ends it and what it started. Replacing an idle process for new
+  flags waits for it to exit first. `examples/stray_probe` checks it on the real CLI.
 - **Several claudo instances share `conversations.json`.** Each writes the whole list, so a
   save first takes in what another wrote: the conversations it added, and its version of
   each one this instance has not changed since it last read or wrote the file. Startup takes

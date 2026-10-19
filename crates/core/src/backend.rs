@@ -6,7 +6,7 @@
 //! usable from the worker threads forwarding each turn, while a consumer can either
 //! `try_recv` (native, no runtime) or `recv().await` (the daemon).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -18,18 +18,42 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{EngineEvent, Resume, SessionConfig, UserMessage};
 use crate::handover::{Handed, Handover, Progress};
-use crate::live::{IDLE_TIMEOUT, LiveSessions};
+use crate::live::{IDLE_TIMEOUT, LiveSessions, SendError};
 use crate::sessions::{Store, load_transcript};
 
 pub struct Backend {
     store: Arc<Mutex<Store>>,
-    live: LiveSessions,
+    live: Arc<LiveSessions>,
     events: UnboundedSender<ServerEvent>,
     /// Each conversation's running turn, for a handover to pass on.
     progress: Running,
+    /// Messages to conversations whose agent is a process this app does not run, oldest
+    /// first, until it ends.
+    waiting: Waiting,
 }
 
 type Running = Arc<Mutex<HashMap<String, Progress>>>;
+type Waiting = Arc<Mutex<HashMap<String, VecDeque<Outgoing>>>>;
+
+/// A message on its way to a conversation's agent.
+struct Outgoing {
+    text: String,
+    profile: claudo_protocol::Profile,
+    model: String,
+    effort: claudo_protocol::Effort,
+    attachments: Vec<claudo_protocol::Attachment>,
+}
+
+/// What sends messages to agents and passes their turns on, from the backend or from a
+/// thread waiting for a conversation to be free.
+#[derive(Clone)]
+struct Agents {
+    store: Arc<Mutex<Store>>,
+    live: Arc<LiveSessions>,
+    events: UnboundedSender<ServerEvent>,
+    progress: Running,
+    waiting: Waiting,
+}
 
 impl Backend {
     pub fn new(events: UnboundedSender<ServerEvent>) -> Self {
@@ -57,9 +81,10 @@ impl Backend {
         });
         let backend = Self {
             store,
-            live: LiveSessions::new(IDLE_TIMEOUT, Some(incoming)),
+            live: Arc::new(LiveSessions::new(IDLE_TIMEOUT, Some(incoming))),
             events,
             progress,
+            waiting: Arc::default(),
         };
         if crate::settings::load().remote_control {
             backend.live.set_remote_control(true, |_| String::new());
@@ -93,8 +118,9 @@ impl Backend {
                     scope,
                 });
             }
+            let agents = self.agents();
             if let Some(turn) = adopted.running {
-                self.forward(
+                agents.forward(
                     turn,
                     Forward::resumed(
                         self.events.clone(),
@@ -105,8 +131,8 @@ impl Backend {
                 );
             }
             for turn in adopted.queued {
-                let latest = self.session_id(&conversation);
-                self.forward(turn, self.fresh(conversation.clone(), latest));
+                let latest = agents.session_id(&conversation);
+                agents.forward(turn, agents.fresh(conversation.clone(), latest));
             }
         }
         crate::handover::reap(handover.reap);
@@ -131,28 +157,14 @@ impl Backend {
         });
     }
 
-    fn session_id(&self, conversation_id: &str) -> Option<String> {
-        let store = self.store.lock().unwrap();
-        store.get(conversation_id)?.session_id.clone()
-    }
-
-    fn fresh(&self, conversation_id: String, latest: Option<String>) -> Forward {
-        Forward::new(
-            self.events.clone(),
-            self.store.clone(),
-            conversation_id,
-            latest,
-            self.progress.clone(),
-        )
-    }
-
-    /// Passes a turn's events on from a thread of its own.
-    fn forward(&self, turn: std::sync::mpsc::Receiver<EngineEvent>, mut forward: Forward) {
-        std::thread::spawn(move || {
-            for ev in turn {
-                forward.event(ev);
-            }
-        });
+    fn agents(&self) -> Agents {
+        Agents {
+            store: self.store.clone(),
+            live: self.live.clone(),
+            events: self.events.clone(),
+            progress: self.progress.clone(),
+            waiting: self.waiting.clone(),
+        }
     }
 
     fn emit(&self, event: ServerEvent) {
@@ -317,7 +329,16 @@ impl Backend {
                 model,
                 effort,
                 attachments,
-            } => self.send(conversation_id, text, profile, model, effort, attachments),
+            } => self.agents().send(
+                conversation_id,
+                Outgoing {
+                    text,
+                    profile,
+                    model,
+                    effort,
+                    attachments,
+                },
+            ),
 
             Command::Stop { conversation_id } => {
                 if let Err(detail) = self.live.interrupt(&conversation_id) {
@@ -326,6 +347,12 @@ impl Backend {
             }
 
             Command::Restart => self.restart(),
+
+            Command::StopStray { conversation_id } => {
+                if let Err(e) = crate::live::stop_stray(&conversation_id) {
+                    self.error(conversation_id, format!("Could not stop that agent: {e}"));
+                }
+            }
 
             Command::AnswerApproval {
                 conversation_id,
@@ -411,26 +438,110 @@ impl Backend {
         // Title may have been upgraded from the transcript's ai-title.
         self.emit(conversations_event(&self.store));
     }
+}
 
-    fn send(
-        &self,
-        conversation_id: String,
-        text: String,
-        profile: claudo_protocol::Profile,
-        model: String,
-        effort: claudo_protocol::Effort,
-        attachments: Vec<claudo_protocol::Attachment>,
-    ) {
+impl Agents {
+    fn emit(&self, event: ServerEvent) {
+        let _ = self.events.send(event);
+    }
+
+    fn session_id(&self, conversation_id: &str) -> Option<String> {
+        let store = self.store.lock().unwrap();
+        store.get(conversation_id)?.session_id.clone()
+    }
+
+    fn fresh(&self, conversation_id: String, latest: Option<String>) -> Forward {
+        Forward::new(
+            self.events.clone(),
+            self.store.clone(),
+            conversation_id,
+            latest,
+            self.progress.clone(),
+        )
+    }
+
+    /// Passes a turn's events on from a thread of its own.
+    fn forward(&self, turn: std::sync::mpsc::Receiver<EngineEvent>, mut forward: Forward) {
+        std::thread::spawn(move || {
+            for ev in turn {
+                forward.event(ev);
+            }
+        });
+    }
+
+    /// Sends a message, after any still waiting for the conversation to be free.
+    fn send(&self, conversation_id: String, message: Outgoing) {
+        if let Some(waiting) = self.waiting.lock().unwrap().get_mut(&conversation_id) {
+            waiting.push_back(message);
+            return;
+        }
+        if let Err((message, pid)) = self.deliver(&conversation_id, message) {
+            self.waiting
+                .lock()
+                .unwrap()
+                .insert(conversation_id.clone(), VecDeque::from([message]));
+            self.wait(conversation_id, pid);
+        }
+    }
+
+    /// Waits for the process holding the conversation to end, then sends what waited, in
+    /// order, including what arrives meanwhile.
+    fn wait(&self, conversation_id: String, pid: u32) {
+        self.emit(ServerEvent::Waiting {
+            conversation_id: conversation_id.clone(),
+            pid,
+        });
+        let agents = self.clone();
+        std::thread::spawn(move || {
+            crate::live::AgentLock::wait(&conversation_id);
+            loop {
+                let next = {
+                    let mut waiting = agents.waiting.lock().unwrap();
+                    match waiting
+                        .get_mut(&conversation_id)
+                        .and_then(VecDeque::pop_front)
+                    {
+                        Some(message) => message,
+                        None => {
+                            waiting.remove(&conversation_id);
+                            return;
+                        }
+                    }
+                };
+                if let Err((message, pid)) = agents.deliver(&conversation_id, next) {
+                    if let Some(waiting) = agents.waiting.lock().unwrap().get_mut(&conversation_id)
+                    {
+                        waiting.push_front(message);
+                    }
+                    return agents.wait(conversation_id, pid);
+                }
+            }
+        });
+    }
+
+    /// Hands a message to the conversation's agent, starting one if needed. Gives it back
+    /// with the holder's pid when a process this app does not run holds the conversation.
+    fn deliver(&self, conversation_id: &str, message: Outgoing) -> Result<(), (Outgoing, u32)> {
+        let Outgoing {
+            text,
+            profile,
+            model,
+            effort,
+            attachments,
+        } = &message;
         let (cwd, session_id, borrowed, name, always) = {
             let mut store = self.store.lock().unwrap();
             // A message to an archived conversation means it is in use again.
-            store.set_archived(&conversation_id, false);
-            let Some(name) = store.title_for(&conversation_id, &text) else {
+            store.set_archived(conversation_id, false);
+            let Some(name) = store.title_for(conversation_id, text) else {
                 drop(store);
-                self.error(conversation_id, "unknown conversation".to_string());
-                return;
+                self.emit(ServerEvent::Error {
+                    conversation_id: Some(conversation_id.to_string()),
+                    detail: "unknown conversation".to_string(),
+                });
+                return Ok(());
             };
-            let meta = store.get(&conversation_id).expect("titled above");
+            let meta = store.get(conversation_id).expect("titled above");
             (
                 meta.cwd.clone(),
                 meta.session_id.clone(),
@@ -443,8 +554,8 @@ impl Backend {
 
         let config = SessionConfig {
             cwd,
-            profile,
-            model: (!model.trim().is_empty()).then_some(model),
+            profile: *profile,
+            model: (!model.trim().is_empty()).then(|| model.clone()),
             effort: effort.cli().map(str::to_owned),
         };
         let resume = session_id.as_deref().map(|session_id| Resume {
@@ -452,27 +563,29 @@ impl Backend {
             fork: borrowed,
         });
         let turn = match self.live.send_turn(
-            &conversation_id,
+            conversation_id,
             config,
             resume,
             &name,
             &always,
-            UserMessage {
-                text: &text,
-                attachments: &attachments,
-            },
+            UserMessage { text, attachments },
         ) {
             Ok(turn) => turn,
-            Err(detail) => {
-                self.error(conversation_id, detail);
-                return;
+            Err(SendError::Occupied(pid)) => return Err((message, pid)),
+            Err(SendError::Failed(detail)) => {
+                self.emit(ServerEvent::Error {
+                    conversation_id: Some(conversation_id.to_string()),
+                    detail,
+                });
+                return Ok(());
             }
         };
 
-        let mut forward = self.fresh(conversation_id, session_id);
+        let mut forward = self.fresh(conversation_id.to_string(), session_id);
         // A forked command's `init` comes only once it ends, so the turn starts when it is sent.
         forward.started = Some(crate::sessions::now_secs());
         self.forward(turn, forward);
+        Ok(())
     }
 }
 

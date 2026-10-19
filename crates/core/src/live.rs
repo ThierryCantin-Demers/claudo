@@ -3,8 +3,9 @@
 //! with `--resume`, so closing one loses nothing but startup time.
 
 use std::collections::HashMap;
-use std::io;
-use std::path::Path;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,104 @@ use crate::handover::{Handed, Progress};
 pub type IncomingSender = mpsc::Sender<(ConversationId, EngineEvent)>;
 
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug)]
+pub enum SendError {
+    /// A process this app does not run, with this pid, is the conversation's agent: one a
+    /// killed claudo left running, or another claudo's.
+    Occupied(u32),
+    Failed(String),
+}
+
+/// Held by a conversation's agent for as long as it runs, so no second one starts on it,
+/// whichever claudo would start it. The agent inherits the lock and keeps it when the app
+/// that started it dies; the file holds its pid.
+pub struct AgentLock(Option<File>);
+
+impl AgentLock {
+    fn path(conversation_id: &str) -> PathBuf {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("claudo-agents")
+            .join(format!("{conversation_id}.lock"))
+    }
+
+    fn open(conversation_id: &str) -> io::Result<File> {
+        let path = Self::path(conversation_id);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+    }
+
+    /// The lock, or the pid of the agent holding it. Where no lock can be had, there is
+    /// nothing to wait on either.
+    pub fn take(conversation_id: &str) -> Result<Self, u32> {
+        let Ok(file) = Self::open(conversation_id) else {
+            return Ok(Self(None));
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(Self(Some(file))),
+            Err(TryLockError::WouldBlock) => {
+                let mut pid = String::new();
+                let _ = (&file).read_to_string(&mut pid);
+                Err(pid.trim().parse().unwrap_or(0))
+            }
+            Err(TryLockError::Error(_)) => Ok(Self(None)),
+        }
+    }
+
+    /// Returns once whatever holds the conversation's lock has let go of it.
+    pub fn wait(conversation_id: &str) {
+        if let Ok(file) = Self::open(conversation_id) {
+            let _ = file.lock();
+        }
+    }
+}
+
+/// Stops the agent holding a conversation's lock and whatever it started, once its pid is
+/// surely still a `claude` process's: pids are reused.
+pub fn stop_stray(conversation_id: &str) -> io::Result<()> {
+    let Err(pid) = AgentLock::take(conversation_id) else {
+        return Ok(());
+    };
+    let command = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+    if pid == 0 || !String::from_utf8_lossy(&command).contains("claude") {
+        return Err(io::Error::other(format!(
+            "process {pid} is not a claude agent"
+        )));
+    }
+    for pid in descendants(pid).into_iter().chain([pid]) {
+        // SAFETY: sends a signal; a process gone meanwhile makes it fail harmlessly.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    Ok(())
+}
+
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut next = vec![pid];
+    while let Some(parent) = next.pop() {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{parent}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let children =
+                std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            for child in children.split_whitespace().filter_map(|c| c.parse().ok()) {
+                found.push(child);
+                next.push(child);
+            }
+        }
+    }
+    found
+}
 
 pub struct LiveSessions {
     sessions: Arc<Mutex<HashMap<ConversationId, Session>>>,
@@ -78,7 +177,7 @@ impl LiveSessions {
         name: &str,
         always: &[String],
         message: UserMessage,
-    ) -> Result<Receiver<EngineEvent>, String> {
+    ) -> Result<Receiver<EngineEvent>, SendError> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(conversation_id)
             && session.is_alive()
@@ -93,22 +192,31 @@ impl LiveSessions {
                 return Ok(turn);
             }
             if busy {
-                return Err("claude stopped taking messages while still working".to_string());
+                return Err(SendError::Failed(
+                    "claude stopped taking messages while still working".to_string(),
+                ));
             }
         }
+        // An idle process with other flags holds the conversation's lock until it has exited.
+        if let Some(replaced) = sessions.remove(conversation_id) {
+            drop(sessions);
+            replaced.shutdown(Duration::from_secs(10));
+            sessions = self.sessions.lock().unwrap();
+        }
 
+        let lock = AgentLock::take(conversation_id).map_err(SendError::Occupied)?;
         let incoming = self.incoming_for(conversation_id);
-        let mut session = Session::spawn(config, resume, name, incoming)
-            .map_err(|e| format!("failed to launch `{}`: {e}", claude_bin()))?;
+        let mut session = Session::spawn_holding(config, resume, name, incoming, lock.0)
+            .map_err(|e| SendError::Failed(format!("failed to launch `{}`: {e}", claude_bin())))?;
         for scope in always {
             session.allow_always(scope);
         }
         if self.remote_control.load(Ordering::Relaxed) {
             let _ = session.remote_control(true, name);
         }
-        let turn = session
-            .send(message)
-            .map_err(|e| format!("claude exited before the turn was sent: {e}"))?;
+        let turn = session.send(message).map_err(|e| {
+            SendError::Failed(format!("claude exited before the turn was sent: {e}"))
+        })?;
         sessions.insert(conversation_id.to_owned(), session);
         Ok(turn)
     }
@@ -199,5 +307,28 @@ impl LiveSessions {
             .get(conversation_id)
             .filter(|s| s.is_alive())
             .map(Session::pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn a_conversation_has_one_agent_until_it_lets_go() {
+        let conversation = format!("lock-test-{}", uuid::Uuid::new_v4());
+        let Ok(AgentLock(Some(mut held))) = AgentLock::take(&conversation) else {
+            panic!("a free conversation's lock");
+        };
+        write!(held, "4242").unwrap();
+        assert_eq!(
+            AgentLock::take(&conversation).err(),
+            Some(4242),
+            "the holder is named"
+        );
+        drop(held);
+        assert!(AgentLock::take(&conversation).is_ok(), "free once let go");
+        let _ = std::fs::remove_file(AgentLock::path(&conversation));
     }
 }

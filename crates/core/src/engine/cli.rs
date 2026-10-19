@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -472,7 +472,31 @@ impl Session {
         name: &str,
         incoming: Option<Incoming>,
     ) -> io::Result<Self> {
+        Self::spawn_holding(config, resume, name, incoming, None)
+    }
+
+    /// Like `spawn`, the process taking `lock` over: it holds the lock as long as it runs,
+    /// whatever becomes of this app, and the file says its pid.
+    pub fn spawn_holding(
+        config: SessionConfig,
+        resume: Option<Resume>,
+        name: &str,
+        incoming: Option<Incoming>,
+        lock: Option<File>,
+    ) -> io::Result<Self> {
         let mut cmd = Command::new(claude_bin());
+        if let Some(fd) = lock.as_ref().map(AsRawFd::as_raw_fd) {
+            // SAFETY: only clears a flag on a descriptor this process owns, in the child
+            // between fork and exec.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
         cmd.current_dir(&config.cwd)
             .env("CLAUDE_CODE_SESSION_NAME", name)
             // What a handover tells the process replacing this one is not the agent's.
@@ -510,6 +534,10 @@ impl Session {
         }
 
         let mut child = cmd.spawn()?;
+        if let Some(mut lock) = lock {
+            let _ = lock.set_len(0);
+            let _ = write!(lock, "{}", child.id());
+        }
         let pipe = |fd: Option<OwnedFd>| File::from(fd.expect("piped"));
         let files = [
             pipe(child.stdin.take().map(OwnedFd::from)),

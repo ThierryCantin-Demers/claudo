@@ -505,6 +505,10 @@ pub enum Command {
         request_id: String,
         decision: Decision,
     },
+    /// Stop the agent a `Waiting` named, and whatever it started.
+    StopStray {
+        conversation_id: ConversationId,
+    },
     /// Replace the running app with the binary now installed where it was started from,
     /// handing it every agent as it is. Answered only by an `Error` if that fails.
     Restart,
@@ -598,6 +602,13 @@ pub enum ServerEvent {
         call: ToolCall,
         /// What `Decision::AllowAlways` stops asking about, such as `gh issue create`.
         scope: String,
+    },
+    /// The conversation's agent is a process this app does not run, such as one a killed
+    /// claudo left working. Messages to it wait until that process ends, so two agents never
+    /// work on one conversation.
+    Waiting {
+        conversation_id: ConversationId,
+        pid: u32,
     },
     /// A turn was already running when this app took the conversation's agent over from
     /// the one it replaced; its events follow from where they were.

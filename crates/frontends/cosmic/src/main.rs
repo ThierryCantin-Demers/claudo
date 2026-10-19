@@ -198,6 +198,12 @@ mod app {
         partial: bool,
         /// How many prompts back the draft was recalled from; 0 when it is the user's own.
         recalled: usize,
+        /// The pid of an agent this app does not run that holds the conversation, which the
+        /// messages sent to it wait for.
+        waiting_for: Option<u32>,
+        /// The message put straight into the transcript has not been reported delivered,
+        /// so the next `Delivered` is its, not the first queued one's.
+        undelivered: bool,
         /// Items whose row in the Commands panel is expanded.
         commands_open: std::collections::HashSet<usize>,
         /// The Commands panel shows only this conversation's title.
@@ -238,6 +244,8 @@ mod app {
                 error: None,
                 partial: false,
                 recalled: 0,
+                waiting_for: None,
+                undelivered: false,
                 commands_open: Default::default(),
                 commands_collapsed: false,
                 finished_collapsed: false,
@@ -414,6 +422,8 @@ mod app {
         }
 
         fn fail(&mut self, detail: String) {
+            self.waiting_for = None;
+            self.undelivered = false;
             self.error = Some(detail);
             self.streaming = false;
             self.since = None;
@@ -468,6 +478,11 @@ mod app {
                     self.since.get_or_insert_with(std::time::Instant::now);
                     self.items.push(Entry::Notice(text));
                 }
+                ServerEvent::Waiting { pid, .. } => {
+                    self.waiting_for = Some(pid);
+                    self.streaming = true;
+                    self.since.get_or_insert_with(std::time::Instant::now);
+                }
                 ServerEvent::Working { .. } => {
                     self.streaming = true;
                     self.partial = true;
@@ -475,6 +490,7 @@ mod app {
                 }
                 ServerEvent::Delta { text, .. } => {
                     self.retrying = None;
+                    self.waiting_for = None;
                     self.push_assistant(&text);
                 }
                 ServerEvent::Review { review, .. } => {
@@ -557,6 +573,8 @@ mod app {
                 }
                 ServerEvent::Completed { is_error, time, .. } => {
                     self.streaming = false;
+                    self.waiting_for = None;
+                    self.undelivered = false;
                     self.compacting = false;
                     self.since = None;
                     self.retrying = None;
@@ -567,7 +585,12 @@ mod app {
                         self.error = Some("Claude reported an error.".to_string());
                     }
                 }
+                ServerEvent::Delivered { .. } if self.undelivered => {
+                    self.undelivered = false;
+                    self.waiting_for = None;
+                }
                 ServerEvent::Delivered { .. } if !self.queued.is_empty() => {
+                    self.waiting_for = None;
                     let (text, files) = self.queued.remove(0);
                     self.finish_reply();
                     self.error = None;
@@ -982,6 +1005,8 @@ mod app {
         },
         /// Escape while the message box shows a sent prompt: it empties.
         Unrecall(ConversationId),
+        /// Stop the agent this app does not run that a conversation's messages wait for.
+        StopStray(ConversationId),
         /// Move a conversation's transcript by a page or to an end.
         Jump(ConversationId, scroll::Jump),
         /// The same, for the window's focused tile.
@@ -2024,6 +2049,7 @@ mod app {
                 }
                 view.items.extend(files.into_iter().map(Entry::File));
                 view.streaming = true;
+                view.undelivered = true;
                 view.since = Some(std::time::Instant::now());
             }
             self.cmd(Command::SendMessage {
@@ -2160,6 +2186,10 @@ mod app {
                 }
                 | ServerEvent::Working {
                     ref conversation_id,
+                }
+                | ServerEvent::Waiting {
+                    ref conversation_id,
+                    ..
                 }
                 | ServerEvent::Compacting {
                     ref conversation_id,
@@ -3326,8 +3356,10 @@ mod app {
                     k += work;
                 }
             }
-            if let Some(label) = view.activity() {
-                rows.push(activity_row(label, self.pulse, size));
+            match (view.waiting_for, view.activity()) {
+                (Some(pid), _) => rows.push(waiting_row(id, pid, self.pulse, size)),
+                (None, Some(label)) => rows.push(activity_row(label, self.pulse, size)),
+                (None, None) => {}
             }
             if let Some(label) = view.in_background() {
                 rows.push(background_row(label, size));
@@ -4157,6 +4189,33 @@ mod app {
         widget::Row::with_children(dots).spacing(4).into()
     }
 
+    /// Another agent holds the conversation, so what was sent waits for it, unless stopped.
+    fn waiting_row<'a>(
+        id: &ConversationId,
+        pid: u32,
+        pulse: f32,
+        size: f32,
+    ) -> Element<'a, Message> {
+        widget::Row::with_children(vec![
+            pulse_dots(pulse, size),
+            widget::text(format!(
+                "Another agent is still working in this conversation (process {pid}), left \
+                 running by a claudo that closed or run by another one. Your message goes \
+                 once it ends."
+            ))
+            .size(size)
+            .class(dim())
+            .width(Length::Fill)
+            .into(),
+            widget::button::destructive("Stop it")
+                .on_press(Message::StopStray(id.clone()))
+                .into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
     fn activity_row<'a>(label: String, pulse: f32, size: f32) -> Element<'a, Message> {
         widget::Row::with_children(vec![
             pulse_dots(pulse, size),
@@ -4633,6 +4692,9 @@ mod app {
                     if let Some(view) = self.views.get_mut(&conversation) {
                         view.step(older);
                     }
+                }
+                Message::StopStray(conversation_id) => {
+                    self.cmd(Command::StopStray { conversation_id })
                 }
                 Message::Unrecall(conversation) => {
                     if let Some(view) = self.views.get_mut(&conversation) {

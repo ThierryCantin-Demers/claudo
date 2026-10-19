@@ -2434,3 +2434,70 @@ fn each_window_is_titled_apart_and_remembers_its_workspace() {
         "two windows never share a title"
     );
 }
+
+#[test]
+fn a_message_waits_for_another_agent_and_what_follows_stays_queued() {
+    let mut app = two_tiles();
+    let send = |app: &mut ClaudoApp, text: &str| {
+        app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text(text);
+        let _ = app.update(Message::Send(ALPHA.to_string()));
+    };
+    let event = |ev| Message::Events(vec![ev]);
+    let alpha = || ALPHA.to_string();
+    send(&mut app, "run the tests");
+    let _ = app.update(event(ServerEvent::Waiting {
+        conversation_id: alpha(),
+        pid: 655265,
+    }));
+    assert_eq!(app.views[ALPHA].waiting_for, Some(655265));
+    send(&mut app, "and the benches");
+    assert_eq!(app.views[ALPHA].queued.len(), 1);
+
+    let mut h = Harness::new(app);
+    let found = h.frame(|ui, renderer| {
+        use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
+        let mut texts = ShownTexts::default();
+        ui.operate(renderer, &mut black_box(&mut texts));
+        match Operation::<Vec<String>>::finish(&texts) {
+            Outcome::Some(texts) => texts,
+            _ => Vec::new(),
+        }
+    });
+    assert!(
+        found.iter().any(|text| text.contains("process 655265")),
+        "says what it waits for"
+    );
+
+    let _ = h.app.update(event(ServerEvent::Delivered {
+        conversation_id: alpha(),
+    }));
+    let view = &h.app.views[ALPHA];
+    assert_eq!(view.waiting_for, None);
+    assert_eq!(
+        view.queued.len(),
+        1,
+        "the first message's delivery is its own, not the queued one's"
+    );
+    let _ = h.app.update(event(ServerEvent::Delivered {
+        conversation_id: alpha(),
+    }));
+    assert!(h.app.views[ALPHA].queued.is_empty());
+}
+
+/// Every text the view shows, in order.
+#[derive(Default)]
+struct ShownTexts(Vec<String>);
+
+impl Operation<Vec<String>> for ShownTexts {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Vec<String>>)) {
+        operate(self);
+    }
+
+    fn text(&mut self, _id: Option<&widget::Id>, _bounds: cosmic::iced::Rectangle, text: &str) {
+        self.0.push(text.to_string());
+    }
+
+    fn finish(&self) -> cosmic::iced::advanced::widget::operation::Outcome<Vec<String>> {
+        cosmic::iced::advanced::widget::operation::Outcome::Some(self.0.clone())
+    }
+}

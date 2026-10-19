@@ -267,6 +267,7 @@ impl ClaudoApp {
 
                 ServerEvent::Models(models) => self.models = models,
                 ServerEvent::Commands(_)
+                | ServerEvent::Waiting { .. }
                 | ServerEvent::Retrying { .. }
                 | ServerEvent::Compacting { .. }
                 | ServerEvent::CompactSummary { .. } => {}
