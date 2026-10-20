@@ -1050,9 +1050,10 @@ mod app {
         },
         /// Escape while the message box shows a sent prompt: it empties.
         Unrecall(ConversationId),
-        /// Tab in an empty message box that offers a suggestion: it fills it.
+        /// Right in an empty message box that offers a suggestion: it fills it.
         TakeSuggestion(ConversationId),
         SetPromptSuggestions(bool),
+        SetDebugLog(bool),
         /// Stop the agent this app does not run that a conversation's messages wait for.
         StopStray(ConversationId),
         /// Move a conversation's transcript by a page or to an end.
@@ -2460,6 +2461,10 @@ mod app {
                 widget::toggler(self.settings.prompt_suggestions)
                     .on_toggle(Message::SetPromptSuggestions),
             ));
+            let debug = widget::settings::section().add(widget::settings::item(
+                "Debug log",
+                widget::toggler(self.settings.debug_log).on_toggle(Message::SetDebugLog),
+            ));
 
             let page = widget::Column::with_children(vec![
                 widget::button::text("Back to chat")
@@ -2488,11 +2493,20 @@ mod app {
                 .into(),
                 suggestions.into(),
                 widget::text(
-                    "After each turn, Claude guesses your next message, which Tab in the empty \
-                     message box takes. Each guess is one more request, reading the \
-                     conversation from the cache, made only by agents started while their \
-                     conversation is on screen. Turning it off closes idle agents, so the next \
-                     message starts one without it.",
+                    "After each turn, Claude guesses your next message, which the right arrow \
+                     key in the empty message box takes. Each guess is one more request, \
+                     reading the conversation from the cache, made only by agents started \
+                     while their conversation is on screen. Turning it off closes idle agents, \
+                     so the next message starts one without it.",
+                )
+                .class(dim())
+                .into(),
+                debug.into(),
+                widget::text(
+                    "What claudo does with each agent goes to \
+                     ~/.local/state/claudo/debug/claudo.log, and each agent started while this \
+                     is on writes the Claude Code CLI's own debug log beside it. Those grow \
+                     quickly, so turn it off once you have what you need.",
                 )
                 .class(dim())
                 .into(),
@@ -3233,7 +3247,7 @@ mod app {
             let recalled = view.recalled > 0;
             let placeholder = match &view.suggestion {
                 _ if view.streaming => "Message Claude while it works…".to_string(),
-                Some(suggestion) => format!("{suggestion}  ·  Tab"),
+                Some(suggestion) => suggestion.clone(),
                 None if view.items.is_empty() => "Message Claude".to_string(),
                 None => "Reply to Claude…".to_string(),
             };
@@ -4583,7 +4597,7 @@ mod app {
             && modifiers.is_empty()
             && view.suggestion.is_some()
             && draft.text().trim().is_empty()
-            && matches!(press.key, keyboard::Key::Named(Named::Tab))
+            && matches!(press.key, keyboard::Key::Named(Named::ArrowRight))
         {
             return Some(Binding::Custom(Message::TakeSuggestion(
                 conversation.clone(),
@@ -5454,6 +5468,10 @@ mod app {
                 }
                 Message::SetPromptSuggestions(enabled) => {
                     self.settings.prompt_suggestions = enabled;
+                    self.save_settings();
+                }
+                Message::SetDebugLog(enabled) => {
+                    self.settings.debug_log = enabled;
                     self.save_settings();
                 }
                 Message::OvModel(id, i) => {

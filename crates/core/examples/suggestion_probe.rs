@@ -15,7 +15,10 @@ fn main() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     // SAFETY: no other thread exists yet.
-    unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", &tmp);
+        std::env::set_var("XDG_STATE_HOME", &tmp);
+    }
     let mut failed = false;
     let mut check = |ok: bool, what: &str| {
         println!("{} {what}", if ok { "PASS" } else { "FAIL" });
@@ -24,6 +27,7 @@ fn main() {
 
     let (tx, mut rx) = unbounded_channel();
     let backend = Backend::new(tx.clone());
+    claudo_core::debug::set(true);
     let mut created = || {
         backend.handle(Command::NewScratch { request: 0 });
         loop {
@@ -75,6 +79,24 @@ fn main() {
     );
     // The CLI drops a guess it finds too long or unsure, so none is no failure here.
     println!("  suggested {suggested:?}");
+
+    let dir = claudo_core::debug::dir();
+    let log = std::fs::read_to_string(dir.join("claudo.log")).unwrap_or_default();
+    println!("{log}");
+    let asked = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|file| file.file_name().to_string_lossy().starts_with("cli-"))
+        .filter(|file| {
+            std::fs::read_to_string(file.path())
+                .is_ok_and(|text| text.contains("source=prompt_suggestion"))
+        })
+        .count();
+    check(
+        log.contains("suggested \"") && asked > 0,
+        "the debug log has what claudo did, and the CLI's own logs its suggestion requests",
+    );
     std::process::exit(i32::from(failed));
 }
 

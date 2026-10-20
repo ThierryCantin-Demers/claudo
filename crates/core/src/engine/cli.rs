@@ -510,12 +510,13 @@ impl Session {
         name: &str,
         incoming: Option<Incoming>,
     ) -> io::Result<Self> {
-        Self::spawn_holding(config, resume, name, incoming, None, false)
+        Self::spawn_holding(config, resume, name, incoming, None, false, None)
     }
 
     /// Like `spawn`, the process taking `held` over: it holds the lock as long as it runs,
     /// whatever becomes of this app, and the file says its pid. With `suggest`, each turn
-    /// ends with a guess at the next message, which only `pause_suggestions` stops.
+    /// ends with a guess at the next message, which only `pause_suggestions` stops. The CLI
+    /// writes its debug log to `debug`.
     pub fn spawn_holding(
         config: SessionConfig,
         resume: Option<Resume>,
@@ -523,6 +524,7 @@ impl Session {
         incoming: Option<Incoming>,
         held: Option<Held>,
         suggest: bool,
+        debug: Option<PathBuf>,
     ) -> io::Result<Self> {
         let mut cmd = Command::new(claude_bin());
         if let Some(fd) = held.as_ref().map(|held| held.lock.as_raw_fd()) {
@@ -571,6 +573,9 @@ impl Session {
         }
         if let Some(effort) = &config.effort {
             cmd.arg("--effort").arg(effort);
+        }
+        if let Some(debug) = debug {
+            cmd.arg("--debug-file").arg(debug);
         }
 
         let mut child = cmd.spawn()?;

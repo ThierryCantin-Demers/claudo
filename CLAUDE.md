@@ -135,6 +135,12 @@ an idle process that suggests otherwise, such as one an older build started), cl
 processes when the setting changes, and sends the pause anyway for when it is honored. `examples/suggestion_probe`
 checks it.
 
+The Debug log setting (`crate::debug`) appends what claudo does with each agent to
+`$XDG_STATE_HOME/claudo/debug/claudo.log` (spawns and replacements with their suggestion
+state, what is on screen, turn ends, suggestions received) and starts each new agent with
+`--debug-file` beside it. The CLI's debug log shows its `source=prompt_suggestion` request
+and the forked agent's usage, but not why it dropped a guess: that goes only to telemetry.
+
 A `get_usage` control request answers with `rate_limits.five_hour` and `.seven_day`
 (`utilization` in percent, `resets_at` as RFC 3339) without a turn, so it costs no tokens;
 `cli::usage` asks a short-lived process for it.

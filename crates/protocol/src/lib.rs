@@ -412,6 +412,9 @@ pub struct Settings {
     /// After each turn, Claude guesses what the user would send next.
     #[serde(default = "yes")]
     pub prompt_suggestions: bool,
+    /// What claudo does with each agent, and the CLI's own debug log, go to files.
+    #[serde(default)]
+    pub debug_log: bool,
 }
 
 fn yes() -> bool {
@@ -430,6 +433,7 @@ impl Default for Settings {
             profile: Profile::default(),
             remote_control: false,
             prompt_suggestions: true,
+            debug_log: false,
         }
     }
 }

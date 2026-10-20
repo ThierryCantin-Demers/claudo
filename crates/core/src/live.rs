@@ -138,6 +138,10 @@ pub fn stop_stray(conversation_id: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn on(yes: bool) -> &'static str {
+    if yes { "on" } else { "off" }
+}
+
 fn descendants(pid: u32) -> Vec<u32> {
     let mut found = Vec::new();
     let mut next = vec![pid];
@@ -223,6 +227,7 @@ impl LiveSessions {
         let changed =
             std::mem::replace(&mut self.suggestions.lock().unwrap().enabled, enabled) != enabled;
         if changed {
+            crate::debug::log("", format!("suggestions {}", on(enabled)));
             self.sessions
                 .lock()
                 .unwrap()
@@ -233,6 +238,11 @@ impl LiveSessions {
 
     /// Only these conversations are on screen.
     pub fn set_on_screen(&self, conversation_ids: Vec<ConversationId>) {
+        let short: Vec<&str> = conversation_ids
+            .iter()
+            .map(|id| id.get(..8).unwrap_or(id))
+            .collect();
+        crate::debug::log("", format!("on screen: {}", short.join(" ")));
         self.suggestions.lock().unwrap().on_screen = conversation_ids.into_iter().collect();
         self.pause_suggestions();
     }
@@ -280,6 +290,17 @@ impl LiveSessions {
         }
         // An idle process with other flags holds the conversation's lock until it has exited.
         if let Some(replaced) = sessions.remove(conversation_id) {
+            crate::debug::log(
+                conversation_id,
+                if replaced.is_alive() {
+                    format!(
+                        "replacing pid {} for its flags or suggestions",
+                        replaced.pid()
+                    )
+                } else {
+                    format!("pid {} has exited", replaced.pid())
+                },
+            );
             drop(sessions);
             replaced.shutdown(Duration::from_secs(10));
             sessions = self.sessions.lock().unwrap();
@@ -289,8 +310,29 @@ impl LiveSessions {
             .map_err(|_| SendError::Occupied)?
             .held(conversation_id);
         let incoming = self.incoming_for(conversation_id);
-        let mut session = Session::spawn_holding(config, resume, name, incoming, held, suggest)
-            .map_err(|e| SendError::Failed(format!("failed to launch `{}`: {e}", claude_bin())))?;
+        let debug = crate::debug::cli_file(conversation_id);
+        let model = config
+            .model
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        let resumed = resume.map(|resume| resume.session_id.to_owned());
+        let mut session =
+            Session::spawn_holding(config, resume, name, incoming, held, suggest, debug.clone())
+                .map_err(|e| {
+                    SendError::Failed(format!("failed to launch `{}`: {e}", claude_bin()))
+                })?;
+        crate::debug::log(
+            conversation_id,
+            format!(
+                "spawned pid {}, suggestions {}, model {model}, resuming {}{}",
+                session.pid(),
+                on(suggest),
+                resumed.as_deref().unwrap_or("nothing"),
+                debug
+                    .map(|file| format!(", CLI log {}", file.display()))
+                    .unwrap_or_default()
+            ),
+        );
         for scope in always {
             session.allow_always(scope);
         }
@@ -317,6 +359,14 @@ impl LiveSessions {
     /// Take over a conversation's process from the app this one replaced.
     pub fn adopt(&self, conversation_id: &str, state: SessionState) -> Adopted {
         let (session, adopted) = Session::adopt(state, self.incoming_for(conversation_id));
+        crate::debug::log(
+            conversation_id,
+            format!(
+                "took over pid {}, suggestions {}",
+                session.pid(),
+                on(session.suggests())
+            ),
+        );
         self.sessions
             .lock()
             .unwrap()

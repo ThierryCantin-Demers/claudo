@@ -2730,7 +2730,7 @@ fn context_ring_snapshot() {
 }
 
 #[test]
-fn tab_takes_the_suggested_next_message_into_an_empty_box() {
+fn the_right_arrow_takes_the_suggested_next_message_into_an_empty_box() {
     let suggested = |text: &str| {
         Message::Events(vec![ServerEvent::Suggested {
             conversation_id: ALPHA.to_string(),
@@ -2750,8 +2750,12 @@ fn tab_takes_the_suggested_next_message_into_an_empty_box() {
     let mut h = Harness::new(app);
     h.focus(composer_id(ALPHA));
     use keyboard::key::{Code, Named};
-    let tab = key(Named::Tab, Code::Tab, keyboard::Modifiers::empty());
-    let taken = h.messages(vec![tab.clone()]);
+    let right = key(
+        Named::ArrowRight,
+        Code::ArrowRight,
+        keyboard::Modifiers::empty(),
+    );
+    let taken = h.messages(vec![right.clone()]);
     assert!(
         taken
             .iter()
@@ -2767,7 +2771,7 @@ fn tab_takes_the_suggested_next_message_into_an_empty_box() {
 
     let _ = h.app.update(suggested("commit it"));
     h.app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("my own");
-    let typed = h.messages(vec![tab]);
+    let typed = h.messages(vec![right]);
     assert!(
         !typed.iter().any(
             |m| matches!(m, Message::In(_, inner) if matches!(&**inner, Message::TakeSuggestion(_)))

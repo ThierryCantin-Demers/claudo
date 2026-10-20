@@ -89,6 +89,7 @@ impl Backend {
             waiting: Arc::default(),
         };
         let settings = crate::settings::load();
+        crate::debug::set(settings.debug_log);
         if settings.remote_control {
             backend.live.set_remote_control(true, |_| String::new());
         }
@@ -253,6 +254,7 @@ impl Backend {
                         store.get(id).map(|c| c.title.clone()).unwrap_or_default()
                     });
                 }
+                crate::debug::set(settings.debug_log);
                 self.live.set_suggestions(settings.prompt_suggestions);
                 crate::settings::save(&settings);
                 self.emit(ServerEvent::Settings(settings));
@@ -857,6 +859,15 @@ impl Forward {
                         store.set_context(&conversation_id, context);
                     }
                 }
+                crate::debug::log(
+                    &conversation_id,
+                    format!(
+                        "turn ended{}, context {} of {}",
+                        if is_error { " with an error" } else { "" },
+                        context.used,
+                        context.window.unwrap_or(0)
+                    ),
+                );
                 let time = self.started.take().map(|started| TurnTime {
                     started,
                     ended: crate::sessions::now_secs(),
@@ -870,10 +881,13 @@ impl Forward {
                 });
                 self.emit(conversations_event(&self.store));
             }
-            EngineEvent::Suggested { text } => self.emit(ServerEvent::Suggested {
-                conversation_id,
-                text,
-            }),
+            EngineEvent::Suggested { text } => {
+                crate::debug::log(&conversation_id, format!("suggested {text:?}"));
+                self.emit(ServerEvent::Suggested {
+                    conversation_id,
+                    text,
+                })
+            }
             EngineEvent::Error { detail } => {
                 self.done();
                 self.emit(ServerEvent::Error {
