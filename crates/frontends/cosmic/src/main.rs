@@ -2451,31 +2451,15 @@ mod app {
                         Message::SetProfile,
                     ),
                 ));
-            let remote = widget::settings::section()
-                .add(widget::settings::item(
-                    "Remote Control",
-                    widget::toggler(self.settings.remote_control)
-                        .on_toggle(Message::SetRemoteControl),
-                ))
-                .add(widget::settings::item_row(vec![
-                    widget::Column::with_children(vec![
-                        widget::text("Suggest what to send next").into(),
-                        widget::text(
-                            "After each turn, Claude guesses your next message; Tab in the \
-                             empty message box takes it. Each guess is one more request, \
-                             which reads the conversation from the cache, made only by agents \
-                             started while their conversation is on screen.",
-                        )
-                        .size(12.0)
-                        .class(dim())
-                        .into(),
-                    ])
-                    .width(Length::Fill)
-                    .into(),
-                    widget::toggler(self.settings.prompt_suggestions)
-                        .on_toggle(Message::SetPromptSuggestions)
-                        .into(),
-                ]));
+            let remote = widget::settings::section().add(widget::settings::item(
+                "Remote Control",
+                widget::toggler(self.settings.remote_control).on_toggle(Message::SetRemoteControl),
+            ));
+            let suggestions = widget::settings::section().add(widget::settings::item(
+                "Suggest what to send next",
+                widget::toggler(self.settings.prompt_suggestions)
+                    .on_toggle(Message::SetPromptSuggestions),
+            ));
 
             let page = widget::Column::with_children(vec![
                 widget::button::text("Back to chat")
@@ -2499,6 +2483,16 @@ mod app {
                     "Your agents also show in the Claude app and on claude.ai/code, where you \
                      can follow them and send them messages, while their conversation's \
                      claude process runs.",
+                )
+                .class(dim())
+                .into(),
+                suggestions.into(),
+                widget::text(
+                    "After each turn, Claude guesses your next message, which Tab in the empty \
+                     message box takes. Each guess is one more request, reading the \
+                     conversation from the cache, made only by agents started while their \
+                     conversation is on screen. Turning it off closes idle agents, so the next \
+                     message starts one without it.",
                 )
                 .class(dim())
                 .into(),

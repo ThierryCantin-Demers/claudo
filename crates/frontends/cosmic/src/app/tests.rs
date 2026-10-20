@@ -2785,3 +2785,27 @@ fn suggestion_snapshot() {
     app.views.get_mut(ALPHA).unwrap().suggestion = Some("run the tests".to_string());
     Harness::new(app).snapshot("suggestion");
 }
+
+#[test]
+fn suggestions_turn_off_from_settings() {
+    let mut app = two_tiles();
+    assert!(app.settings.prompt_suggestions, "on unless turned off");
+    app.layout_mut().page = Page::Settings;
+    let mut h = Harness::new(app);
+    assert!(
+        shown_texts(&mut h)
+            .iter()
+            .any(|text| text == "Suggest what to send next"),
+        "the settings page has the switch"
+    );
+    let _ = h.app.update(Message::SetPromptSuggestions(false));
+    assert!(!h.app.settings.prompt_suggestions);
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn settings_snapshot() {
+    let mut app = two_tiles();
+    app.layout_mut().page = Page::Settings;
+    Harness::new(app).snapshot("settings");
+}
