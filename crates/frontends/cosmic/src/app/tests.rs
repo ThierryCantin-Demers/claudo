@@ -391,6 +391,7 @@ fn snapshots() {
     let mut app = with_commands();
     app.layout_mut().sidebar_open = false;
     let _ = app.update(Message::ShowCommands(true));
+    let _ = app.update(Message::ToggleFinished(ALPHA.to_string()));
     let idx = app.views[ALPHA].commands().nth(2).unwrap().0;
     let _ = app.update(Message::ToggleCommand(ALPHA.to_string(), idx));
     Harness::new(app).snapshot("commands");
@@ -398,7 +399,6 @@ fn snapshots() {
     let mut app = with_commands();
     app.layout_mut().sidebar_open = false;
     let _ = app.update(Message::ShowCommands(true));
-    let _ = app.update(Message::ToggleFinished(ALPHA.to_string()));
     Harness::new(app).snapshot("commands-finished-folded");
 
     let mut app = two_tiles();
@@ -1149,8 +1149,12 @@ fn the_commands_panel_lists_every_agent() {
 
     let _ = app.update(Message::ToggleCommandGroup(BRAVO.to_string()));
     assert!(app.views[BRAVO].commands_collapsed);
+    assert!(
+        !app.views[ALPHA].finished_open,
+        "finished commands start folded"
+    );
     let _ = app.update(Message::ToggleFinished(ALPHA.to_string()));
-    assert!(app.views[ALPHA].finished_collapsed);
+    assert!(app.views[ALPHA].finished_open);
 
     app.layout_mut().tiles.retain(|t| t.conversation == ALPHA);
     assert_eq!(

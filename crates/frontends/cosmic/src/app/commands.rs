@@ -7,6 +7,12 @@ use claudo_protocol::TaskStatus;
 const COMMAND_BLOCK: usize = 10;
 const OUTPUT_BLOCK: usize = 11;
 
+/// Where a group's sections start: under its title's words, past the header button's
+/// padding of 5 and its chevron.
+const SECTION: f32 = 5.0 + 16.0 + 6.0;
+/// The padding of a row's button, which its section's left edge takes in.
+const ROW_PADDING: f32 = 5.0;
+
 /// A call in the background runs until it reports its end; any other only while its turn does.
 pub(super) fn running(call: &ToolCall, streaming: bool) -> bool {
     match &call.background {
@@ -345,25 +351,29 @@ impl ClaudoApp {
                         .size(size * 0.9)
                         .class(dim()),
                 )
-                .padding([0, 0, 0, 26])
+                .padding([0.0, 0.0, 0.0, SECTION])
                 .into(),
             );
         }
-        let row = |(idx, call)| self.panel_row(id, view, idx, call, texts, size);
+        let row = |(idx, call)| {
+            widget::container(self.panel_row(id, view, idx, call, texts, size))
+                .padding([0.0, 0.0, 0.0, SECTION - ROW_PADDING])
+                .into()
+        };
         if !running.is_empty() {
             rows.push(
                 widget::container(widget::text("Running").size(size * 0.85).class(dim()))
-                    .padding([6, 0, 0, 26])
+                    .padding([6.0, 0.0, 0.0, SECTION])
                     .into(),
             );
             rows.extend(running.into_iter().map(row));
         }
         if !done.is_empty() {
-            let folded = view.finished_collapsed;
-            let chevron = if folded {
-                "go-next-symbolic"
-            } else {
+            let open = view.finished_open;
+            let chevron = if open {
                 "go-down-symbolic"
+            } else {
+                "go-next-symbolic"
             };
             let heading = widget::button::custom(
                 widget::Row::with_children(vec![
@@ -378,14 +388,14 @@ impl ClaudoApp {
             )
             .on_press(Message::ToggleFinished(id.clone()))
             .class(cosmic::theme::Button::Text)
-            .padding([2, 4]);
-            rows.push(widget::container(heading).padding([4, 0, 0, 18]).into());
-            if !folded {
-                // Under the heading's words, past its chevron.
-                rows.extend(
-                    done.into_iter()
-                        .map(|done| widget::container(row(done)).padding([0, 0, 0, 35]).into()),
-                );
+            .padding([2.0, ROW_PADDING]);
+            rows.push(
+                widget::container(heading)
+                    .padding([6.0, 0.0, 0.0, SECTION - ROW_PADDING])
+                    .into(),
+            );
+            if open {
+                rows.extend(done.into_iter().map(row));
             }
         }
         widget::Column::with_children(rows).spacing(4).into()

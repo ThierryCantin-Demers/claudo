@@ -215,8 +215,8 @@ mod app {
         commands_open: std::collections::HashSet<usize>,
         /// The Commands panel shows only this conversation's title.
         commands_collapsed: bool,
-        /// The Commands panel folds this conversation's finished commands.
-        finished_collapsed: bool,
+        /// The Commands panel lists this conversation's finished commands, folded otherwise.
+        finished_open: bool,
         /// The conversation is being summarized.
         compacting: bool,
         /// Its messages are on their way from the backend; until then it is not a new chat.
@@ -257,7 +257,7 @@ mod app {
                 undelivered: false,
                 commands_open: Default::default(),
                 commands_collapsed: false,
-                finished_collapsed: false,
+                finished_open: false,
                 compacting: false,
                 loading: false,
                 menu: 0,
@@ -4894,7 +4894,7 @@ mod app {
                 }
                 Message::ToggleFinished(id) => {
                     if let Some(view) = self.views.get_mut(&id) {
-                        view.finished_collapsed = !view.finished_collapsed;
+                        view.finished_open = !view.finished_open;
                     }
                 }
                 Message::ToggleCommand(id, idx) => {
