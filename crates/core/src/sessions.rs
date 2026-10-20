@@ -974,6 +974,7 @@ mod tests {
             effort: Effort::High,
             profile: Profile::FullAuto,
             remote_control: false,
+            ..Settings::default()
         };
         store.keep_defaults(&settings);
         let [following, own] = &store.conversations[..] else {

@@ -2,7 +2,7 @@
 //! between turns and closed once idle. The next turn after that respawns it
 //! with `--resume`, so closing one loses nothing but startup time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -162,7 +162,23 @@ pub struct LiveSessions {
     incoming: Option<IncomingSender>,
     /// Each process turns Remote Control on as it starts.
     remote_control: AtomicBool,
+    suggestions: Mutex<Suggestions>,
     _stop_reaper: mpsc::Sender<()>,
+}
+
+/// Guessing the next message costs a request over the whole conversation, so only
+/// conversations on screen get one, and none while the setting is off. The CLI reads it
+/// once, as a process starts; pausing one later is not honored yet.
+#[derive(Default)]
+struct Suggestions {
+    enabled: bool,
+    on_screen: HashSet<ConversationId>,
+}
+
+impl Suggestions {
+    fn paused(&self, conversation_id: &str) -> bool {
+        !self.enabled || !self.on_screen.contains(conversation_id)
+    }
 }
 
 impl LiveSessions {
@@ -186,6 +202,7 @@ impl LiveSessions {
             sessions,
             incoming,
             remote_control: AtomicBool::new(false),
+            suggestions: Mutex::default(),
             _stop_reaper: stop_reaper,
         }
     }
@@ -196,6 +213,34 @@ impl LiveSessions {
         self.remote_control.store(enabled, Ordering::Relaxed);
         for (conversation_id, session) in self.sessions.lock().unwrap().iter() {
             let _ = session.remote_control(enabled, &name(conversation_id));
+        }
+    }
+
+    /// Guess the next message after each turn, or no longer. Idle processes are closed,
+    /// so the next turn starts one that does as the setting says.
+    pub fn set_suggestions(&self, enabled: bool) {
+        let changed =
+            std::mem::replace(&mut self.suggestions.lock().unwrap().enabled, enabled) != enabled;
+        if changed {
+            self.sessions
+                .lock()
+                .unwrap()
+                .retain(|_, session| session.is_busy() || session.has_background());
+        }
+        self.pause_suggestions();
+    }
+
+    /// Only these conversations are on screen.
+    pub fn set_on_screen(&self, conversation_ids: Vec<ConversationId>) {
+        self.suggestions.lock().unwrap().on_screen = conversation_ids.into_iter().collect();
+        self.pause_suggestions();
+    }
+
+    fn pause_suggestions(&self) {
+        let sessions = self.sessions.lock().unwrap();
+        let suggestions = self.suggestions.lock().unwrap();
+        for (conversation_id, session) in sessions.iter() {
+            let _ = session.pause_suggestions(suggestions.paused(conversation_id));
         }
     }
 
@@ -242,7 +287,8 @@ impl LiveSessions {
             .map_err(|_| SendError::Occupied)?
             .held(conversation_id);
         let incoming = self.incoming_for(conversation_id);
-        let mut session = Session::spawn_holding(config, resume, name, incoming, held)
+        let suggest = !self.suggestions.lock().unwrap().paused(conversation_id);
+        let mut session = Session::spawn_holding(config, resume, name, incoming, held, suggest)
             .map_err(|e| SendError::Failed(format!("failed to launch `{}`: {e}", claude_bin())))?;
         for scope in always {
             session.allow_always(scope);

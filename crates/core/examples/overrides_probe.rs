@@ -21,6 +21,7 @@ fn main() {
             effort: Effort::Low,
             profile: Profile::Safe,
             remote_control: false,
+            ..Settings::default()
         },
     });
     backend.handle(Command::NewScratch { request: 0 });
@@ -31,6 +32,7 @@ fn main() {
             effort: Effort::Max,
             profile: Profile::FullAuto,
             remote_control: false,
+            ..Settings::default()
         },
     });
     backend.handle(Command::ListConversations);

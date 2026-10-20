@@ -59,6 +59,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Permission profiles: Safe, Accept edits, Full auto.
 - Remote Control (COSMIC: Settings): your agents also show in the Claude app and on claude.ai/code, where you can follow them and message them.
 - Model, thinking and permissions per conversation. The defaults in Settings apply to new conversations; in COSMIC a `*` after a value marks a choice that differs from them.
+- COSMIC suggests what to send next once a turn you started ends, like Claude Desktop: the guess shows in the empty message box and Tab takes it. Only an agent started while its conversation is on screen makes them, since each costs a request over the cached conversation; Settings turns it off.
 - Each turn ends with when it started and how long it took; while one runs, COSMIC shows its time so far and says when the API is being retried.
 - Context usage for the last turn, in the header, and in COSMIC also as a ring by the model picker: green, then yellow from half full and red from 80%. Past 500k tokens of context, COSMIC offers to compact the conversation; compactions, automatic or asked for, show where they happened with their summary.
 - COSMIC: a `/` menu of the CLI's slash commands (built in, skills, plugins) as you type one; `/clear`, `/rename`, `/model` and `/effort` act on claudo's own conversation, title and settings.
@@ -90,6 +91,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 | Delete a conversation | Right-click it in the sidebar → Delete…, then confirm |
 | Delete or archive several at once | Ctrl+click them in the sidebar (or right-click → Select), Shift+click to pick a run of them, then Delete… or Archive at the top of the sidebar; Escape lets go |
 | Reuse an earlier message | Up in an empty message box, again for older ones; Down goes back toward an empty box, Escape empties it. An accent border and a label mark a message already sent, and editing it makes it a new draft |
+| Take the suggested next message | Tab in the empty message box that shows it |
 | Scroll a conversation | Scrolled up, a round button at the bottom takes you back down; PageUp/PageDown by a page; Home/End to the top or bottom, or Ctrl+Home/End while the message box holds text; a middle click scrolls toward the pointer, faster the farther it goes, until the next click or until you let go after moving |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar

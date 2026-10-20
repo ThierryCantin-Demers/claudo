@@ -2728,3 +2728,60 @@ fn context_ring_snapshot() {
     }
     Harness::new(app).snapshot("context-ring");
 }
+
+#[test]
+fn tab_takes_the_suggested_next_message_into_an_empty_box() {
+    let suggested = |text: &str| {
+        Message::Events(vec![ServerEvent::Suggested {
+            conversation_id: ALPHA.to_string(),
+            text: text.to_string(),
+        }])
+    };
+    let mut app = two_tiles();
+    app.views.get_mut(ALPHA).unwrap().streaming = true;
+    let _ = app.update(suggested("too late"));
+    assert_eq!(
+        app.views[ALPHA].suggestion, None,
+        "a turn already running makes it stale"
+    );
+    app.views.get_mut(ALPHA).unwrap().streaming = false;
+    let _ = app.update(suggested("run the tests"));
+
+    let mut h = Harness::new(app);
+    h.focus(composer_id(ALPHA));
+    use keyboard::key::{Code, Named};
+    let tab = key(Named::Tab, Code::Tab, keyboard::Modifiers::empty());
+    let taken = h.messages(vec![tab.clone()]);
+    assert!(
+        taken
+            .iter()
+            .any(|m| matches!(m, Message::In(_, inner) if matches!(&**inner, Message::TakeSuggestion(id) if id == ALPHA))),
+        "{taken:?}"
+    );
+    for message in taken {
+        let _ = h.app.update(message);
+    }
+    let view = &h.app.views[ALPHA];
+    assert_eq!(view.draft.text().trim(), "run the tests");
+    assert_eq!(view.suggestion, None);
+
+    let _ = h.app.update(suggested("commit it"));
+    h.app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("my own");
+    let typed = h.messages(vec![tab]);
+    assert!(
+        !typed.iter().any(
+            |m| matches!(m, Message::In(_, inner) if matches!(&**inner, Message::TakeSuggestion(_)))
+        ),
+        "only an empty box takes it"
+    );
+    let _ = h.app.update(Message::Send(ALPHA.to_string()));
+    assert_eq!(h.app.views[ALPHA].suggestion, None, "sending drops it");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn suggestion_snapshot() {
+    let mut app = two_tiles();
+    app.views.get_mut(ALPHA).unwrap().suggestion = Some("run the tests".to_string());
+    Harness::new(app).snapshot("suggestion");
+}

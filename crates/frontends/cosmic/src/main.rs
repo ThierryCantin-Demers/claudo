@@ -235,6 +235,8 @@ mod app {
         attachments: Vec<attach::Shown>,
         /// Messages sent while a turn runs that Claude has not taken yet, oldest first.
         queued: Vec<(String, Vec<attach::Shown>)>,
+        /// What the user would likely send next, offered in the empty message box.
+        suggestion: Option<String>,
         /// Runs of calls opened, by their first entry.
         groups_open: std::collections::HashSet<usize>,
     }
@@ -265,6 +267,7 @@ mod app {
                 retrying: None,
                 attachments: Vec::new(),
                 queued: Vec::new(),
+                suggestion: None,
                 groups_open: Default::default(),
             }
         }
@@ -464,7 +467,13 @@ mod app {
                         call.background = Some(background);
                     }
                 }
+                ServerEvent::Suggested { text, .. } => {
+                    if !self.streaming && self.queued.is_empty() {
+                        self.suggestion = Some(text);
+                    }
+                }
                 ServerEvent::Incoming { from, text, .. } => {
+                    self.suggestion = None;
                     self.finish_reply();
                     self.error = None;
                     self.streaming = true;
@@ -472,6 +481,7 @@ mod app {
                     self.items.push(Entry::Incoming { from, text });
                 }
                 ServerEvent::Typed { text, .. } => {
+                    self.suggestion = None;
                     self.finish_reply();
                     self.error = None;
                     self.streaming = true;
@@ -479,6 +489,7 @@ mod app {
                     self.items.push(Entry::User(text));
                 }
                 ServerEvent::Notice { text, .. } => {
+                    self.suggestion = None;
                     self.finish_reply();
                     self.error = None;
                     self.streaming = true;
@@ -497,6 +508,7 @@ mod app {
                     attachments.into_iter().map(attach::Shown::new).collect(),
                 )),
                 ServerEvent::Working { .. } => {
+                    self.suggestion = None;
                     self.streaming = true;
                     self.partial = true;
                     self.since.get_or_insert_with(std::time::Instant::now);
@@ -796,6 +808,8 @@ mod app {
         unsent_files: HashMap<ConversationId, Vec<attach::Shown>>,
         /// What the files attached to unsent messages were when last saved.
         unsent_saved: u64,
+        /// The conversations the backend was last told are on screen.
+        on_screen: Option<Vec<ConversationId>>,
         /// Each window's tiles to reopen, with its focused one, once the conversation list
         /// arrives.
         restore: Vec<(window::Id, Vec<Tile>, usize)>,
@@ -1036,6 +1050,9 @@ mod app {
         },
         /// Escape while the message box shows a sent prompt: it empties.
         Unrecall(ConversationId),
+        /// Tab in an empty message box that offers a suggestion: it fills it.
+        TakeSuggestion(ConversationId),
+        SetPromptSuggestions(bool),
         /// Stop the agent this app does not run that a conversation's messages wait for.
         StopStray(ConversationId),
         /// Move a conversation's transcript by a page or to an end.
@@ -1493,6 +1510,26 @@ mod app {
                 }
             }
             (unsent, h.finish())
+        }
+
+        /// Tells the backend which conversations are on screen once that changes: only their
+        /// turns end with a suggestion.
+        fn tell_on_screen(&mut self) {
+            if self.commands.is_none() {
+                return;
+            }
+            let mut shown: Vec<ConversationId> = self
+                .windows
+                .values()
+                .flat_map(|layout| layout.tiles.iter().map(|tile| tile.conversation.clone()))
+                .collect();
+            shown.sort();
+            if self.on_screen.as_ref() != Some(&shown) {
+                self.cmd(Command::OnScreen {
+                    conversation_ids: shown.clone(),
+                });
+                self.on_screen = Some(shown);
+            }
         }
 
         /// Saves the files attached to unsent messages once they change, so a restart brings
@@ -2107,6 +2144,7 @@ mod app {
             };
             let files = std::mem::take(&mut view.attachments);
             let attachments = files.iter().map(|file| file.attachment.clone()).collect();
+            view.suggestion = None;
             if view.streaming || !view.queued.is_empty() {
                 view.queued.push((text.clone(), files));
             } else {
@@ -2260,6 +2298,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Suggested {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Waiting {
                     ref conversation_id,
                     ..
@@ -2409,10 +2451,31 @@ mod app {
                         Message::SetProfile,
                     ),
                 ));
-            let remote = widget::settings::section().add(widget::settings::item(
-                "Remote Control",
-                widget::toggler(self.settings.remote_control).on_toggle(Message::SetRemoteControl),
-            ));
+            let remote = widget::settings::section()
+                .add(widget::settings::item(
+                    "Remote Control",
+                    widget::toggler(self.settings.remote_control)
+                        .on_toggle(Message::SetRemoteControl),
+                ))
+                .add(widget::settings::item_row(vec![
+                    widget::Column::with_children(vec![
+                        widget::text("Suggest what to send next").into(),
+                        widget::text(
+                            "After each turn, Claude guesses your next message; Tab in the \
+                             empty message box takes it. Each guess is one more request, \
+                             which reads the conversation from the cache, made only by agents \
+                             started while their conversation is on screen.",
+                        )
+                        .size(12.0)
+                        .class(dim())
+                        .into(),
+                    ])
+                    .width(Length::Fill)
+                    .into(),
+                    widget::toggler(self.settings.prompt_suggestions)
+                        .on_toggle(Message::SetPromptSuggestions)
+                        .into(),
+                ]));
 
             let page = widget::Column::with_children(vec![
                 widget::button::text("Back to chat")
@@ -3174,12 +3237,11 @@ mod app {
             let (model, effort, profile) = self.effective(id);
             let menu_open = !self.command_matches(view).is_empty();
             let recalled = view.recalled > 0;
-            let placeholder = if view.streaming {
-                "Message Claude while it works…"
-            } else if view.items.is_empty() {
-                "Message Claude"
-            } else {
-                "Reply to Claude…"
+            let placeholder = match &view.suggestion {
+                _ if view.streaming => "Message Claude while it works…".to_string(),
+                Some(suggestion) => format!("{suggestion}  ·  Tab"),
+                None if view.items.is_empty() => "Message Claude".to_string(),
+                None => "Reply to Claude…".to_string(),
             };
             let editor = widget::text_editor(&view.draft)
                 .id(composer_id(id))
@@ -4523,6 +4585,16 @@ mod app {
             keyboard::Key::Named(Named::ArrowDown) if recalled => Some(false),
             _ => None,
         };
+        if focused
+            && modifiers.is_empty()
+            && view.suggestion.is_some()
+            && draft.text().trim().is_empty()
+            && matches!(press.key, keyboard::Key::Named(Named::Tab))
+        {
+            return Some(Binding::Custom(Message::TakeSuggestion(
+                conversation.clone(),
+            )));
+        }
         if focused && modifiers.is_empty() {
             if let Some(older) = older {
                 return Some(Binding::Custom(Message::Recall {
@@ -4633,6 +4705,7 @@ mod app {
                     .map(|(id, files)| (id, files.into_iter().map(attach::Shown::new).collect()))
                     .collect(),
                 unsent_saved: 0,
+                on_screen: None,
                 restore: vec![(main, ui.tiles.clone(), ui.focused)],
                 focus_composer: None,
                 quota: None,
@@ -4707,7 +4780,10 @@ mod app {
                     self.current = w;
                     return self.update(*message);
                 }
-                Message::Connected(commands) => self.commands = Some(commands),
+                Message::Connected(commands) => {
+                    self.commands = Some(commands);
+                    self.on_screen = None;
+                }
                 Message::Second => {}
                 Message::Minute => {
                     self.update_ready = instance::replaced();
@@ -4834,6 +4910,16 @@ mod app {
                 Message::Unrecall(conversation) => {
                     if let Some(view) = self.views.get_mut(&conversation) {
                         view.unrecall();
+                    }
+                }
+                Message::TakeSuggestion(conversation) => {
+                    if let Some(view) = self.views.get_mut(&conversation)
+                        && let Some(suggestion) = view.suggestion.take()
+                    {
+                        view.recalled = 0;
+                        view.draft = text_editor::Content::with_text(&suggestion);
+                        view.draft
+                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                     }
                 }
                 Message::Jump(conversation, jump) => return self.jump(&conversation, jump),
@@ -5372,6 +5458,10 @@ mod app {
                     self.settings.remote_control = enabled;
                     self.save_settings();
                 }
+                Message::SetPromptSuggestions(enabled) => {
+                    self.settings.prompt_suggestions = enabled;
+                    self.save_settings();
+                }
                 Message::OvModel(id, i) => {
                     if let Some(model) = self.models.get(i).map(|m| m.value.clone()) {
                         self.set_override(id, |o| o.model = Some(model));
@@ -5391,6 +5481,7 @@ mod app {
             self.follow_blur();
             self.retitle();
             self.keep_unsent();
+            self.tell_on_screen();
             let mut tasks = std::mem::take(&mut self.tasks);
             if let Some(id) = self.focus_composer.take() {
                 tasks.push(widget::text_input::focus(composer_id(&id)));

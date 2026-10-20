@@ -122,6 +122,18 @@ and in the Claude app, from print mode too and in a folder never trusted; its an
 carries `session_url`, and `system` / `bridge_state` lines (`ready`, `connected`, `failed`)
 follow the connection. The Remote Control setting sends it to every process.
 
+With `promptSuggestions: true` in `initialize`, a turn the user started is followed, a
+few seconds after its `result`, by `{"type":"prompt_suggestion","suggestion":...}`: the
+CLI's guess at the next message, from a forked request over the cached conversation (one
+more request per turn, mostly cache reads). It stays silent when the next step is not
+obvious, early in a conversation, when the cache is cold, and near rate limits. The CLI
+reads the option once: `set_prompt_suggestions_paused` is acknowledged but ignored behind a
+feature flag (`tengu_chomp_sable`), and so is skipping turns the user did not start. So
+claudo starts a process with suggestions only when its conversation is on screen
+(`Command::OnScreen`) and the setting is on, closes idle processes when the setting
+changes, and sends the pause anyway for when it is honored. `examples/suggestion_probe`
+checks it.
+
 A `get_usage` control request answers with `rate_limits.five_hour` and `.seven_day`
 (`utilization` in percent, `resets_at` as RFC 3339) without a turn, so it costs no tokens;
 `cli::usage` asks a short-lived process for it.

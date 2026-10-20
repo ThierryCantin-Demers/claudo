@@ -269,6 +269,7 @@ impl ClaudoApp {
                 ServerEvent::Commands(_)
                 | ServerEvent::Waiting { .. }
                 | ServerEvent::Queued { .. }
+                | ServerEvent::Suggested { .. }
                 | ServerEvent::Retrying { .. }
                 | ServerEvent::Compacting { .. }
                 | ServerEvent::CompactSummary { .. } => {}

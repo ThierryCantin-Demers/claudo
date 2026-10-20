@@ -249,6 +249,10 @@ pub enum EngineEvent {
     Error {
         detail: String,
     },
+    /// What the user would likely send next, guessed after a turn they started.
+    Suggested {
+        text: String,
+    },
 }
 
 /// The flags a `claude` process starts with. They hold for its whole life, so a
@@ -502,17 +506,19 @@ impl Session {
         name: &str,
         incoming: Option<Incoming>,
     ) -> io::Result<Self> {
-        Self::spawn_holding(config, resume, name, incoming, None)
+        Self::spawn_holding(config, resume, name, incoming, None, false)
     }
 
     /// Like `spawn`, the process taking `held` over: it holds the lock as long as it runs,
-    /// whatever becomes of this app, and the file says its pid.
+    /// whatever becomes of this app, and the file says its pid. With `suggest`, each turn
+    /// ends with a guess at the next message, which only `pause_suggestions` stops.
     pub fn spawn_holding(
         config: SessionConfig,
         resume: Option<Resume>,
         name: &str,
         incoming: Option<Incoming>,
         held: Option<Held>,
+        suggest: bool,
     ) -> io::Result<Self> {
         let mut cmd = Command::new(claude_bin());
         if let Some(fd) = held.as_ref().map(|held| held.lock.as_raw_fd()) {
@@ -598,7 +604,7 @@ impl Session {
         session.shared.write(&json!({
             "type": "control_request",
             "request_id": Uuid::new_v4().to_string(),
-            "request": { "subtype": "initialize" },
+            "request": { "subtype": "initialize", "promptSuggestions": suggest },
         }))?;
         Ok(session)
     }
@@ -842,6 +848,16 @@ impl Session {
         }))
     }
 
+    /// Stop or resume guessing the user's next message after each turn, in a process
+    /// spawned to. The CLI acknowledges it but ignores it until a feature flag enables it.
+    pub fn pause_suggestions(&self, paused: bool) -> io::Result<()> {
+        self.shared.write(&json!({
+            "type": "control_request",
+            "request_id": Uuid::new_v4().to_string(),
+            "request": { "subtype": "set_prompt_suggestions_paused", "paused": paused },
+        }))
+    }
+
     /// Stop the running turn; it still ends with `Completed`, and the process
     /// stays up for the next one.
     pub fn interrupt(&self) -> io::Result<()> {
@@ -962,7 +978,9 @@ impl Shared {
             // ending, or a subagent's calls.
             None => {
                 let background = match &ev {
-                    EngineEvent::Background { .. } | EngineEvent::ToolResult { .. } => true,
+                    EngineEvent::Background { .. }
+                    | EngineEvent::ToolResult { .. }
+                    | EngineEvent::Suggested { .. } => true,
                     EngineEvent::ToolStarted(call) => call.parent.is_some(),
                     _ => false,
                 };
@@ -1480,6 +1498,15 @@ fn decode(v: &Value) -> Vec<EngineEvent> {
         },
 
         "rate_limit_event" => quota(v).map(EngineEvent::Quota).into_iter().collect(),
+
+        "prompt_suggestion" => v
+            .get("suggestion")
+            .and_then(Value::as_str)
+            .map(|text| EngineEvent::Suggested {
+                text: text.to_owned(),
+            })
+            .into_iter()
+            .collect(),
 
         "result" => vec![EngineEvent::Completed {
             session_id: v
@@ -2186,6 +2213,17 @@ mod tests {
                 "{reason}"
             );
         }
+    }
+
+    #[test]
+    fn a_guess_at_the_next_message_is_passed_on() {
+        let v = line(
+            r#"{"type":"prompt_suggestion","suggestion":"run it","uuid":"u","session_id":"s"}"#,
+        );
+        assert!(matches!(
+            &decode(&v)[..],
+            [EngineEvent::Suggested { text }] if text == "run it"
+        ));
     }
 
     #[test]

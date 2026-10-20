@@ -24,6 +24,7 @@ fn main() {
             effort: Effort::High,
             profile: Profile::FullAuto,
             remote_control: false,
+            ..Settings::default()
         },
     });
     show(&mut rx, "after update");

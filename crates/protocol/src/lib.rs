@@ -409,6 +409,13 @@ pub struct Settings {
     /// Every agent is also reachable from the Claude app and claude.ai/code.
     #[serde(default)]
     pub remote_control: bool,
+    /// After each turn, Claude guesses what the user would send next.
+    #[serde(default = "yes")]
+    pub prompt_suggestions: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_model() -> String {
@@ -422,6 +429,7 @@ impl Default for Settings {
             effort: Effort::default(),
             profile: Profile::default(),
             remote_control: false,
+            prompt_suggestions: true,
         }
     }
 }
@@ -508,6 +516,10 @@ pub enum Command {
     /// Stop the agent a `Waiting` named, and whatever it started.
     StopStray {
         conversation_id: ConversationId,
+    },
+    /// The conversations on screen, the only ones whose turns end with a `Suggested`.
+    OnScreen {
+        conversation_ids: Vec<ConversationId>,
     },
     /// Replace the running app with the binary now installed where it was started from,
     /// handing it every agent as it is. Answered only by an `Error` if that fails.
@@ -618,6 +630,11 @@ pub enum ServerEvent {
     /// the one it replaced; its events follow from where they were.
     Working {
         conversation_id: ConversationId,
+    },
+    /// What the user would likely send next, guessed once a turn they started has ended.
+    Suggested {
+        conversation_id: ConversationId,
+        text: String,
     },
     /// A message the app this one replaced sent, which has not reached Claude yet. Its
     /// `Delivered` comes once it does.

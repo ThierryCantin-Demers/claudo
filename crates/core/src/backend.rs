@@ -88,9 +88,11 @@ impl Backend {
             progress,
             waiting: Arc::default(),
         };
-        if crate::settings::load().remote_control {
+        let settings = crate::settings::load();
+        if settings.remote_control {
             backend.live.set_remote_control(true, |_| String::new());
         }
+        backend.live.set_suggestions(settings.prompt_suggestions);
         if let Some(handover) = handover {
             backend.adopt(handover);
         }
@@ -251,6 +253,7 @@ impl Backend {
                         store.get(id).map(|c| c.title.clone()).unwrap_or_default()
                     });
                 }
+                self.live.set_suggestions(settings.prompt_suggestions);
                 crate::settings::save(&settings);
                 self.emit(ServerEvent::Settings(settings));
             }
@@ -384,6 +387,8 @@ impl Backend {
             }
 
             Command::Restart => self.restart(),
+
+            Command::OnScreen { conversation_ids } => self.live.set_on_screen(conversation_ids),
 
             Command::StopStray { conversation_id } => {
                 if let Err(e) = crate::live::stop_stray(&conversation_id) {
@@ -865,6 +870,10 @@ impl Forward {
                 });
                 self.emit(conversations_event(&self.store));
             }
+            EngineEvent::Suggested { text } => self.emit(ServerEvent::Suggested {
+                conversation_id,
+                text,
+            }),
             EngineEvent::Error { detail } => {
                 self.done();
                 self.emit(ServerEvent::Error {
