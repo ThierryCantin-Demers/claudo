@@ -130,8 +130,9 @@ obvious, early in a conversation, when the cache is cold, and near rate limits. 
 reads the option once: `set_prompt_suggestions_paused` is acknowledged but ignored behind a
 feature flag (`tengu_chomp_sable`), and so is skipping turns the user did not start. So
 claudo starts a process with suggestions only when its conversation is on screen
-(`Command::OnScreen`) and the setting is on, closes idle processes when the setting
-changes, and sends the pause anyway for when it is honored. `examples/suggestion_probe`
+(`Command::OnScreen`) and the setting is on, treats that like a flag (a message replaces
+an idle process that suggests otherwise, such as one an older build started), closes idle
+processes when the setting changes, and sends the pause anyway for when it is honored. `examples/suggestion_probe`
 checks it.
 
 A `get_usage` control request answers with `rate_limits.five_hour` and `.seven_day`

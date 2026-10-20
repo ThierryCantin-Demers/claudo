@@ -1,5 +1,5 @@
 //! Manual probe for next-message suggestions: a turn in a conversation on screen ends with
-//! one, and a turn in one off screen with none.
+//! one, and a turn in one off screen with none, until it is on screen too.
 //! Usage: cargo run -p claudo-core --example suggestion_probe
 
 use std::time::Duration;
@@ -56,6 +56,25 @@ fn main() {
             check(suggested.is_none(), "one off screen ends with none");
         }
     }
+
+    backend.handle(Command::OnScreen {
+        conversation_ids: vec![shown, hidden.clone()],
+    });
+    let before = children();
+    backend.handle(send(
+        &hidden,
+        "Also write bye.py that prints bye, but do not run it yet.",
+    ));
+    let suggested = after_turn(&mut rx, &tx);
+    let replaced = children()
+        .into_iter()
+        .any(|(pid, args)| !before.iter().any(|(old, _)| *old == pid) && args.contains("--resume"));
+    check(
+        replaced,
+        "brought on screen, its next message starts an agent that suggests",
+    );
+    // The CLI drops a guess it finds too long or unsure, so none is no failure here.
+    println!("  suggested {suggested:?}");
     std::process::exit(i32::from(failed));
 }
 
@@ -84,6 +103,26 @@ fn after_turn(
         }
     }
     None
+}
+
+/// This process's children, with their command lines.
+fn children() -> Vec<(u32, String)> {
+    let tasks = std::fs::read_dir("/proc/self/task")
+        .into_iter()
+        .flatten()
+        .flatten();
+    tasks
+        .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+        .flat_map(|pids| {
+            pids.split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .collect::<Vec<u32>>()
+        })
+        .map(|pid| {
+            let args = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            (pid, String::from_utf8_lossy(&args).replace('\0', " "))
+        })
+        .collect()
 }
 
 fn send(id: &str, text: &str) -> Command {

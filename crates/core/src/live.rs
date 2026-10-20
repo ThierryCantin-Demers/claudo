@@ -168,7 +168,8 @@ pub struct LiveSessions {
 
 /// Guessing the next message costs a request over the whole conversation, so only
 /// conversations on screen get one, and none while the setting is off. The CLI reads it
-/// once, as a process starts; pausing one later is not honored yet.
+/// once, as a process starts, and ignores pausing one for now, so a message replaces an
+/// idle process that guesses otherwise.
 #[derive(Default)]
 struct Suggestions {
     enabled: bool,
@@ -257,6 +258,7 @@ impl LiveSessions {
         always: &[String],
         message: UserMessage,
     ) -> Result<Receiver<EngineEvent>, SendError> {
+        let suggest = !self.suggestions.lock().unwrap().paused(conversation_id);
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(conversation_id)
             && session.is_alive()
@@ -265,7 +267,7 @@ impl LiveSessions {
             // A process running something in the background keeps its flags too: replacing
             // it would leave that running where nothing reports on it.
             let busy = session.is_busy() || session.has_background();
-            if (busy || *session.config() == config)
+            if (busy || (*session.config() == config && session.suggests() == suggest))
                 && let Ok(turn) = session.send(message)
             {
                 return Ok(turn);
@@ -287,7 +289,6 @@ impl LiveSessions {
             .map_err(|_| SendError::Occupied)?
             .held(conversation_id);
         let incoming = self.incoming_for(conversation_id);
-        let suggest = !self.suggestions.lock().unwrap().paused(conversation_id);
         let mut session = Session::spawn_holding(config, resume, name, incoming, held, suggest)
             .map_err(|e| SendError::Failed(format!("failed to launch `{}`: {e}", claude_bin())))?;
         for scope in always {

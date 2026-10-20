@@ -306,6 +306,8 @@ pub struct Held {
 /// process finish a running turn and then exit.
 pub struct Session {
     config: SessionConfig,
+    /// Its turns end with a guess at the next message.
+    suggest: bool,
     shared: Arc<Shared>,
 }
 
@@ -449,6 +451,8 @@ pub struct SessionState {
     following: Vec<(String, String)>,
     #[serde(default)]
     idle: Option<PathBuf>,
+    #[serde(default)]
+    suggest: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,6 +602,7 @@ impl Session {
             last_request: 0,
             following: Vec::new(),
             idle,
+            suggest,
         };
         let (session, ..) = Self::start(state, files, incoming);
         // Without it the process joins the other agents only once its first turn ends.
@@ -714,6 +719,7 @@ impl Session {
         });
         let session = Self {
             config: state.config,
+            suggest: state.suggest,
             shared,
         };
         let adopted = Adopted {
@@ -764,6 +770,7 @@ impl Session {
                 .map(|(task, (session, _))| (task.clone(), session.clone()))
                 .collect(),
             idle: self.shared.idle.clone(),
+            suggest: self.suggest,
         };
         drop(turns);
         Some((Paused { _reading: reading }, state))
@@ -895,6 +902,10 @@ impl Session {
 
     pub fn config(&self) -> &SessionConfig {
         &self.config
+    }
+
+    pub fn suggests(&self) -> bool {
+        self.suggest
     }
 
     pub fn pid(&self) -> u32 {
