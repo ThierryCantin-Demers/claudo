@@ -206,7 +206,7 @@ subagent writes `<session-id>/subagents/agent-<id>.jsonl`, beside an `agent-<id>
 whose `toolUseId` names the Agent call, and the loader places its calls after that call.
 
 **A forked slash command streams nothing while it runs.** A skill with `context: fork`, such
-as `/code-review`, starts with `system` / `task_started` (`task_type: "local_agent"`, no
+as `/code-review` in an older process (see below), starts with `system` / `task_started` (`task_type: "local_agent"`, no
 `tool_use_id`) and ends with `task_notification`; only then does the CLI replay the
 subagent's messages (`parent_tool_use_id: "forked-command-<name>"`), send the turn's `init`
 and its `result`. The subagent writes its transcript live to
@@ -214,11 +214,23 @@ and its `result`. The subagent writes its transcript live to
 the meantime, dropping the replayed ones by call id. The main transcript keeps only the
 prompt and a `system` / `local_command` line with the result.
 
-`/code-review`'s subagent answers with a JSON array of findings, which the CLI writes into
-its result as markdown: `13 findings, most severe first:`, then items like
-``1. `src/a.rs:12`: summary``, each with `Failure scenario: ...` indented under it, and any
-text the reviewer wrote before. `cli::review` reads that list back into a `Review`, live and
-from the transcript; text it cannot read stays a plain reply.
+**Code reviews.** Every process starts with `CLAUDE_CODE_REPORT_FINDINGS=1`, which is not
+documented. With it, `/code-review` runs in the conversation rather than forked, and hands
+its findings over in a `ReportFindings` call: each with `short_summary` (at most 60
+characters), `category` (`correctness`, `reuse`, `test-coverage`, ...; a low effort review
+gives none) and `verdict` (`CONFIRMED`, `PLAUSIBLE`), and `outcome` when reported again
+after `--fix`. The CLI refuses a call that breaks the schema, such as a longer title, and the
+reviewer calls again, so `cli::reported_review` becomes a `Review` only once its result is
+not an error, live and from the transcript, and the call itself is never shown. A
+`correctness` or `security` finding is a bug, which COSMIC lists first.
+`examples/review_probe` checks it.
+
+Without the variable, as in a process an older build started, the forked subagent answers
+with a JSON array of findings, which the CLI writes into its result as markdown:
+`13 findings, most severe first:`, then items like ``1. `src/a.rs:12`: summary``, each with
+`Failure scenario: ...` indented under it, and any text the reviewer wrote before; it drops
+every field but the file, line, summary and failure scenario. `cli::review` reads that list
+back into a `Review`, live and from the transcript; text it cannot read stays a plain reply.
 
 **Approvals go through the control protocol on stdin.** Each process starts with
 `--settings '{"permissions":{"ask":[...]}}'` (the `ASK_RULES` in `cli.rs`: `gh pr create`,

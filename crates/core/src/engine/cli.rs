@@ -253,6 +253,8 @@ pub enum EngineEvent {
     Suggested {
         text: String,
     },
+    /// A code review's findings, reported in the middle of its turn.
+    Review(Review),
 }
 
 /// The flags a `claude` process starts with. They hold for its whole life, so a
@@ -363,6 +365,9 @@ struct Reading {
     last_request: u64,
     /// Forked commands' subagents followed, by task: their session, and what stops it.
     following: HashMap<String, (String, Arc<AtomicBool>)>,
+    /// Reviews reported by call, held until the CLI accepts the call: it refuses one
+    /// whose input breaks its schema, and the reviewer then reports again.
+    reported: HashMap<String, Review>,
     /// The output ended, so the process is done and nothing is handed over.
     closed: bool,
 }
@@ -397,6 +402,35 @@ struct Queued {
 pub struct Sent {
     pub text: String,
     pub attachments: Vec<Attachment>,
+}
+
+impl Reading {
+    /// The event to pass on in place of `ev`, which holds a reported review back until the
+    /// CLI accepts its call, and drops the call itself.
+    fn report(&mut self, ev: EngineEvent) -> Option<EngineEvent> {
+        match ev {
+            EngineEvent::ToolStarted(call) => match reported_review(&call) {
+                Some(review) => {
+                    self.reported.insert(call.call_id, review);
+                    None
+                }
+                None => Some(EngineEvent::ToolStarted(call)),
+            },
+            EngineEvent::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => match self.reported.remove(&call_id) {
+                Some(review) => (!is_error).then_some(EngineEvent::Review(review)),
+                None => Some(EngineEvent::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                }),
+            },
+            ev => Some(ev),
+        }
+    }
 }
 
 impl Turns {
@@ -449,6 +483,8 @@ pub struct SessionState {
     last_request: u64,
     /// Subagents followed: their task, then their session.
     following: Vec<(String, String)>,
+    #[serde(default)]
+    reported: HashMap<String, Review>,
     #[serde(default)]
     idle: Option<PathBuf>,
     #[serde(default)]
@@ -541,6 +577,9 @@ impl Session {
         }
         cmd.current_dir(&config.cwd)
             .env("CLAUDE_CODE_SESSION_NAME", name)
+            // `/code-review` then runs in the conversation and hands its findings over with
+            // `ReportFindings`, titled and categorized, instead of a forked agent's text.
+            .env("CLAUDE_CODE_REPORT_FINDINGS", "1")
             // What a handover tells the process replacing this one is not the agent's.
             .env_remove(crate::handover::FILE_VAR)
             .env_remove(crate::handover::KEPT_VAR)
@@ -606,6 +645,7 @@ impl Session {
             notices: Vec::new(),
             last_request: 0,
             following: Vec::new(),
+            reported: HashMap::new(),
             idle,
             suggest,
         };
@@ -700,6 +740,7 @@ impl Session {
                 notices: state.notices,
                 last_request: state.last_request,
                 following: HashMap::new(),
+                reported: state.reported,
                 closed: false,
             }),
             idle: state.idle,
@@ -774,6 +815,7 @@ impl Session {
                 .iter()
                 .map(|(task, (session, _))| (task.clone(), session.clone()))
                 .collect(),
+            reported: reading.reported.clone(),
             idle: self.shared.idle.clone(),
             suggest: self.suggest,
         };
@@ -1127,6 +1169,10 @@ impl Shared {
                 && !self.first_shown(&call.call_id)
             {
                 continue;
+            }
+            match reading.report(ev) {
+                Some(reported) => ev = reported,
+                None => continue,
             }
             if let EngineEvent::Completed { context, .. } = &mut ev {
                 context.used = std::mem::take(&mut reading.last_request);
@@ -1707,6 +1753,44 @@ fn finding(item: &str) -> Option<Finding> {
         line,
         summary: summary.to_string(),
         failure_scenario,
+        ..Finding::default()
+    })
+}
+
+/// The review a `ReportFindings` call hands over. A subagent's is an ordinary call.
+pub(crate) fn reported_review(call: &ToolCall) -> Option<Review> {
+    if call.name != "ReportFindings" || call.parent.is_some() {
+        return None;
+    }
+    let input = serde_json::from_str::<Value>(&call.input).ok()?;
+    let findings = input
+        .get("findings")?
+        .as_array()?
+        .iter()
+        .map(|finding| {
+            let field = |key| finding.get(key).and_then(Value::as_str);
+            let category = field("category");
+            Some(Finding {
+                file: field("file")?.to_string(),
+                line: match finding.get("line") {
+                    Some(Value::Number(line)) => Some(line.to_string()),
+                    Some(Value::String(line)) => Some(line.clone()),
+                    _ => None,
+                },
+                summary: field("summary")?.to_string(),
+                failure_scenario: field("failure_scenario").map(str::to_owned),
+                title: field("short_summary").map(str::to_owned),
+                category: category.map(str::to_owned),
+                bug: matches!(category, Some("correctness" | "security")),
+                confirmed: field("verdict").map(|verdict| verdict == "CONFIRMED"),
+                outcome: field("outcome").map(|outcome| outcome.replace('_', " ")),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Review {
+        preface: String::new(),
+        findings,
+        afterword: String::new(),
     })
 }
 
@@ -2063,12 +2147,14 @@ mod tests {
                     line: Some("480".to_string()),
                     summary: "A lost device tunes `k`\nagain on every launch.".to_string(),
                     failure_scenario: Some("One GPU:\n\nevery key tunes again.".to_string()),
+                    ..Finding::default()
                 },
                 Finding {
                     file: "README.md".to_string(),
                     line: None,
                     summary: "A stale line.".to_string(),
                     failure_scenario: None,
+                    ..Finding::default()
                 },
             ]
         );
@@ -2152,6 +2238,66 @@ mod tests {
             attachment(&attachment_block(&image)).unwrap().media_type,
             "image/png"
         );
+    }
+
+    #[test]
+    fn a_reported_review_comes_once_the_cli_accepts_its_call() {
+        let report = |id: &str, parent: &str, title: &str| {
+            line(&format!(
+                r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"content":[{{"type":"tool_use","id":"{id}","name":"ReportFindings","input":{{"level":"high","findings":[
+                    {{"file":"a.rs","line":3,"summary":"Off by one.","short_summary":"{title}","failure_scenario":"Always.","category":"correctness","verdict":"PLAUSIBLE"}},
+                    {{"file":"b.rs","summary":"Twice.","failure_scenario":"Never.","category":"reuse","verdict":"CONFIRMED","outcome":"no_change_needed"}}
+                ]}}}}]}}}}"#
+            ))
+        };
+        let result = |id: &str, is_error: bool| {
+            line(&format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","is_error":{is_error},"content":"2 findings reported."}}]}}}}"#
+            ))
+        };
+        let mut reading = Reading::default();
+        let mut passed = |v: &Value| -> Vec<EngineEvent> {
+            decode(v)
+                .into_iter()
+                .filter_map(|ev| reading.report(ev))
+                .collect()
+        };
+
+        assert!(passed(&report("r1", "null", "far too long")).is_empty());
+        assert!(passed(&result("r1", true)).is_empty(), "the CLI refused it");
+        assert!(passed(&report("r2", "null", "Off by one")).is_empty());
+        let events = passed(&result("r2", false));
+        let [EngineEvent::Review(review)] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            review.findings[0],
+            Finding {
+                file: "a.rs".to_string(),
+                line: Some("3".to_string()),
+                summary: "Off by one.".to_string(),
+                failure_scenario: Some("Always.".to_string()),
+                title: Some("Off by one".to_string()),
+                category: Some("correctness".to_string()),
+                bug: true,
+                confirmed: Some(false),
+                outcome: None,
+            }
+        );
+        let second = &review.findings[1];
+        assert_eq!(
+            (second.bug, second.confirmed, second.outcome.as_deref()),
+            (false, Some(true), Some("no change needed"))
+        );
+
+        assert!(
+            matches!(&passed(&report("r3", r#""t9""#, "x"))[..], [EngineEvent::ToolStarted(call)] if call.name == "ReportFindings"),
+            "a subagent's is an ordinary call"
+        );
+        assert!(matches!(
+            &passed(&result("r3", false))[..],
+            [EngineEvent::ToolResult { .. }]
+        ));
     }
 
     #[test]

@@ -1255,6 +1255,7 @@ fn review_card(ui: &mut egui::Ui, cache: &mut CommonMarkCache, idx: usize, revie
     }
     let count = review.findings.len();
     ui.weak(match count {
+        0 => "No findings".to_string(),
         1 => "1 finding".to_string(),
         n => format!("{n} findings, most severe first"),
     });
@@ -1264,18 +1265,46 @@ fn review_card(ui: &mut egui::Ui, cache: &mut CommonMarkCache, idx: usize, revie
             Some(line) => format!("{}:{line}", finding.file),
             None => finding.file.clone(),
         };
-        ui.horizontal(|ui| {
-            ui.strong(format!("{}.", n + 1));
-            ui.label(egui::RichText::new(place).monospace().weak());
-        });
-        CommonMarkViewer::new().show(ui, cache, &finding.summary);
-        if let Some(scenario) = &finding.failure_scenario {
-            egui::CollapsingHeader::new(egui::RichText::new("Failure scenario").weak())
-                .id_salt(("finding", idx, n))
-                .show(ui, |ui| {
-                    CommonMarkViewer::new().show(ui, cache, scenario);
+        let Some(title) = &finding.title else {
+            ui.horizontal(|ui| {
+                ui.strong(format!("{}.", n + 1));
+                ui.label(egui::RichText::new(place).monospace().weak());
+            });
+            CommonMarkViewer::new().show(ui, cache, &finding.summary);
+            if let Some(scenario) = &finding.failure_scenario {
+                egui::CollapsingHeader::new(egui::RichText::new("Failure scenario").weak())
+                    .id_salt(("finding", idx, n))
+                    .show(ui, |ui| {
+                        CommonMarkViewer::new().show(ui, cache, scenario);
+                    });
+            }
+            continue;
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("{}. {title}", n + 1));
+            if let Some(category) = &finding.category {
+                let category = egui::RichText::new(category).small();
+                ui.label(if finding.bug {
+                    category.color(RED)
+                } else {
+                    category.weak()
                 });
-        }
+            }
+            if finding.confirmed == Some(false) {
+                ui.label(egui::RichText::new("unconfirmed").small().weak());
+            }
+            if let Some(outcome) = &finding.outcome {
+                ui.label(egui::RichText::new(outcome).small().weak());
+            }
+        });
+        egui::CollapsingHeader::new(egui::RichText::new(place).monospace().weak())
+            .id_salt(("finding", idx, n))
+            .show(ui, |ui| {
+                CommonMarkViewer::new().show(ui, cache, &finding.summary);
+                if let Some(scenario) = &finding.failure_scenario {
+                    ui.weak(scenario);
+                }
+            });
     }
     if !review.afterword.is_empty() {
         ui.add_space(6.0);

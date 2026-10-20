@@ -20,8 +20,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::engine::cli::{
-    attachment, backgrounded, command_echo, command_output, compaction, incoming, review,
-    task_notification, tool_call, unix_millis,
+    attachment, backgrounded, command_echo, command_output, compaction, incoming, reported_review,
+    review, task_notification, tool_call, unix_millis,
 };
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
@@ -480,7 +480,23 @@ pub fn load_transcript(session_id: &str) -> (Vec<Item>, Option<String>) {
     };
     let (items, title) = parse_transcript(&path);
     let subagents = path.with_extension("").join("subagents");
-    (with_subagents(items, &subagents), title)
+    (with_subagents(with_reviews(items), &subagents), title)
+}
+
+/// Code reviews reported with a call in place of the call, without those the CLI refused.
+fn with_reviews(items: Vec<Item>) -> Vec<Item> {
+    items
+        .into_iter()
+        .filter_map(|item| match item {
+            Item::Tool(call) => match reported_review(&call) {
+                Some(review) => {
+                    (call.result.is_some() && !call.is_error).then_some(Item::Review(review))
+                }
+                None => Some(Item::Tool(call)),
+            },
+            item => Some(item),
+        })
+        .collect()
 }
 
 /// The calls subagents made, read from their own transcripts in `dir`, each after the call
@@ -1096,6 +1112,42 @@ mod tests {
             matches!(items[3], Item::Ended(_)),
             "between the first turn and the second"
         );
+    }
+
+    #[test]
+    fn a_reported_review_takes_its_calls_place_and_a_refused_one_is_dropped() {
+        let report = |id: &str| {
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "content": [{ "type": "tool_use", "id": id, "name": "ReportFindings", "input": {
+                    "findings": [{ "file": "a.rs", "line": 3, "summary": "Off by one.", "short_summary": "Off by one", "failure_scenario": "Always.", "category": "correctness" }],
+                } }] },
+            })
+        };
+        let result = |id: &str, is_error: bool| {
+            serde_json::json!({
+                "type": "user",
+                "message": { "content": [{ "type": "tool_result", "tool_use_id": id, "is_error": is_error, "content": "1 finding reported." }] },
+            })
+        };
+        let transcript = [
+            report("r1"),
+            result("r1", true),
+            report("r2"),
+            result("r2", false),
+        ]
+        .map(line)
+        .concat();
+        let path = std::env::temp_dir().join(format!("claudo-reported-{}.jsonl", Uuid::new_v4()));
+        fs::write(&path, transcript).unwrap();
+        let (items, _) = parse_transcript(&path);
+        let _ = fs::remove_file(&path);
+        let items = with_reviews(items);
+        let [Item::Review(review)] = &items[..] else {
+            panic!("{items:?}");
+        };
+        assert_eq!(review.findings[0].title.as_deref(), Some("Off by one"));
+        assert!(review.findings[0].bug);
     }
 
     #[test]

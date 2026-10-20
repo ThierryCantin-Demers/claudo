@@ -66,6 +66,9 @@ fn turn(
             EngineEvent::Incoming { from, text } => println!("  [from {from}: {text}]"),
             EngineEvent::Notice { text } => println!("  [{text}]"),
             EngineEvent::Suggested { text } => println!("  [suggested: {text}]"),
+            EngineEvent::Review(review) => {
+                println!("  [review: {} findings]", review.findings.len())
+            }
             EngineEvent::ApprovalNeeded { call, .. } => {
                 println!("  [needs approval: {}]", call.summary)
             }

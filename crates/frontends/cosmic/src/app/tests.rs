@@ -2106,6 +2106,7 @@ fn reviewed() -> ClaudoApp {
             line: line.map(str::to_string),
             summary: summary.to_string(),
             failure_scenario: scenario.map(str::to_string),
+            ..claudo_protocol::Finding::default()
         }
     };
     let review = claudo_protocol::Review {
@@ -2177,6 +2178,119 @@ fn a_review_lists_its_findings_and_unfolds_their_scenarios() {
             && unfolded.contains("Two candidate lists"),
         "{unfolded:?}"
     );
+}
+
+/// A review reported with titles: a clean-up ranked above the bug.
+fn reported() -> ClaudoApp {
+    let mut app = two_tiles();
+    let finding = |file: &str, title: &str, category: &str, summary: &str, scenario: &str| {
+        claudo_protocol::Finding {
+            file: file.to_string(),
+            line: Some("12".to_string()),
+            summary: summary.to_string(),
+            failure_scenario: Some(scenario.to_string()),
+            title: Some(title.to_string()),
+            category: Some(category.to_string()),
+            bug: category == "correctness",
+            confirmed: Some(true),
+            outcome: None,
+        }
+    };
+    let mut review = claudo_protocol::Review {
+        preface: String::new(),
+        findings: vec![
+            finding(
+                "crates/quant/src/scheme.rs",
+                "Rejection guard copied across six sites",
+                "reuse",
+                "The two-level rejection guard is pasted at six call sites and two have drifted.",
+                "A new scheme allowed at one site is still refused at the other five.",
+            ),
+            finding(
+                "crates/gemv/src/base.rs",
+                "ue4m3 dispatch skips scale_dtype",
+                "correctness",
+                "`gemv_quantized_supported` never checks `scheme.scale_dtype()`.",
+                "A ue4m3 tensor reaches the f32 kernel and decodes garbage.",
+            ),
+            finding(
+                "crates/gemv/tests/two_level.rs",
+                "Two-level gemv untested on wgpu",
+                "test-coverage",
+                "Only CUDA runs the two-level tests.",
+                "A wgpu regression ships unnoticed.",
+            ),
+        ],
+        afterword: String::new(),
+    };
+    review.findings[1].confirmed = Some(false);
+    let view = app.views.get_mut(ALPHA).expect("a view");
+    view.items
+        .push(Entry::User("/code-review high".to_string()));
+    view.items
+        .push(Entry::Review(Box::new(review::Shown::new(review))));
+    app
+}
+
+#[test]
+fn a_reviews_bugs_come_first_one_line_each_with_the_rest_folded() {
+    let mut h = Harness::new(reported());
+    let idx = h.app.views[ALPHA].items.len() - 1;
+    let whole = Message::SelectRange(
+        ALPHA.to_string(),
+        Mark {
+            block: (idx, 0),
+            offset: 0,
+        },
+        Mark {
+            block: (idx + 1, 0),
+            offset: 0,
+        },
+    );
+    let _ = h.app.update(whole.clone());
+    let folded = h.selected();
+    assert!(
+        folded.starts_with(
+            "2. ue4m3 dispatch skips scale_dtype\n\ncrates/gemv/src/base.rs:12\n\n\
+             1. Rejection guard copied across six sites"
+        ),
+        "the bug first, keeping its rank: {folded:?}"
+    );
+    assert!(!folded.contains("never checks"), "{folded:?}");
+
+    let shown = shown_texts(&mut h);
+    let at = |text: &str| shown.iter().position(|shown| shown == text);
+    assert!(at("Bugs") < at("Other findings"), "{shown:?}");
+    for tag in ["correctness", "unconfirmed", "reuse", "test-coverage"] {
+        assert!(at(tag).is_some(), "{tag} in {shown:?}");
+    }
+    assert!(at("confirmed").is_none(), "only the unconfirmed are marked");
+
+    let _ = h
+        .app
+        .update(Message::ToggleFinding(ALPHA.to_string(), idx, Some(1)));
+    let _ = h.app.update(whole);
+    let unfolded = h.selected();
+    assert!(
+        unfolded.contains(
+            "never checks scheme.scale_dtype().\n\nA ue4m3 tensor reaches the f32 kernel"
+        ) && !unfolded.contains("pasted at six"),
+        "{unfolded:?}"
+    );
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn reported_review_snapshot() {
+    let mut app = reported();
+    app.layout_mut().tiles.truncate(1);
+    let mut h = Harness::new(app);
+    h.snapshot("reported-review");
+    let idx = h.app.views[ALPHA].items.len() - 1;
+    let _ = h
+        .app
+        .update(Message::ToggleFinding(ALPHA.to_string(), idx, Some(1)));
+    h.snapshot("reported-review-one-open");
 }
 
 #[test]

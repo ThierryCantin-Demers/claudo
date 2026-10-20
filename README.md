@@ -51,7 +51,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - COSMIC: send a message while Claude works. It waits under the reply and reaches Claude at its next step, as in the terminal, or starts the next turn if Claude is already finishing.
 - COSMIC: tool calls made one after another fold into one row ("6 calls · Bash ×6"), which opens to each call; while it runs, its newest call shows below it.
-- Code reviews (`/code-review`) show as a list of findings, each with its rank, file and line and what is wrong, its failure scenario folded under it.
+- Code reviews (`/code-review`) show as a list of findings, each on two lines: its rank, a short title, its category and whether it went unconfirmed, then its file and line, with what is wrong and its failure scenario folded under it. Bugs come first, each keeping the reviewer's rank.
 - COSMIC: links open in the browser, whether written as markdown or as a bare address, in replies, your own messages and tool output.
 - COSMIC: one claudo at a time. Launching it again while it runs opens a new window with a new chat in the running one.
 - Never two agents on one conversation: a message to one whose agent another claudo runs, or a killed claudo left running, waits for it to finish; COSMIC says which process it waits on, whether it is working or idle, and offers to stop it.

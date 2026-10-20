@@ -881,6 +881,10 @@ impl Forward {
                 });
                 self.emit(conversations_event(&self.store));
             }
+            EngineEvent::Review(review) => self.emit(ServerEvent::Review {
+                conversation_id,
+                review,
+            }),
             EngineEvent::Suggested { text } => {
                 crate::debug::log(&conversation_id, format!("suggested {text:?}"));
                 self.emit(ServerEvent::Suggested {

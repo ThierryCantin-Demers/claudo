@@ -274,7 +274,7 @@ pub struct Review {
     pub afterword: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     /// Relative to the repository reviewed.
     pub file: String,
@@ -284,6 +284,21 @@ pub struct Finding {
     pub summary: String,
     /// The inputs or state that make it go wrong, as markdown.
     pub failure_scenario: Option<String>,
+    /// The claim alone, in at most 60 characters.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Such as `correctness`, `reuse` or `test-coverage`.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// The code does the wrong thing, rather than could be simpler or better tested.
+    #[serde(default)]
+    pub bug: bool,
+    /// `Some(false)` when checking it could not confirm it; `None` when it was not checked.
+    #[serde(default)]
+    pub confirmed: Option<bool>,
+    /// What applying it did, such as "fixed" or "skipped".
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -592,7 +607,7 @@ pub enum ServerEvent {
         conversation_id: ConversationId,
         text: String,
     },
-    /// A code review's findings, in place of the text that lists them.
+    /// A code review's findings, in place of the text or the call that reports them.
     Review {
         conversation_id: ConversationId,
         review: Review,
