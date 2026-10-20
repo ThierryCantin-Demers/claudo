@@ -3345,13 +3345,19 @@ mod app {
                 widget::text("Attach files, or paste an image"),
                 widget::tooltip::Position::Top,
             );
+            // The folder choice's dropdown wraps a long label, a letter per line in a narrow
+            // tile, rather than shorten it, so it gets a line of its own.
+            let folder = self.folder_row(id, view);
+            let (folder, own_line) = match view.choosing_folder() {
+                true => (None, folder),
+                false => (folder, None),
+            };
             let controls = widget::Row::with_children(
                 [
                     attach.into(),
                     small(profile).into(),
                     small(effort).into(),
-                    self.folder_row(id, view)
-                        .unwrap_or_else(|| widget::space::horizontal().into()),
+                    folder.unwrap_or_else(|| widget::space::horizontal().into()),
                     small(model).into(),
                 ]
                 .into_iter()
@@ -3373,6 +3379,7 @@ mod app {
                     std::iter::once(editor.into())
                         .chain(attach::pending(id, &view.attachments, size, self.zoom))
                         .chain([controls.into()])
+                        .chain(own_line)
                         .collect::<Vec<_>>(),
                 )
                 .spacing(if compact { 6 } else { 10 }),

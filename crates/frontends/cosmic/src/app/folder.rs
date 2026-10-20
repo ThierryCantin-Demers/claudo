@@ -14,6 +14,13 @@ pub enum Choice {
     Pick,
 }
 
+impl ConversationView {
+    /// Its folder can still be chosen: nothing was sent yet.
+    pub(super) fn choosing_folder(&self) -> bool {
+        self.items.is_empty() && !self.streaming
+    }
+}
+
 impl ClaudoApp {
     pub(super) fn folder_row<'a>(
         &'a self,
@@ -23,7 +30,7 @@ impl ClaudoApp {
         let info = self.info(id)?;
         let size = 13.0 * self.zoom;
         let current = info.attached.then_some(info.cwd.as_str());
-        let content: Element<Message> = if view.items.is_empty() && !view.streaming {
+        let content: Element<Message> = if view.choosing_folder() {
             let choices = choices(&self.folders, current);
             let labels: Vec<String> = choices.iter().map(label).collect();
             let selected = choices.iter().position(|choice| match (choice, current) {

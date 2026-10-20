@@ -2283,6 +2283,28 @@ fn a_reviews_bugs_come_first_one_line_each_with_the_rest_folded() {
     );
 }
 
+/// Bravo, a new conversation in a long-named folder, in a tile `share` of Alpha's wide.
+fn new_conversation(share: f32) -> ClaudoApp {
+    let mut app = two_tiles();
+    app.views.get_mut(BRAVO).unwrap().items.clear();
+    app.layout_mut().tiles[1].share = share;
+    let bravo = app
+        .conversations
+        .iter_mut()
+        .find(|c| c.id == BRAVO)
+        .unwrap();
+    bravo.attached = true;
+    bravo.cwd = "/home/someone/prog/claude-native-client".to_string();
+    app
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn new_conversation_snapshot() {
+    Harness::new(new_conversation(0.5)).snapshot("new-conversation-narrow");
+    Harness::new(new_conversation(1.2)).snapshot("new-conversation-wide");
+}
+
 #[test]
 #[ignore = "writes images; run with --ignored"]
 fn reported_review_snapshot() {
