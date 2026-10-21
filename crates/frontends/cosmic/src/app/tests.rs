@@ -3585,3 +3585,31 @@ fn remote_chip_snapshot() {
         "remote-chip-lost",
     );
 }
+
+#[test]
+fn the_sidebar_marks_an_agent_working_only_in_the_background() {
+    let mut app = with_commands();
+    assert!(
+        app.badge(&app.views[ALPHA], 13.0).is_some(),
+        "its turn runs"
+    );
+    app.views.get_mut(ALPHA).unwrap().streaming = false;
+    assert_eq!(
+        app.views[ALPHA].in_background().as_deref(),
+        Some("Running 1 command in the background")
+    );
+    assert!(
+        app.badge(&app.views[ALPHA], 13.0).is_some(),
+        "its turn ended, but a command it started still runs"
+    );
+    assert!(app.badge(&app.views[BRAVO], 13.0).is_none(), "nothing runs");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn background_badge_snapshot() {
+    let mut app = with_commands();
+    app.views.get_mut(ALPHA).unwrap().streaming = false;
+    app.views.get_mut(BRAVO).unwrap().streaming = true;
+    Harness::new(app).snapshot("background-badge");
+}

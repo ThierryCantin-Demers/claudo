@@ -97,8 +97,9 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 | Scroll a conversation | Scrolled up, a round button at the bottom takes you back down; PageUp/PageDown by a page; Home/End to the top or bottom, or Ctrl+Home/End while the message box holds text; a middle click scrolls toward the pointer, faster the farther it goes, until the next click or until you let go after moving |
 
 A conversation is in at most one tile. Closing a tile does not stop its agent: the sidebar
-shows pulsing dots beside each agent still working, and an Approve badge beside one waiting
-for your answer.
+shows pulsing dots beside each agent still working, an Approve badge beside one waiting
+for your answer, and a terminal with a count beside one whose turn ended but whose
+commands or subagents still run in the background (hover it for what).
 
 ### From another computer (COSMIC)
 

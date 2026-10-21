@@ -2928,11 +2928,35 @@ mod app {
         }
 
         /// Marks a conversation an agent is working in, so it shows wherever its tile is.
+        /// An approval waiting, a turn running, or else work going on in the background, which
+        /// starts a turn of its own once it ends.
         fn badge(&self, view: &ConversationView, size: f32) -> Option<Element<'_, Message>> {
             if !view.approvals.is_empty() {
                 return Some(pill("Approve", size * 0.8));
             }
-            view.streaming.then(|| pulse_dots(self.pulse, size))
+            if view.streaming {
+                return Some(pulse_dots(self.pulse, size));
+            }
+            let running = view.in_background()?;
+            let accent: Color = cosmic::theme::active().cosmic().accent_text_color().into();
+            Some(
+                widget::tooltip(
+                    widget::Row::with_children(vec![
+                        widget::icon::from_name("utilities-terminal-symbolic")
+                            .size((size * 0.9) as u16)
+                            .into(),
+                        widget::text(view.running_commands().to_string())
+                            .size(size * 0.8)
+                            .class(cosmic::theme::Text::Color(accent))
+                            .into(),
+                    ])
+                    .spacing(3)
+                    .align_y(Alignment::Center),
+                    widget::text(running),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into(),
+            )
         }
 
         /// The tiles side by side, sharing the width until each reaches `TILE_MIN`.
