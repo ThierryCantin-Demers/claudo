@@ -46,7 +46,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 ## Features
 
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.
-- Send images, PDFs and text files with a message: COSMIC pastes an image from the clipboard with Ctrl+V and picks files with the paperclip, and keeps the files of an unsent message across restarts like its text; egui picks files with Attach.
+- Send images, PDFs and text files with a message: COSMIC pastes an image from the clipboard with Ctrl+V, picks files with the paperclip, and takes files dropped from a file manager on a conversation's tile (as a copy, never a move), and keeps the files of an unsent message across restarts like its text; egui picks files with Attach. Click an image, sent or waiting, to open it over the window: the scroll wheel zooms around the cursor, a drag moves it, Escape closes it.
 - Continue a session started in Claude Desktop or a terminal (COSMIC: right-click New chat, Continue a session; egui: Sessions…). Its first message forks it, so the original stays as it was.
 - Streaming replies you can stop, with Claude's thinking and tool calls shown as collapsible rows.
 - COSMIC: send a message while Claude works. It waits under the reply and reaches Claude at its next step, as in the terminal, or starts the next turn if Claude is already finishing.

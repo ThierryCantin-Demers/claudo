@@ -657,6 +657,10 @@ mod app {
         drag: Option<Drag>,
         /// Where a tile dragged from another window would land, from the tile row's left.
         drop_at: Option<f32>,
+        /// What is dragged over the tile row is files, for the tile under it.
+        drop_files: bool,
+        /// An image opened over the window.
+        viewing: Option<attach::Viewed>,
         /// The window exists; until then it cannot take a blur.
         opened: bool,
         /// The workspace it was last seen on, to go back to after a restart.
@@ -676,6 +680,8 @@ mod app {
                 size: None,
                 drag: None,
                 drop_at: None,
+                drop_files: false,
+                viewing: None,
                 opened: false,
                 spot: None,
             }
@@ -755,6 +761,8 @@ mod app {
         compact: bool,
         /// Being dragged; it shows where it would land.
         lifted: bool,
+        /// Files dragged over it would be attached to its message.
+        receiving: bool,
         /// Its width, as far as the window's size tells.
         pixels: f32,
     }
@@ -1150,8 +1158,16 @@ mod app {
         /// The tile that left was dropped outside every window.
         TileDroppedOutside(ConversationId),
         /// A tile from another window hovers this window's tiles, at this x.
+        /// Files dragged over the tile row, at `x`.
+        FilesOver(f32),
         DropHover(f32),
         DropLeave,
+        /// Files dropped on the tile row at `x`.
+        FilesDropped(Vec<std::path::PathBuf>, f32),
+        /// Open an image over the window, or with `None` close it.
+        ViewImage(Option<attach::Viewed>),
+        /// Escape: closes what is open over the window.
+        Escape,
         TileDropped {
             conversation: ConversationId,
             x: f32,
@@ -1852,6 +1868,14 @@ mod app {
         /// The centers, from the tile row's left edge, of every tile but `skip` in a row
         /// without it.
         fn centers_without(&self, w: window::Id, skip: usize) -> Vec<f32> {
+            self.spans_without(w, skip)
+                .into_iter()
+                .map(|(start, width)| start + width / 2.0)
+                .collect()
+        }
+
+        /// Where each tile but `skip` starts from the tile row's left, and how wide it is.
+        fn spans_without(&self, w: window::Id, skip: usize) -> Vec<(f32, f32)> {
             let (_, room) = self.tile_room(w);
             let tiles = &self.window(w).tiles;
             let total = self.total_share(w) - tiles.get(skip).map_or(0.0, |t| t.share);
@@ -1863,11 +1887,20 @@ mod app {
                 .filter(|(i, _)| *i != skip)
                 .map(|(_, t)| {
                     let width = room.map_or(self.tile_min(), |room| t.share / total * room);
-                    let center = edge + width / 2.0;
+                    let start = edge;
                     edge += width + HANDLE_WIDTH;
-                    center
+                    (start, width)
                 })
                 .collect()
+        }
+
+        /// The tile at `x` from the tile row's left.
+        fn tile_at(&self, w: window::Id, x: f32) -> usize {
+            let spans = self.spans_without(w, usize::MAX);
+            spans
+                .iter()
+                .position(|(start, width)| x < start + width + HANDLE_WIDTH)
+                .unwrap_or(spans.len().saturating_sub(1))
         }
 
         fn start_move(&mut self, from: usize) {
@@ -2848,12 +2881,16 @@ mod app {
                 }) => Some((from, at, slot)),
                 _ => None,
             };
-            let landing = layout.drop_at.map(|x| {
+            let landing = layout.drop_at.filter(|_| !layout.drop_files).map(|x| {
                 self.centers_without(w, usize::MAX)
                     .iter()
                     .filter(|c| **c < x)
                     .count()
             });
+            let receiving = layout
+                .drop_at
+                .filter(|_| layout.drop_files)
+                .map(|x| self.tile_at(w, x));
             let width = |share: f32| {
                 if overflow {
                     Length::Fixed(self.tile_min())
@@ -2895,6 +2932,7 @@ mod app {
                     focused: several && i == layout.focused,
                     compact: pixels < COMPACT_TILE,
                     lifted: lifted.is_some_and(|(from, ..)| from == i),
+                    receiving: receiving == Some(i),
                     pixels,
                 };
                 row.push(self.tile(&tile.conversation, view, tile_view, width(tile.share)));
@@ -2940,13 +2978,25 @@ mod app {
                     .on_move(Message::DragTile)
                     .interaction(cosmic::iced::mouse::Interaction::Grabbing);
             }
-            widget::dnd_destination(area, vec![tile_drag::TILE_MIME.into()])
+            let tiles = widget::dnd_destination(area, vec![tile_drag::TILE_MIME.into()])
                 .drag_id(tile_drag::drop_target_id(w))
                 .on_motion(|x, _| Message::DropHover(x as f32))
                 .on_leave(|| Message::DropLeave)
                 .on_finish(|_, data, _, x, _| Message::TileDropped {
                     conversation: String::from_utf8_lossy(&data).into_owned(),
                     x: x as f32,
+                });
+            // A target of its own, since a drag's events name the target and not what it
+            // carries, and one that only copies: a file manager deletes what it moved.
+            widget::dnd_destination(tiles, vec![attach::URI_LIST.into()])
+                .drag_id(attach::drop_target_id(w))
+                .action(cosmic::iced::clipboard::dnd::DndAction::Copy)
+                .preferred_action(cosmic::iced::clipboard::dnd::DndAction::Copy)
+                .on_enter(|x, _, _| Message::FilesOver(x as f32))
+                .on_motion(|x, _| Message::FilesOver(x as f32))
+                .on_leave(|| Message::DropLeave)
+                .on_finish(|_, data, _, x, _| {
+                    Message::FilesDropped(attach::dropped(&data), x as f32)
                 })
                 .into()
         }
@@ -3063,7 +3113,7 @@ mod app {
             let framed = widget::container(named)
                 .width(width)
                 .height(Length::Fill)
-                .class(tile_style(tile.focused, tile.lifted));
+                .class(tile_style(tile.focused, tile.lifted || tile.receiving));
             widget::mouse_area(framed)
                 .on_press(Message::Focus(id.clone()))
                 .into()
@@ -5186,11 +5236,50 @@ mod app {
                     self.layout_mut().drag = None;
                     return self.carry(id, carry::Destination::NewWindow);
                 }
+                Message::FilesOver(x) => {
+                    let start = self.tile_room(self.current).0;
+                    let layout = self.layout_mut();
+                    layout.drop_at = Some(x - start);
+                    layout.drop_files = true;
+                }
                 Message::DropHover(x) => {
                     let start = self.tile_room(self.current).0;
                     self.layout_mut().drop_at = Some(x - start);
                 }
-                Message::DropLeave => self.layout_mut().drop_at = None,
+                Message::DropLeave => {
+                    let layout = self.layout_mut();
+                    layout.drop_at = None;
+                    layout.drop_files = false;
+                }
+                Message::FilesDropped(paths, x) => {
+                    let w = self.current;
+                    let at = self.tile_at(w, x - self.tile_room(w).0);
+                    let layout = self.layout_mut();
+                    layout.drop_at = None;
+                    layout.drop_files = false;
+                    let Some(id) = layout.tiles.get(at).map(|t| t.conversation.clone()) else {
+                        return Task::none();
+                    };
+                    if layout.page == Page::Chat {
+                        layout.focused = at;
+                    }
+                    self.focus_composer = Some(id.clone());
+                    if paths.is_empty() {
+                        if let Some(view) = self.views.get_mut(&id) {
+                            view.error = Some("Only files can be attached".to_string());
+                        }
+                        return Task::none();
+                    }
+                    return cosmic::task::future(async move {
+                        Message::Attach(id, attach::read_all(paths))
+                    });
+                }
+                Message::ViewImage(viewed) => self.layout_mut().viewing = viewed,
+                Message::Escape => {
+                    if self.layout_mut().viewing.take().is_none() {
+                        return self.update(Message::CancelDelete);
+                    }
+                }
                 Message::TileDropped { conversation, x } => {
                     if self
                         .tile_of(&conversation)
@@ -5740,10 +5829,20 @@ mod app {
             let size = layout
                 .size
                 .map_or(Size::INFINITE, |(width, height)| Size::new(width, height));
+            let mut content: Element<Message> = widget::Row::with_children(columns)
+                .height(Length::Fill)
+                .into();
+            if let Some(viewed) = &layout.viewing {
+                content = cosmic::iced::widget::Stack::with_children(vec![
+                    content,
+                    attach::viewer(viewed, 14.0 * self.zoom),
+                ])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+            }
             tile_drag::TearOff {
-                content: widget::Row::with_children(columns)
-                    .height(Length::Fill)
-                    .into(),
+                content,
                 window: w,
                 bounds: size,
                 carried: self.carried(w),
@@ -5873,7 +5972,7 @@ mod app {
             Event::Keyboard(Key::KeyPressed {
                 key: K::Named(Named::Escape),
                 ..
-            }) => Some(Message::CancelDelete),
+            }) => Some(Message::Escape),
             Event::Keyboard(Key::KeyPressed { key, modifiers, .. })
                 if modifiers.alt() && !modifiers.control() =>
             {

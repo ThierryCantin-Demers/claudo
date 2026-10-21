@@ -1127,6 +1127,7 @@ dependencies = [
  "libcosmic",
  "png 0.17.16",
  "serde",
+ "url",
 ]
 
 [[package]]

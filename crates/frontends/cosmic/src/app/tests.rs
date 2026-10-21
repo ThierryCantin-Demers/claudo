@@ -2983,3 +2983,193 @@ fn settings_snapshot() {
     app.layout_mut().page = Page::Settings;
     Harness::new(app).snapshot("settings");
 }
+
+/// A small PNG, a gradient so a snapshot shows it scaled.
+fn picture() -> claudo_protocol::Attachment {
+    let (width, height) = (96u32, 64u32);
+    let pixels: Vec<u8> = (0..height)
+        .flat_map(|y| {
+            (0..width)
+                .flat_map(move |x| [(x * 255 / width) as u8, (y * 255 / height) as u8, 160, 255])
+        })
+        .collect();
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&pixels)
+        .unwrap();
+    claudo_protocol::Attachment::new("screenshot.png".to_string(), "image/png", &bytes)
+}
+
+#[test]
+fn a_file_manager_drop_reads_as_its_files() {
+    let list = b"# from the file manager\r\nfile:///tmp/a%20b.png\r\nhttps://x.io/c.png\r\n\r\n";
+    assert_eq!(
+        attach::dropped(list),
+        [std::path::PathBuf::from("/tmp/a b.png")],
+        "an address that is not a file is left out"
+    );
+}
+
+#[test]
+fn files_dropped_on_a_tile_go_to_its_message() {
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let start = app.tile_room(main).0;
+    let bravo = start + app.spans_without(main, usize::MAX)[1].0 + 20.0;
+    let _ = app.update(Message::In(main, Box::new(Message::FilesOver(bravo))));
+    assert!(app.window(main).drop_files);
+    assert_eq!(app.tile_at(main, app.window(main).drop_at.unwrap()), 1);
+
+    let _ = app.update(Message::In(
+        main,
+        Box::new(Message::FilesDropped(Vec::new(), bravo)),
+    ));
+    assert_eq!(app.window(main).focused, 1, "the tile it landed on");
+    assert!(app.window(main).drop_at.is_none() && !app.window(main).drop_files);
+    assert_eq!(
+        app.views[BRAVO].error.as_deref(),
+        Some("Only files can be attached")
+    );
+
+    let file = std::env::temp_dir().join(format!("claudo-drop-{}.txt", std::process::id()));
+    std::fs::write(&file, "notes").unwrap();
+    let read = attach::read_all([file.clone()]);
+    let _ = std::fs::remove_file(&file);
+    let _ = app.update(Message::Attach(BRAVO.to_string(), read));
+    let attached = &app.views[BRAVO].attachments;
+    assert_eq!(attached.len(), 1);
+    assert_eq!(attached[0].attachment.media_type, "text/plain");
+}
+
+fn with_picture() -> ClaudoApp {
+    let mut app = two_tiles();
+    app.layout_mut().tiles.truncate(1);
+    let view = app.views.get_mut(ALPHA).unwrap();
+    view.items
+        .push(Entry::User("What is wrong in this screenshot?".to_string()));
+    view.items.push(Entry::File(attach::Shown::new(picture())));
+    app
+}
+
+#[test]
+fn a_clicked_image_opens_over_its_window_until_escape() {
+    let mut h = Harness::new(with_picture());
+    let main = h.app.main_window();
+    h.move_to(1150.0, 655.0);
+    let clicked = h.messages(vec![button(true), button(false)]);
+    assert!(
+        clicked.iter().any(|message| matches!(message,
+            Message::In(_, message) if matches!(&**message, Message::ViewImage(Some(_))))),
+        "{clicked:?}"
+    );
+    for message in clicked {
+        let _ = h.app.update(message);
+    }
+    let shown = shown_texts(&mut h);
+    assert!(
+        shown.iter().any(|t| t == "screenshot.png")
+            && shown.iter().any(|t| t == "Scroll to zoom, drag to move"),
+        "{shown:?}"
+    );
+    let sidebar_click = |h: &mut Harness| {
+        h.move_to(37.0, 121.0);
+        h.messages(vec![button(true), button(false)])
+    };
+    assert!(
+        !sidebar_click(&mut Harness::new(with_picture())).is_empty(),
+        "without it, the click opens Bravo"
+    );
+    let under = sidebar_click(&mut h);
+    assert!(under.is_empty(), "the sidebar under it: {under:?}");
+
+    let _ = h.app.update(Message::In(main, Box::new(Message::Escape)));
+    assert!(h.app.window(main).viewing.is_none());
+    assert!(
+        !shown_texts(&mut h)
+            .iter()
+            .any(|t| t == "Scroll to zoom, drag to move")
+    );
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn image_viewer_snapshot() {
+    let mut h = Harness::new(with_picture());
+    h.snapshot("image-in-conversation");
+    let main = h.app.main_window();
+    let shot = picture();
+    let _ = h.app.update(Message::In(
+        main,
+        Box::new(Message::ViewImage(Some(attach::Viewed {
+            name: shot.name.clone(),
+            image: widget::image::Handle::from_bytes(shot.bytes().unwrap()),
+        }))),
+    ));
+    h.snapshot("image-viewer");
+
+    let mut app = two_tiles();
+    let main = app.main_window();
+    let bravo = app.tile_room(main).0 + app.spans_without(main, usize::MAX)[1].0 + 20.0;
+    let _ = app.update(Message::In(main, Box::new(Message::FilesOver(bravo))));
+    Harness::new(app).snapshot("files-dragged-over-a-tile");
+}
+
+#[test]
+fn the_tile_row_takes_dropped_files_only_as_a_copy() {
+    use cosmic::iced::clipboard::dnd::{DndAction, DndEvent, OfferEvent};
+    let mut h = Harness::new(two_tiles());
+    let main = h.app.main_window();
+    let targets = h.frame(|ui, renderer| ui.dnd_rectangles(0, renderer).into_rectangles());
+    let takes = |mime: &str| {
+        targets
+            .iter()
+            .find(|target| target.mime_types.iter().any(|m| m == mime))
+            .unwrap_or_else(|| panic!("a target for {mime}"))
+    };
+    let files = takes(attach::URI_LIST);
+    assert_eq!(
+        (files.actions, files.preferred),
+        (DndAction::Copy, DndAction::Copy),
+        "a file manager deletes what it moved"
+    );
+    assert!(
+        takes(tile_drag::TILE_MIME)
+            .mime_types
+            .iter()
+            .all(|m| m != attach::URI_LIST)
+    );
+
+    let x = f64::from(h.app.tile_room(main).0 + h.app.spans_without(main, usize::MAX)[1].0 + 20.0);
+    let offer = |event| Event::Dnd(DndEvent::Offer(Some(files.id), event));
+    let messages = h.messages(vec![
+        offer(OfferEvent::Motion { x, y: 400.0 }),
+        offer(OfferEvent::Drop),
+        offer(OfferEvent::Data {
+            data: b"file:///tmp/notes.txt\r\n".to_vec(),
+            mime_type: attach::URI_LIST.to_string(),
+        }),
+    ]);
+    let inner: Vec<&Message> = messages
+        .iter()
+        .map(|message| match message {
+            Message::In(_, message) => &**message,
+            message => message,
+        })
+        .collect();
+    assert!(
+        inner.iter().any(|m| matches!(m, Message::FilesOver(_))),
+        "{inner:?}"
+    );
+    assert!(
+        inner
+            .iter()
+            .any(|m| matches!(m, Message::FilesDropped(paths, _)
+            if paths == &[std::path::PathBuf::from("/tmp/notes.txt")])),
+        "{inner:?}"
+    );
+}
