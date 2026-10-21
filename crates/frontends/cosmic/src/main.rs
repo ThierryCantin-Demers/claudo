@@ -4880,7 +4880,7 @@ mod app {
                 quota_at: None,
                 quota_asked: true,
                 quota_error: None,
-                remote: remote::host(),
+                remote: remote::host().map(remote::shown),
                 lost: None,
                 folder_typed: None,
                 minutes: 0,
@@ -5796,6 +5796,7 @@ mod app {
                 self.window_color(main)
                     .map(|color| window_mark(Some(color), 10.0, 10.0)),
             );
+            start.extend(self.remote_chip());
             start.extend(
                 self.header_usage(main)
                     .map(|usage| usage.map(move |message| Message::In(main, Box::new(message)))),
@@ -5834,6 +5835,9 @@ mod app {
                 .start(self.sidebar_toggle(id));
             if let Some(color) = self.window_color(id) {
                 header = header.start(window_mark(Some(color), 10.0, 10.0));
+            }
+            if let Some(chip) = self.remote_chip() {
+                header = header.start(chip);
             }
             if let Some(usage) = self.header_usage(id) {
                 header = header.start(usage);

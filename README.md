@@ -112,7 +112,9 @@ screens see and steer the same agents at once.
    `cargo xtask install --on <host>`, which adds a "Claudo on <host>" launcher. It runs
    `claudo-cosmic --on <host>`.
 
-A message sent from either screen shows on both as it waits and reaches Claude, an approval
+Every header bar there says "On <host>" (a name ending in `.local` shows without it), in
+the warning color while that computer cannot be reached. A message sent from either screen
+shows on both as it waits and reaches Claude, an approval
 answered on one leaves the other, and Update on the second computer restarts only its own
 claudo. While the first computer cannot be reached, a banner says why, messages stay in
 their box, and claudo tries again on its own. Folders for new conversations are the first

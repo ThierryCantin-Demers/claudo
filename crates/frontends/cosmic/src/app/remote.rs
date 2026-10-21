@@ -18,6 +18,11 @@ pub fn host() -> Option<&'static str> {
     HOST.get().map(String::as_str)
 }
 
+/// `host` as the app names it: a name mDNS gives ends in `.local`, which says nothing.
+pub fn shown(host: &str) -> &str {
+    host.strip_suffix(".local").unwrap_or(host)
+}
+
 pub fn set_host(host: String) {
     let _ = HOST.set(host);
 }
@@ -106,6 +111,47 @@ impl ClaudoApp {
             (Some(host), None) => format!("Connecting to claudo on {host}…"),
             (None, _) => "Connecting to backend…".to_string(),
         }
+    }
+
+    /// In every header bar of claudo showing another computer's, so it is never taken for
+    /// the one running agents here; in the warning color while that computer is lost.
+    pub(super) fn remote_chip(&self) -> Option<Element<'_, Message>> {
+        let host = self.remote?;
+        let lost = self.lost.is_some();
+        let chip = widget::container(
+            widget::Row::with_children(vec![
+                widget::icon::from_name("computer-symbolic").size(14).into(),
+                widget::text(format!("On {host}")).size(12.0).into(),
+            ])
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([3, 10])
+        .class(cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let color = Color::from(if lost {
+                cosmic.warning_color()
+            } else {
+                cosmic.accent_color()
+            });
+            container::Style {
+                text_color: Some(color),
+                icon_color: Some(color),
+                background: Some(color.scale_alpha(0.15).into()),
+                border: Border {
+                    color,
+                    width: 1.0,
+                    radius: cosmic.corner_radii.radius_xl.into(),
+                },
+                ..container::Style::default()
+            }
+        }));
+        let tip = if lost {
+            format!("{host} cannot be reached; claudo is trying again")
+        } else {
+            format!("The agents run on {host}: this window shows its claudo, over ssh")
+        };
+        Some(widget::tooltip(chip, widget::text(tip), widget::tooltip::Position::Bottom).into())
     }
 
     /// Over a window's content while the other computer cannot be reached.

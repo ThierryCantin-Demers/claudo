@@ -52,7 +52,8 @@ impl ClaudoApp {
         let layout = self.window(w);
         // Narrower, they would squeeze the title, or run under the context and buttons.
         let titled = layout.page != Page::Chat || layout.tiles.len() == 1;
-        let room = if titled { 760.0 } else { 520.0 };
+        let chip = if self.remote.is_some() { 160.0 } else { 0.0 };
+        let room = chip + if titled { 760.0 } else { 520.0 };
         if layout.sidebar_open || layout.size.is_some_and(|(width, _)| width < room) {
             return None;
         }

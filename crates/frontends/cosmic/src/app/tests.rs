@@ -3537,3 +3537,51 @@ fn lost_computer_snapshot() {
     }]));
     Harness::new(app).snapshot("lost-computer");
 }
+
+#[test]
+fn claudo_showing_another_computer_says_so_in_its_header() {
+    let mut app = two_tiles();
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let mut header = |app: &ClaudoApp| {
+        let header = Element::from(widget::Row::with_children(app.header_start()));
+        let mut ui = UserInterface::build(header, WINDOW, Cache::default(), &mut renderer);
+        let mut texts = ShownTexts::default();
+        ui.operate(
+            &renderer,
+            &mut cosmic::iced::advanced::widget::operation::black_box(&mut texts),
+        );
+        texts.0
+    };
+    assert!(
+        header(&app).is_empty(),
+        "nothing for the claudo running agents here"
+    );
+    app.remote = Some("korodale-xps");
+    assert_eq!(header(&app), ["On korodale-xps"]);
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn remote_chip_snapshot() {
+    let mut app = with_usage();
+    app.remote = Some("korodale-xps");
+    app.layout_mut().sidebar_open = false;
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let main = app.main_window();
+    render_sized(
+        &mut renderer,
+        app.view_window(main),
+        Size::new(1400.0, 120.0),
+        "remote-chip",
+    );
+    let _ = app.update(Message::Events(vec![ServerEvent::Connection {
+        connected: false,
+        detail: "ssh: connect to host korodale-xps.local port 22: No route to host".to_string(),
+    }]));
+    render_sized(
+        &mut renderer,
+        app.view_window(main),
+        Size::new(1400.0, 120.0),
+        "remote-chip-lost",
+    );
+}
