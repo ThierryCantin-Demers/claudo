@@ -26,7 +26,12 @@ enum Task {
     /// Install the tools the other commands need, and say which system packages are missing.
     Setup,
     /// Install the COSMIC app into cargo's bin directory, with a launcher entry and icon.
-    Install,
+    Install {
+        /// Also add a launcher for claudo showing the conversations of the claudo running on
+        /// this computer, as ssh names it; their agents run there.
+        #[arg(long, value_name = "HOST")]
+        on: Option<String>,
+    },
     /// Remove what `install` put in place.
     Uninstall,
     /// Run the COSMIC app.
@@ -74,9 +79,10 @@ fn main() -> ExitCode {
 impl Task {
     fn needs(&self) -> &'static [Need] {
         match self {
-            Task::Install | Task::Cosmic { hot: false, .. } => {
+            Task::Install { on: None } | Task::Cosmic { hot: false, .. } => {
                 &[Need::PkgConfig, Need::Xkbcommon, Need::Claude]
             }
+            Task::Install { on: Some(_) } => &[Need::PkgConfig, Need::Xkbcommon],
             Task::Cosmic { hot: true, .. } => &[
                 Need::PkgConfig,
                 Need::Xkbcommon,
@@ -98,7 +104,7 @@ fn run(task: Task) -> Result<(), String> {
     need::require(task.needs())?;
     match task {
         Task::Setup => need::setup(),
-        Task::Install => install(),
+        Task::Install { on } => install(on.as_deref()),
         Task::Uninstall => uninstall(),
         Task::Cosmic { hot: true, .. } => hot(),
         Task::Cosmic { release, .. } => {
@@ -127,7 +133,7 @@ fn run(task: Task) -> Result<(), String> {
             cargo(&args)
         }
         Task::Probe { name } => {
-            let mut args = vec!["run", "-p", "claudo-core", "--example"];
+            let mut args = vec!["run", "--example"];
             args.extend(name.as_deref());
             let listed = cargo(&args);
             // Listing is cargo's error for a missing example name.
@@ -136,7 +142,12 @@ fn run(task: Task) -> Result<(), String> {
     }
 }
 
-fn install() -> Result<(), String> {
+fn install(on: Option<&str>) -> Result<(), String> {
+    if let Some(host) = on
+        && (host.is_empty() || host.chars().any(|c| c.is_whitespace() || c == '/'))
+    {
+        return Err(format!("{host:?} is not a host ssh can reach"));
+    }
     cargo(&[
         "install",
         "--path",
@@ -153,27 +164,58 @@ fn install() -> Result<(), String> {
     }
     fs::copy(format!("assets/icons/{APP_ID}.svg"), &icon)
         .map_err(|e| format!("cannot install the icon: {e}"))?;
-    let entry = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Claudo\n\
-         Comment=Claude Code agents side by side\n\
-         Exec={}\n\
-         Icon={APP_ID}\n\
-         Terminal=false\n\
-         Categories=Development;Utility;\n\
-         StartupWMClass={APP_ID}\n",
-        bin.display()
-    );
-    fs::write(&desktop, entry).map_err(|e| format!("cannot write {}: {e}", desktop.display()))?;
+    let entry = |name: &str, comment: &str, exec: &str| {
+        format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name={name}\n\
+             Comment={comment}\n\
+             Exec={exec}\n\
+             Icon={APP_ID}\n\
+             Terminal=false\n\
+             Categories=Development;Utility;\n\
+             StartupWMClass={APP_ID}\n"
+        )
+    };
+    let exec = bin.display().to_string();
+    let write = |file: &Path, entry: String| {
+        fs::write(file, entry).map_err(|e| format!("cannot write {}: {e}", file.display()))
+    };
+    write(
+        &desktop,
+        entry("Claudo", "Claude Code agents side by side", &exec),
+    )?;
     println!("installed {}", bin.display());
     println!("launcher entry {}", desktop.display());
+    if let Some(host) = on {
+        let remote = remote_desktop_file(host)?;
+        write(
+            &remote,
+            entry(
+                &format!("Claudo on {host}"),
+                &format!("The Claude Code agents claudo runs on {host}"),
+                &format!("{exec} --on {host}"),
+            ),
+        )?;
+        println!("launcher entry {}", remote.display());
+    }
     Ok(())
 }
 
 fn uninstall() -> Result<(), String> {
     cargo(&["uninstall", COSMIC_BIN])?;
-    for file in [desktop_file()?, icon_file()?] {
+    let remote: Vec<PathBuf> = fs::read_dir(desktop_file()?.parent().unwrap())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{APP_ID}.on-")))
+        })
+        .collect();
+    for file in [desktop_file()?, icon_file()?].into_iter().chain(remote) {
         match fs::remove_file(&file) {
             Ok(()) => println!("removed {}", file.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -272,6 +314,10 @@ fn data_home() -> Result<PathBuf, String> {
 
 fn desktop_file() -> Result<PathBuf, String> {
     Ok(data_home()?.join(format!("applications/{APP_ID}.desktop")))
+}
+
+fn remote_desktop_file(host: &str) -> Result<PathBuf, String> {
+    Ok(data_home()?.join(format!("applications/{APP_ID}.on-{host}.desktop")))
 }
 
 fn icon_file() -> Result<PathBuf, String> {

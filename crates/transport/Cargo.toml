@@ -12,6 +12,7 @@ claudo-protocol.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 claudo-core.workspace = true
 tokio = { version = "1", default-features = false, features = ["sync"] }
+serde_json.workspace = true
 
 # The WebSocket client transport is wasm-only for now (native uses InProc).
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -1,6 +1,7 @@
 //! One claudo per build. Launched while the same build runs, claudo asks it for a new window
 //! and exits instead of reopening every saved window a second time. A different build, such
-//! as one being developed, runs beside it in a window of its own.
+//! as one being developed, runs beside it in a window of its own. claudo showing another
+//! computer's is an instance apart.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -39,10 +40,11 @@ pub fn launch() -> Launch {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("claudo.lock"));
+        .open(dir.join(super::remote::scoped("claudo") + ".lock"));
     let _held = lock.as_ref().map(File::lock);
     let build = build();
-    let (launch, listener) = launch_at(&dir.join("claudo.sock"), &build);
+    let socket = dir.join(super::remote::scoped("claudo") + ".sock");
+    let (launch, listener) = launch_at(&socket, &build);
     if let Some(listener) = listener {
         *LAUNCHES.lock().unwrap() = Some(answer_launches(listener, build));
     }

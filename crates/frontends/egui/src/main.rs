@@ -473,7 +473,10 @@ impl ClaudoApp {
                     }
                 }
 
-                ServerEvent::Quota(_) | ServerEvent::QuotaUnavailable(_) => {}
+                ServerEvent::Quota(_)
+                | ServerEvent::QuotaUnavailable(_)
+                | ServerEvent::Connection { .. }
+                | ServerEvent::Answered { .. } => {}
 
                 ServerEvent::Error {
                     conversation_id,

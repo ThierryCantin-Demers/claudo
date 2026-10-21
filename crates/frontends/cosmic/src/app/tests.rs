@@ -3384,3 +3384,156 @@ fn a_command_running_in_the_background_of_an_untiled_conversation_stays_listed()
         "and lets it go once the command ends"
     );
 }
+
+#[test]
+fn a_lost_computer_keeps_the_message_and_once_back_is_asked_anew() {
+    let mut app = two_tiles();
+    app.remote = Some("korodale-xps");
+    let (commands, sent) = claudo_transport::Commands::recorded();
+    app.commands = Some(commands);
+    let lost = "ssh: connect to host korodale-xps port 22: No route to host";
+    let _ = app.update(Message::Events(vec![ServerEvent::Connection {
+        connected: false,
+        detail: lost.to_string(),
+    }]));
+    app.views.get_mut(ALPHA).unwrap().draft = text_editor::Content::with_text("hello");
+    let _ = app.update(Message::Send(ALPHA.to_string()));
+    assert_eq!(
+        app.views[ALPHA].draft.text().trim(),
+        "hello",
+        "kept in its box"
+    );
+    assert!(
+        !sent
+            .take()
+            .iter()
+            .any(|c| matches!(c, Command::SendMessage { .. })),
+        "nothing goes out"
+    );
+    let mut h = Harness::new(app);
+    assert!(
+        shown_texts(&mut h).iter().any(|text| text.contains(lost)),
+        "the window says why"
+    );
+
+    h.app.views.get_mut(BRAVO).unwrap().streaming = true;
+    let _ = h.app.update(Message::Events(vec![ServerEvent::Connection {
+        connected: true,
+        detail: String::new(),
+    }]));
+    let asked = sent.take();
+    assert!(
+        asked
+            .iter()
+            .any(|c| matches!(c, Command::ListConversations))
+    );
+    for id in [ALPHA, BRAVO] {
+        assert!(
+            asked
+                .iter()
+                .any(|c| matches!(c, Command::OpenConversation { id: open } if open == id)),
+            "{id} is loaded again"
+        );
+    }
+    assert!(
+        !h.app.views[BRAVO].streaming,
+        "a turn runs only if the other computer says so"
+    );
+    let _ = h.app.update(Message::Send(ALPHA.to_string()));
+    assert!(
+        sent.take()
+            .iter()
+            .any(|c| matches!(c, Command::SendMessage { text, .. } if text == "hello"))
+    );
+}
+
+#[test]
+fn a_message_sent_from_another_computer_shows_once_it_reaches_claude() {
+    let mut app = two_tiles();
+    let _ = app.update(Message::Events(vec![ServerEvent::Queued {
+        conversation_id: ALPHA.to_string(),
+        text: "from the tower".to_string(),
+        attachments: Vec::new(),
+    }]));
+    assert_eq!(app.views[ALPHA].queued.len(), 1, "waiting");
+    let _ = app.update(Message::Events(vec![ServerEvent::Delivered {
+        conversation_id: ALPHA.to_string(),
+    }]));
+    let view = &app.views[ALPHA];
+    assert!(view.streaming);
+    assert!(matches!(view.items.last(), Some(Entry::User(text)) if text == "from the tower"));
+}
+
+#[test]
+fn a_folder_on_the_other_computer_is_typed_and_sent_as_typed() {
+    use keyboard::key::{Code, Named};
+    let mut app = two_tiles();
+    let (commands, sent) = claudo_transport::Commands::recorded();
+    app.commands = Some(commands);
+    app.remote = Some("korodale-xps");
+    app.views.get_mut(ALPHA).unwrap().items.clear();
+    let _ = app.update(Message::MoveTo(ALPHA.to_string(), folder::Choice::Pick));
+    assert!(
+        app.folder_typed.is_some(),
+        "no picker opens here: a box to type in does"
+    );
+    let mut h = Harness::new(app);
+    h.focus(folder::input_id());
+    for c in "~/prog/x".chars() {
+        h.send(vec![typed(c)]);
+    }
+    h.send(vec![key(
+        Named::Enter,
+        Code::Enter,
+        keyboard::Modifiers::empty(),
+    )]);
+    assert!(h.app.folder_typed.is_none());
+    assert!(sent.take().iter().any(|c| matches!(
+        c,
+        Command::SetFolder { id, path: Some(path) } if id == ALPHA && path == "~/prog/x"
+    )));
+}
+
+#[test]
+fn an_approval_answered_on_another_computer_stops_asking_here() {
+    let mut app = two_tiles();
+    let call = ToolCall {
+        call_id: "t1".to_string(),
+        name: "Bash".to_string(),
+        summary: "gh pr create".to_string(),
+        description: String::new(),
+        command: Some("gh pr create".to_string()),
+        input: String::new(),
+        result: None,
+        is_error: false,
+        background: None,
+        parent: None,
+        agent: false,
+        started: None,
+        ended: None,
+    };
+    let _ = app.update(Message::Events(vec![ServerEvent::ApprovalRequested {
+        conversation_id: ALPHA.to_string(),
+        request_id: "r1".to_string(),
+        call,
+        scope: "gh pr create".to_string(),
+    }]));
+    assert_eq!(app.views[ALPHA].approvals.len(), 1);
+    let _ = app.update(Message::Events(vec![ServerEvent::Answered {
+        conversation_id: ALPHA.to_string(),
+        request_id: "r1".to_string(),
+    }]));
+    assert!(app.views[ALPHA].approvals.is_empty());
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn lost_computer_snapshot() {
+    let mut app = two_tiles();
+    app.remote = Some("korodale-xps");
+    let _ = app.update(Message::Events(vec![ServerEvent::Connection {
+        connected: false,
+        detail: "ssh: connect to host korodale-xps port 22: No route to host".to_string(),
+    }]));
+    Harness::new(app).snapshot("lost-computer");
+}

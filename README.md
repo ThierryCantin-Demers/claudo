@@ -100,6 +100,25 @@ A conversation is in at most one tile. Closing a tile does not stop its agent: t
 shows pulsing dots beside each agent still working, and an Approve badge beside one waiting
 for your answer.
 
+### From another computer (COSMIC)
+
+Your agents can run on one computer, with its files, and be driven from another: claudo
+there shows the first one's conversations and talks to its agents, over ssh, and both
+screens see and steer the same agents at once.
+
+1. On the computer that runs the agents, keep claudo running (a build with this support:
+   Update once).
+2. On the other, make sure `ssh <host>` logs in without a password prompt, then
+   `cargo xtask install --on <host>`, which adds a "Claudo on <host>" launcher. It runs
+   `claudo-cosmic --on <host>`.
+
+A message sent from either screen shows on both as it waits and reaches Claude, an approval
+answered on one leaves the other, and Update on the second computer restarts only its own
+claudo. While the first computer cannot be reached, a banner says why, messages stay in
+their box, and claudo tries again on its own. Folders for new conversations are the first
+computer's: its recent ones, or one typed in. Files you attach or drop are sent from the
+computer you are at.
+
 ## How it works
 
 Every frontend talks to one backend (`crates/core`), which keeps a `claude -p` process per
@@ -114,6 +133,7 @@ the CLI owns login and the agent loop. Details are in [CLAUDE.md](CLAUDE.md) and
 - Each agent is named after its conversation's title, and renaming the conversation renames it, so your agents, and Claude Code sessions, can find each other with `ListAgents` and talk with `SendMessage`. A message one receives shows as "From <agent>" and runs a turn as if you had sent it. Only a conversation with a running `claude` process (used in the last 30 minutes) can receive one.
 - claudo keeps its data in `~/.local/share/claudo/`. Message history stays in `~/.claude/projects/`.
 - Two claudo windows at once, such as the installed app and a dev build, keep each other's conversations, but each runs its own agents: send to a conversation from one of them only.
+- claudo serves its agents to claudo on other computers through a socket in `$XDG_RUNTIME_DIR` that only you can open, reached over ssh; nothing listens on the network. A dev build running beside the installed one does not serve.
 
 ## Development
 

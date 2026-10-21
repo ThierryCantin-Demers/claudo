@@ -15,7 +15,7 @@ use std::time::Duration;
 use claudo_protocol::{ConversationId, Decision};
 
 use crate::claude_bin;
-use crate::engine::cli::{Adopted, Held, Incoming, SessionState};
+use crate::engine::cli::{Adopted, Held, Incoming, Live, SessionState};
 use crate::engine::{EngineEvent, Resume, Session, SessionConfig, UserMessage};
 use crate::handover::{Handed, Progress, Waited};
 
@@ -446,6 +446,16 @@ impl LiveSessions {
             .get(conversation_id)
             .map(Session::in_background)
             .unwrap_or_default()
+    }
+
+    /// What each conversation's process is doing.
+    pub fn snapshot(&self) -> Vec<(ConversationId, Live)> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .iter()
+            .filter(|(_, session)| session.is_alive())
+            .map(|(conversation_id, session)| (conversation_id.clone(), session.live()))
+            .collect()
     }
 
     /// The process currently serving a conversation, if any.

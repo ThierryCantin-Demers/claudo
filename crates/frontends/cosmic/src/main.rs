@@ -6,25 +6,49 @@
 //! each `ServerEvent` as a message, so updates render as they arrive (no polling).
 
 #[cfg(not(feature = "cosmic"))]
-fn main() {
+fn main() -> std::process::ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--bridge") {
+        return claudo_transport::bridge();
+    }
     eprintln!("claudo-cosmic was built without the `cosmic` feature.");
     eprintln!("Build/run it with:  cargo run -p claudo-cosmic --features cosmic");
+    std::process::ExitCode::SUCCESS
 }
 
 #[cfg(feature = "cosmic")]
-fn main() -> cosmic::iced::Result {
+fn main() -> std::process::ExitCode {
     use app::instance::Launch;
+    use std::process::ExitCode;
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("--bridge") => return claudo_transport::bridge(),
+        Some("--on") => match args.next() {
+            Some(host) => app::remote::set_host(host),
+            None => {
+                eprintln!("--on takes the computer whose claudo to show, as ssh names it");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => {}
+    }
     let beside = match app::instance::launch() {
-        Launch::Handed => return Ok(()),
+        Launch::Handed => return ExitCode::SUCCESS,
         Launch::First => false,
         Launch::Beside => true,
     };
+    app::remote::set_serving(!beside);
     let ui = app::UiState::load();
     let mut settings = cosmic::app::Settings::default();
     if let Some((width, height)) = ui.window {
         settings = settings.size(cosmic::iced::Size::new(width, height));
     }
-    cosmic::app::run::<app::ClaudoApp>(settings, app::Flags { ui, beside })
+    match cosmic::app::run::<app::ClaudoApp>(settings, app::Flags { ui, beside }) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(feature = "cosmic")]
@@ -34,7 +58,7 @@ mod app {
         Effort, Item, ModelOption, Overrides, Profile, Quota, ServerEvent, SessionId, SessionInfo,
         Settings, SystemStatus, ToolCall, TurnTime,
     };
-    use claudo_transport::{Commands, spawn_backend};
+    use claudo_transport::{Commands, connect_remote, spawn_backend};
 
     use cosmic::app::{Core, Task};
     use std::collections::HashMap;
@@ -583,6 +607,9 @@ mod app {
                     call,
                     scope,
                 }),
+                ServerEvent::Answered { request_id, .. } => {
+                    self.approvals.retain(|a| a.request_id != request_id);
+                }
                 ServerEvent::Compacting { .. } => self.compacting = true,
                 ServerEvent::Compacted { compaction, .. } => {
                     self.compacting = false;
@@ -837,6 +864,13 @@ mod app {
         quota_asked: bool,
         /// Why the last request for one failed.
         quota_error: Option<String>,
+        /// The other computer whose claudo this one shows, as ssh names it.
+        remote: Option<&'static str>,
+        /// Why that computer cannot be reached, while it cannot.
+        lost: Option<String>,
+        /// The conversation whose folder on the other computer is being typed, and the path
+        /// so far.
+        folder_typed: Option<(ConversationId, String)>,
         /// Minutes since launch, counted to refresh `quota`.
         minutes: u32,
         /// How far from the bottom tiles moved to another window were scrolled, until the
@@ -989,20 +1023,20 @@ mod app {
                 return Self::default();
             };
             Self {
-                unsent: store.get(UNSENT).unwrap_or_default(),
-                ..store.get(UI_STATE).unwrap_or_default()
+                unsent: store.get(&remote::scoped(UNSENT)).unwrap_or_default(),
+                ..store.get(&remote::scoped(UI_STATE)).unwrap_or_default()
             }
         }
 
         fn save(&self) {
             if let Some(store) = Self::store() {
-                let _ = store.set(UI_STATE, self);
+                let _ = store.set(&remote::scoped(UI_STATE), self);
             }
         }
 
         fn save_unsent(unsent: &std::collections::BTreeMap<&str, Vec<&Attachment>>) {
             if let Some(store) = Self::store() {
-                let _ = store.set(UNSENT, unsent);
+                let _ = store.set(&remote::scoped(UNSENT), unsent);
             }
         }
 
@@ -1144,6 +1178,11 @@ mod app {
         MoveTo(ConversationId, folder::Choice),
         /// A folder picked for a conversation, or for a new one with `None`.
         FolderPicked(Option<ConversationId>, Result<Option<String>, String>),
+        /// The path typed for a folder on the other computer, whose files no picker here
+        /// can show.
+        FolderTyped(String),
+        FolderTypedDone,
+        FolderTypedCancel,
         /// The page of Claude Code sessions to continue, found anew.
         ShowSessions,
         /// Continue a Claude Code session in the focused tile.
@@ -1622,9 +1661,13 @@ mod app {
         fn set_titles(&mut self) {
             let mut taken = std::collections::HashSet::new();
             for w in self.window_order() {
-                let base = match self.focused(w).and_then(|id| self.info(id)) {
-                    Some(conversation) => format!("{} · claudo", conversation.title),
+                let app = match self.remote {
+                    Some(host) => format!("claudo on {host}"),
                     None => "claudo".to_string(),
+                };
+                let base = match self.focused(w).and_then(|id| self.info(id)) {
+                    Some(conversation) => format!("{} · {app}", conversation.title),
+                    None => app,
                 };
                 let mut title = base.clone();
                 let mut n = 2;
@@ -2176,7 +2219,7 @@ mod app {
 
         /// Send the draft, or run it here if it is one of the commands claudo runs itself.
         fn send(&mut self, id: ConversationId) {
-            let Some(view) = self.views.get(&id) else {
+            let Some(view) = self.views.get(&id).filter(|_| self.reachable()) else {
                 return;
             };
             let text = view.draft.text().trim().to_string();
@@ -2297,6 +2340,9 @@ mod app {
                     self.quota_asked = false;
                     self.quota_error = Some(error);
                 }
+                ServerEvent::Connection { connected, detail } => {
+                    self.connection(connected, detail);
+                }
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
                     self.restore_tiles();
@@ -2404,6 +2450,10 @@ mod app {
                     ..
                 }
                 | ServerEvent::ApprovalRequested {
+                    ref conversation_id,
+                    ..
+                }
+                | ServerEvent::Answered {
                     ref conversation_id,
                     ..
                 }
@@ -4830,6 +4880,9 @@ mod app {
                 quota_at: None,
                 quota_asked: true,
                 quota_error: None,
+                remote: remote::host(),
+                lost: None,
+                folder_typed: None,
                 minutes: 0,
                 carried_scroll: HashMap::new(),
                 blurred: false,
@@ -4975,7 +5028,9 @@ mod app {
                 }
                 Message::Compact(id) => {
                     self.focus(&id);
-                    self.submit(id, "/compact".to_string());
+                    if self.reachable() {
+                        self.submit(id, "/compact".to_string());
+                    }
                 }
                 Message::MenuStep(id, step) => {
                     let count = self
@@ -5199,6 +5254,9 @@ mod app {
                         view.attachments.remove(index);
                     }
                 }
+                Message::NewChatIn if self.remote.is_some() => {
+                    return self.update(Message::New);
+                }
                 Message::NewChatIn => {
                     return cosmic::task::future(async move {
                         Message::FolderPicked(None, folder::pick().await)
@@ -5208,6 +5266,10 @@ mod app {
                     let path = match choice {
                         folder::Choice::Scratch => None,
                         folder::Choice::Folder(path) => Some(path),
+                        folder::Choice::Pick if self.remote.is_some() => {
+                            self.folder_typed = Some((id, String::new()));
+                            return widget::text_input::focus(folder::input_id());
+                        }
                         folder::Choice::Pick => {
                             return cosmic::task::future(async move {
                                 Message::FolderPicked(Some(id), folder::pick().await)
@@ -5217,6 +5279,21 @@ mod app {
                     self.cmd(Command::SetFolder { id, path });
                     self.cmd(Command::ListFolders);
                 }
+                Message::FolderTyped(text) => {
+                    if let Some((_, typed)) = &mut self.folder_typed {
+                        *typed = text;
+                    }
+                }
+                Message::FolderTypedDone => {
+                    if let Some((id, path)) = self.folder_typed.take()
+                        && !path.trim().is_empty()
+                    {
+                        let path = Some(path.trim().to_string());
+                        self.cmd(Command::SetFolder { id, path });
+                        self.cmd(Command::ListFolders);
+                    }
+                }
+                Message::FolderTypedCancel => self.folder_typed = None,
                 Message::FolderPicked(_, Ok(None)) => {}
                 Message::FolderPicked(Some(id), Ok(Some(path))) => {
                     self.cmd(Command::SetFolder {
@@ -5259,7 +5336,15 @@ mod app {
                         }
                         .save();
                     }
-                    self.cmd(Command::Restart);
+                    if self.remote.is_some() {
+                        let error = remote::relaunch();
+                        self.apply(ServerEvent::Error {
+                            conversation_id: None,
+                            detail: format!("Could not restart claudo: {error}"),
+                        });
+                    } else {
+                        self.cmd(Command::Restart);
+                    }
                 }
                 // Until the reopened windows are back where they were, where they are is not
                 // where to put them next time.
@@ -5684,7 +5769,7 @@ mod app {
 
         fn view(&self) -> Element<'_, Message> {
             match &self.status {
-                None => return widget::text("Connecting to backend…").into(),
+                None => return widget::text(self.connecting()).into(),
                 Some(s) if !s.ready() => {
                     let msg = if !s.claude_installed {
                         "Claude Code CLI not found on PATH."
@@ -5900,6 +5985,9 @@ mod app {
             let mut content: Element<Message> = widget::Row::with_children(columns)
                 .height(Length::Fill)
                 .into();
+            if let Some(banner) = self.lost_banner() {
+                content = widget::Column::with_children(vec![banner, content]).into();
+            }
             if let Some(viewed) = &layout.viewing {
                 content = cosmic::iced::widget::Stack::with_children(vec![
                     content,
@@ -6109,6 +6197,7 @@ mod app {
     pub mod instance;
     mod links;
     mod placement;
+    pub mod remote;
     mod review;
     mod scroll;
     mod selectable;
@@ -6173,13 +6262,15 @@ mod app {
         stream::channel(
             64,
             |mut output: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-                let (commands, mut events) = spawn_backend();
-                commands.send(Command::GetStatus);
-                commands.send(Command::GetSettings);
-                commands.send(Command::GetCapabilities);
-                commands.send(Command::GetUsage);
-                commands.send(Command::ListConversations);
-                commands.send(Command::ListFolders);
+                let (commands, mut events) = match remote::host() {
+                    Some(host) => connect_remote(host.to_string()),
+                    None => {
+                        let (commands, events) = spawn_backend(remote::serving());
+                        commands.send(Command::GetStatus);
+                        remote::hello(&commands);
+                        (commands, events)
+                    }
+                };
                 let _ = output.send(Message::Connected(commands)).await;
                 while let Some(ev) = events.recv().await {
                     // Coalesce any already-queued events into one render.

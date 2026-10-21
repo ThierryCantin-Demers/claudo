@@ -634,6 +634,11 @@ pub enum ServerEvent {
         /// What `Decision::AllowAlways` stops asking about, such as `gh issue create`.
         scope: String,
     },
+    /// Another frontend answered this approval, so it no longer waits on this one.
+    Answered {
+        conversation_id: ConversationId,
+        request_id: String,
+    },
     /// The conversation's agent is a process this app does not run, such as one a killed
     /// claudo left working. Messages to it wait until that process ends, so two agents never
     /// work on one conversation.
@@ -708,6 +713,13 @@ pub enum ServerEvent {
     Quota(Quota),
     /// Asking for the usage windows failed, for this reason.
     QuotaUnavailable(String),
+    /// The backend runs in claudo on another computer, and was reached, or lost: then
+    /// `detail` says why, and the transport tries again. Once reached, the frontend asks
+    /// again for what it shows.
+    Connection {
+        connected: bool,
+        detail: String,
+    },
     Error {
         /// The conversation it concerns, or `None` for the connection or the app.
         #[serde(default)]

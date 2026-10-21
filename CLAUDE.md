@@ -50,6 +50,7 @@ prompts tiny):
 ```bash
 cargo run -p claudo-core --example backend_probe
 cargo run -p claudo-daemon --example ws_probe     # start the daemon with CLAUDO_TOKEN=test first
+cargo run -p claudo-transport --example remote_probe
 ```
 
 ## Gotchas that have already cost time
@@ -387,6 +388,27 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
   `examples/handover_probe` and `restart_probe` check it on the real CLI, and
   `handover_cases_probe` a pending approval, a queued message, a background command and
   a forked command's subagent.
+- **Several frontends share one backend.** The app's own window is `clients::LOCAL`, and
+  claudo on another computer (`claudo-cosmic --on <host>`) is another client: everything
+  that happens goes to each (`Clients::send`), an answer only to the client that asked
+  (`History`, `Created`, `Status`, `Folders`, ...), and a message one client sends reaches
+  the others as `Queued`, so their `Delivered` finds it. A client arriving hears what runs
+  (`Backend::announce`: `Working`, approvals, queued messages, background calls), and an
+  approval one answers is `Answered` for the rest. The suggestions' on-screen set is every
+  client's.
+- **Remote frontends come over ssh.** `transport::spawn_backend(true)` serves the backend on
+  `$XDG_RUNTIME_DIR/claudo-backend.sock` (mode 0600, unless another claudo there already
+  does; a dev build beside does not serve), one JSON line per `Command` in and per
+  `ServerEvent` out. `claudo-cosmic --bridge` joins that socket to its stdin and stdout,
+  and `transport::connect_remote` runs it with `ssh -T -o BatchMode=yes <host>`, so ssh
+  brings the login and encryption. The transport asks for `Status` itself, says
+  `Connection { connected }` as the link comes and goes, tries again with a backoff, and
+  drops commands while it is down; COSMIC asks again for everything it shows once
+  connected, holds messages in their box meanwhile, keeps its own instance socket and
+  window state per host (`remote::scoped`), types the folder path rather than opening a
+  picker, and Update just re-execs it. The bridge copies with a plain read and write loop:
+  `io::copy`'s kernel copy between the socket and the pipe now and then held a reply back
+  for good. `transport/examples/remote_probe` checks it on the real CLI.
 - **One agent per conversation, whichever claudo runs it.** A process spawned for a
   conversation inherits its lock (`$XDG_RUNTIME_DIR/claudo-agents/<conversation>.lock`, an
   flock whose file holds the agent's pid) and keeps it as long as it runs, whatever becomes

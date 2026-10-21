@@ -30,9 +30,34 @@ impl ClaudoApp {
         let info = self.info(id)?;
         let size = 13.0 * self.zoom;
         let current = info.attached.then_some(info.cwd.as_str());
-        let content: Element<Message> = if view.choosing_folder() {
+        let typed = self
+            .folder_typed
+            .as_ref()
+            .filter(|(typing, _)| typing == id)
+            .map(|(_, typed)| typed.as_str());
+        let content: Element<Message> = if let Some(typed) = typed {
+            let host = self.remote.unwrap_or("the other computer");
+            Intercept {
+                on_escape: Some(Message::FolderTypedCancel),
+                ..Intercept::new(
+                    widget::text_input(
+                        format!("A folder on {host}, such as ~/prog/project"),
+                        typed,
+                    )
+                    .id(input_id())
+                    .size(size)
+                    .on_input(Message::FolderTyped)
+                    .on_submit(|_| Message::FolderTypedDone)
+                    .width(Length::Fill),
+                )
+            }
+            .into()
+        } else if view.choosing_folder() {
             let choices = choices(&self.folders, current);
-            let labels: Vec<String> = choices.iter().map(label).collect();
+            let labels: Vec<String> = choices
+                .iter()
+                .map(|choice| label(choice, self.remote))
+                .collect();
             let selected = choices.iter().position(|choice| match (choice, current) {
                 (Choice::Scratch, None) => true,
                 (Choice::Folder(folder), Some(current)) => folder == current,
@@ -80,12 +105,19 @@ fn choices(recent: &[String], current: Option<&str>) -> Vec<Choice> {
         .collect()
 }
 
-fn label(choice: &Choice) -> String {
+fn label(choice: &Choice, remote: Option<&str>) -> String {
     match choice {
         Choice::Scratch => "Scratch folder".to_string(),
         Choice::Folder(folder) => home_relative(folder),
-        Choice::Pick => "Choose folder…".to_string(),
+        Choice::Pick => match remote {
+            Some(host) => format!("Folder on {host}…"),
+            None => "Choose folder…".to_string(),
+        },
     }
+}
+
+pub(super) fn input_id() -> widget::Id {
+    widget::Id::new("folder-typed")
 }
 
 /// The folder the user picks, `None` if they cancel.

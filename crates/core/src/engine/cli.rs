@@ -517,6 +517,18 @@ impl SessionState {
     }
 }
 
+/// What a session is doing, for a client that just arrived.
+pub struct Live {
+    /// A turn is running.
+    pub working: bool,
+    /// Approvals the running turn waits on: request id, call and scope.
+    pub approvals: Vec<(String, ToolCall, String)>,
+    /// Messages sent but not started yet, oldest first.
+    pub queued: Vec<Sent>,
+    /// Calls running in the background, by id.
+    pub background: HashSet<String>,
+}
+
 /// What a session taken over from the process this one replaced was doing.
 pub struct Adopted {
     /// The running turn's events, when the client started it.
@@ -976,6 +988,28 @@ impl Session {
     /// The calls running in the background, by id.
     pub fn in_background(&self) -> HashSet<String> {
         self.shared.background.lock().unwrap().clone()
+    }
+
+    pub fn live(&self) -> Live {
+        let (working, queued) = {
+            let turns = self.shared.turns.lock().unwrap();
+            let queued = turns.queued.iter().map(|q| q.sent.clone()).collect();
+            (turns.running.is_some(), queued)
+        };
+        let approvals = self
+            .shared
+            .approvals
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, pending)| (id.clone(), pending.call.clone(), pending.scope.clone()))
+            .collect();
+        Live {
+            working,
+            approvals,
+            queued,
+            background: self.in_background(),
+        }
     }
 
     /// A turn is running or waiting to.

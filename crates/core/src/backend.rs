@@ -17,6 +17,7 @@ use claudo_protocol::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::clients::{ClientId, Clients, LOCAL};
 use crate::engine::{EngineEvent, Resume, SessionConfig, UserMessage};
 use crate::handover::{Handed, Handover, Progress, Waited};
 use crate::live::{AgentLock, IDLE_TIMEOUT, LiveSessions, SendError};
@@ -25,7 +26,9 @@ use crate::sessions::{Store, load_transcript};
 pub struct Backend {
     store: Arc<Mutex<Store>>,
     live: Arc<LiveSessions>,
-    events: UnboundedSender<ServerEvent>,
+    events: Clients,
+    /// The conversations each client shows.
+    on_screen: Mutex<HashMap<ClientId, Vec<String>>>,
     /// Each conversation's running turn, for a handover to pass on.
     progress: Running,
     /// Messages to conversations whose agent is a process this app does not run, oldest
@@ -52,13 +55,15 @@ pub struct Outgoing {
 struct Agents {
     store: Arc<Mutex<Store>>,
     live: Arc<LiveSessions>,
-    events: UnboundedSender<ServerEvent>,
+    events: Clients,
     progress: Running,
     waiting: Waiting,
 }
 
 impl Backend {
-    pub fn new(events: UnboundedSender<ServerEvent>) -> Self {
+    pub fn new(local: UnboundedSender<ServerEvent>) -> Self {
+        let events = Clients::default();
+        events.add(LOCAL, local);
         let store = Arc::new(Mutex::new(Store::load()));
         let handover = crate::handover::take();
         let progress: Running = Arc::new(Mutex::new(
@@ -85,6 +90,7 @@ impl Backend {
             store,
             live: Arc::new(LiveSessions::new(IDLE_TIMEOUT, Some(incoming))),
             events,
+            on_screen: Mutex::default(),
             progress,
             waiting: Arc::default(),
         };
@@ -220,16 +226,111 @@ impl Backend {
     }
 
     fn emit(&self, event: ServerEvent) {
-        let _ = self.events.send(event);
+        self.events.send(event);
+    }
+
+    /// Handle one command from the frontend the backend was made with.
+    pub fn handle(&self, cmd: Command) {
+        self.handle_from(LOCAL, cmd);
+    }
+
+    /// Another frontend, such as claudo on another computer, starts being served. It hears
+    /// at once what runs.
+    pub fn connect(&self, client: ClientId, events: UnboundedSender<ServerEvent>) {
+        self.events.add(client, events);
+        self.announce(client);
+    }
+
+    pub fn disconnect(&self, client: ClientId) {
+        self.events.remove(client);
+        self.on_screen(client, None);
+    }
+
+    /// Tells `client` what each agent is doing, as a frontend that just arrived would not
+    /// know: turns running, approvals waiting, messages not taken yet and calls in the
+    /// background.
+    fn announce(&self, client: ClientId) {
+        for (conversation_id, live) in self.live.snapshot() {
+            if live.working {
+                self.events.to(
+                    client,
+                    ServerEvent::Working {
+                        conversation_id: conversation_id.clone(),
+                    },
+                );
+            }
+            for call_id in live.background {
+                self.events.to(
+                    client,
+                    ServerEvent::Background {
+                        conversation_id: conversation_id.clone(),
+                        call_id,
+                        background: Background {
+                            status: TaskStatus::Running,
+                            output: None,
+                        },
+                        at: None,
+                    },
+                );
+            }
+            for (request_id, call, scope) in live.approvals {
+                self.events.to(
+                    client,
+                    ServerEvent::ApprovalRequested {
+                        conversation_id: conversation_id.clone(),
+                        request_id,
+                        call,
+                        scope,
+                    },
+                );
+            }
+            for sent in live.queued {
+                self.events.to(
+                    client,
+                    ServerEvent::Queued {
+                        conversation_id: conversation_id.clone(),
+                        text: sent.text,
+                        attachments: sent.attachments,
+                    },
+                );
+            }
+        }
+        for (conversation_id, messages) in self.waiting.lock().unwrap().iter() {
+            for message in messages {
+                self.events.to(
+                    client,
+                    ServerEvent::Queued {
+                        conversation_id: conversation_id.clone(),
+                        text: message.text.clone(),
+                        attachments: message.attachments.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Suggestions are guessed for what any client shows.
+    fn on_screen(&self, client: ClientId, shown: Option<Vec<String>>) {
+        let mut on_screen = self.on_screen.lock().unwrap();
+        match shown {
+            Some(shown) => on_screen.insert(client, shown),
+            None => on_screen.remove(&client),
+        };
+        let mut all: Vec<String> = on_screen.values().flatten().cloned().collect();
+        all.sort();
+        all.dedup();
+        self.live.set_on_screen(all);
     }
 
     /// Handle one command. Returns quickly; `SendMessage` hands the turn to the
     /// conversation's `claude` process and streams its events from a worker thread.
-    pub fn handle(&self, cmd: Command) {
+    /// Answers go to `from` alone, and what changes to every client.
+    pub fn handle_from(&self, from: ClientId, cmd: Command) {
+        let reply = |event| self.events.to(from, event);
         match cmd {
-            Command::GetStatus => self.emit(ServerEvent::Status(crate::detect_system())),
+            Command::GetStatus => reply(ServerEvent::Status(crate::detect_system())),
 
-            Command::GetSettings => self.emit(ServerEvent::Settings(crate::settings::load())),
+            Command::GetSettings => reply(ServerEvent::Settings(crate::settings::load())),
 
             Command::GetCapabilities => {
                 let events = self.events.clone();
@@ -244,15 +345,15 @@ impl Backend {
                                 .to_vec();
                             (models, Vec::new())
                         });
-                    let _ = events.send(ServerEvent::Models(models));
-                    let _ = events.send(ServerEvent::Commands(commands));
+                    events.to(from, ServerEvent::Models(models));
+                    events.to(from, ServerEvent::Commands(commands));
                 });
             }
 
             Command::GetUsage => {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
-                    let _ = events.send(match crate::engine::cli::usage() {
+                    events.send(match crate::engine::cli::usage() {
                         Ok(quota) => ServerEvent::Quota(quota),
                         Err(error) => ServerEvent::QuotaUnavailable(error.to_string()),
                     });
@@ -279,12 +380,12 @@ impl Backend {
 
             Command::NewScratch { request } => {
                 let id = self.store.lock().unwrap().create_scratch();
-                self.created(id, request);
+                self.created(from, id, request);
             }
 
             Command::NewAttached { path, request } => {
                 let id = self.store.lock().unwrap().create_attached(path.into());
-                self.created(id, request);
+                self.created(from, id, request);
             }
 
             Command::SetFolder { id, path } => {
@@ -292,8 +393,12 @@ impl Backend {
                 let moved = if self.live.pid(&id).is_some() {
                     Err("a conversation stays in the folder it started in".to_string())
                 } else {
-                    let folder = path.map(PathBuf::from);
-                    self.store.lock().unwrap().set_folder(&id, folder)
+                    match path.as_deref().map(home_expanded) {
+                        Some(folder) if !folder.is_dir() => {
+                            Err(format!("there is no folder at {}", folder.display()))
+                        }
+                        folder => self.store.lock().unwrap().set_folder(&id, folder),
+                    }
                 };
                 match moved {
                     Ok(()) => self.emit(conversations_event(&self.store)),
@@ -306,7 +411,7 @@ impl Backend {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
                     let list = crate::sessions::recent_folders(known);
-                    let _ = events.send(ServerEvent::Folders { list });
+                    events.to(from, ServerEvent::Folders { list });
                 });
             }
 
@@ -315,7 +420,7 @@ impl Backend {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
                     let list = crate::sessions::discover(&known);
-                    let _ = events.send(ServerEvent::Sessions { list });
+                    events.to(from, ServerEvent::Sessions { list });
                 });
             }
 
@@ -327,20 +432,20 @@ impl Backend {
                 match imported {
                     Ok(id) => {
                         self.emit(conversations_event(&self.store));
-                        self.emit(ServerEvent::Created {
+                        reply(ServerEvent::Created {
                             conversation_id: id,
                             request,
                             imported: true,
                         });
                     }
-                    Err(detail) => self.emit(ServerEvent::Error {
+                    Err(detail) => reply(ServerEvent::Error {
                         conversation_id: None,
                         detail,
                     }),
                 }
             }
 
-            Command::OpenConversation { id } => self.open(id),
+            Command::OpenConversation { id } => self.open(from, id),
 
             Command::Delete { id } => {
                 let session = self.live.remove(&id);
@@ -353,7 +458,7 @@ impl Backend {
                     if let Some(meta) = removed {
                         crate::sessions::delete_files(&meta);
                     }
-                    let _ = events.send(conversations_event(&store));
+                    events.send(conversations_event(&store));
                 });
             }
 
@@ -383,16 +488,27 @@ impl Backend {
                 model,
                 effort,
                 attachments,
-            } => self.agents().send(
-                conversation_id,
-                Outgoing {
-                    text,
-                    profile,
-                    model,
-                    effort,
-                    attachments,
-                },
-            ),
+            } => {
+                // The client that sent it shows it waiting already.
+                self.events.others(
+                    from,
+                    ServerEvent::Queued {
+                        conversation_id: conversation_id.clone(),
+                        text: text.clone(),
+                        attachments: attachments.clone(),
+                    },
+                );
+                self.agents().send(
+                    conversation_id,
+                    Outgoing {
+                        text,
+                        profile,
+                        model,
+                        effort,
+                        attachments,
+                    },
+                )
+            }
 
             Command::Stop { conversation_id } => {
                 if let Err(detail) = self.live.interrupt(&conversation_id) {
@@ -402,7 +518,7 @@ impl Backend {
 
             Command::Restart => self.restart(),
 
-            Command::OnScreen { conversation_ids } => self.live.set_on_screen(conversation_ids),
+            Command::OnScreen { conversation_ids } => self.on_screen(from, Some(conversation_ids)),
 
             Command::StopStray { conversation_id } => {
                 if let Err(e) = crate::live::stop_stray(&conversation_id) {
@@ -415,28 +531,43 @@ impl Backend {
                 request_id,
                 decision,
             } => match self.live.answer(&conversation_id, &request_id, decision) {
-                Ok(scope) if decision == Decision::AllowAlways => self
-                    .store
-                    .lock()
-                    .unwrap()
-                    .allow_always(&conversation_id, scope),
-                Ok(_) => {}
+                Ok(scope) => {
+                    if decision == Decision::AllowAlways {
+                        self.store
+                            .lock()
+                            .unwrap()
+                            .allow_always(&conversation_id, scope);
+                    }
+                    self.events.others(
+                        from,
+                        ServerEvent::Answered {
+                            conversation_id,
+                            request_id,
+                        },
+                    );
+                }
                 Err(detail) => self.error(conversation_id, detail),
             },
         }
     }
 
-    fn created(&self, id: String, request: u64) {
+    fn created(&self, from: ClientId, id: String, request: u64) {
         self.emit(conversations_event(&self.store));
-        self.emit(ServerEvent::History {
-            conversation_id: id.clone(),
-            items: Vec::new(),
-        });
-        self.emit(ServerEvent::Created {
-            conversation_id: id,
-            request,
-            imported: false,
-        });
+        self.events.to(
+            from,
+            ServerEvent::History {
+                conversation_id: id.clone(),
+                items: Vec::new(),
+            },
+        );
+        self.events.to(
+            from,
+            ServerEvent::Created {
+                conversation_id: id,
+                request,
+                imported: false,
+            },
+        );
     }
 
     fn error(&self, conversation_id: String, detail: String) {
@@ -446,7 +577,7 @@ impl Backend {
         });
     }
 
-    fn open(&self, id: String) {
+    fn open(&self, from: ClientId, id: String) {
         let session = {
             let store = self.store.lock().unwrap();
             match store.get(&id) {
@@ -496,10 +627,13 @@ impl Backend {
                 background.status = TaskStatus::Unknown;
             }
         }
-        self.emit(ServerEvent::History {
-            conversation_id: id,
-            items,
-        });
+        self.events.to(
+            from,
+            ServerEvent::History {
+                conversation_id: id,
+                items,
+            },
+        );
         // Title may have been upgraded from the transcript's ai-title.
         self.emit(conversations_event(&self.store));
     }
@@ -507,7 +641,7 @@ impl Backend {
 
 impl Agents {
     fn emit(&self, event: ServerEvent) {
-        let _ = self.events.send(event);
+        self.events.send(event);
     }
 
     fn session_id(&self, conversation_id: &str) -> Option<String> {
@@ -650,10 +784,21 @@ impl Agents {
     }
 }
 
+/// `path` with a leading `~` read as this computer's home, as typed in claudo on another.
+fn home_expanded(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(path),
+    }
+}
+
 /// Turns a conversation's engine events into `ServerEvent`s, keeping the store's
 /// session id and recency up to date along the way.
 struct Forward {
-    events: UnboundedSender<ServerEvent>,
+    events: Clients,
     store: Arc<Mutex<Store>>,
     conversation_id: String,
     /// The session id to resume with, as last reported.
@@ -668,7 +813,7 @@ struct Forward {
 
 impl Forward {
     fn new(
-        events: UnboundedSender<ServerEvent>,
+        events: Clients,
         store: Arc<Mutex<Store>>,
         conversation_id: String,
         latest: Option<String>,
@@ -687,7 +832,7 @@ impl Forward {
 
     /// Picks up a turn a handover passed on where it was, or starts like `new`.
     fn resumed(
-        events: UnboundedSender<ServerEvent>,
+        events: Clients,
         store: Arc<Mutex<Store>>,
         conversation_id: String,
         progress: &Running,
@@ -725,7 +870,7 @@ impl Forward {
     }
 
     fn emit(&self, event: ServerEvent) {
-        let _ = self.events.send(event);
+        self.events.send(event);
     }
 
     fn event(&mut self, ev: EngineEvent) {
