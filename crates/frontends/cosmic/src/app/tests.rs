@@ -165,10 +165,19 @@ impl Harness {
 }
 
 fn render_alone(renderer: &mut cosmic::Renderer, element: Element<'_, Message>, name: &str) {
+    render_sized(renderer, element, WINDOW, name);
+}
+
+fn render_sized(
+    renderer: &mut cosmic::Renderer,
+    element: Element<'_, Message>,
+    window: Size,
+    name: &str,
+) {
     use cosmic::iced::theme::Base;
-    let mut ui = UserInterface::build(element, WINDOW, Cache::default(), renderer);
+    let mut ui = UserInterface::build(element, window, Cache::default(), renderer);
     let theme = cosmic::theme::active();
-    let size = Size::new(WINDOW.width as u32, WINDOW.height as u32);
+    let size = Size::new(window.width as u32, window.height as u32);
     let base = theme.base();
     ui.draw(
         renderer,
@@ -401,22 +410,8 @@ fn snapshots() {
     let _ = app.update(Message::ShowCommands(true));
     Harness::new(app).snapshot("commands-finished-folded");
 
-    let mut app = two_tiles();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let window = |used, hours: u64| claudo_protocol::QuotaWindow {
-        used,
-        resets_at: now + hours * 3600 + 1800,
-    };
-    app.quota = Some(claudo_protocol::Quota {
-        five_hour: Some(window(0.42, 2)),
-        seven_day: Some(window(0.86, 61)),
-    });
-    app.quota_asked = false;
-    app.quota_at = Some(now - 180);
-    let mut h = Harness::new(app);
+    let now = usage::now();
+    let mut h = Harness::new(with_usage());
     h.snapshot("usage");
     h.app.layout_mut().sidebar_width = SIDEBAR_MIN;
     h.app.zoom = 1.3;
@@ -2845,6 +2840,75 @@ fn a_closed_sidebar_shows_an_update_is_ready_and_still_opens() {
         matches!(messages[..], [Message::ToggleSidebar]),
         "the dot leaves the toggle clickable: {messages:?}"
     );
+}
+
+/// 42% of the session and 86% of the week used, reported three minutes ago.
+fn with_usage() -> ClaudoApp {
+    let mut app = two_tiles();
+    let now = usage::now();
+    let window = |used, hours: u64| claudo_protocol::QuotaWindow {
+        used,
+        resets_at: now + hours * 3600 + 1800,
+    };
+    app.quota = Some(claudo_protocol::Quota {
+        five_hour: Some(window(0.42, 2)),
+        seven_day: Some(window(0.86, 61)),
+    });
+    app.quota_asked = false;
+    app.quota_at = Some(now - 180);
+    app
+}
+
+#[test]
+fn a_closed_sidebar_leaves_the_usage_in_the_header() {
+    let mut app = with_usage();
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let mut header = |app: &ClaudoApp| {
+        let header = Element::from(widget::Row::with_children(app.header_start()));
+        let mut ui = UserInterface::build(header, WINDOW, Cache::default(), &mut renderer);
+        let mut texts = ShownTexts::default();
+        ui.operate(
+            &renderer,
+            &mut cosmic::iced::advanced::widget::operation::black_box(&mut texts),
+        );
+        texts.0
+    };
+    assert!(header(&app).is_empty(), "the open sidebar shows it");
+    app.layout_mut().sidebar_open = false;
+    assert_eq!(header(&app), ["Session", "42%", "Week", "86%"]);
+    app.layout_mut().size = Some((480.0, 600.0));
+    assert!(header(&app).is_empty(), "a narrow window keeps the room");
+}
+
+#[test]
+#[ignore = "writes images; run with --ignored"]
+fn header_usage_snapshot() {
+    let mut app = with_usage();
+    app.layout_mut().sidebar_open = false;
+    let mut renderer = Harness::new(two_tiles()).renderer;
+    let main = app.main_window();
+    let mut render = |app: &mut ClaudoApp, width, name| {
+        app.layout_mut().size = Some((width, 120.0));
+        render_sized(
+            &mut renderer,
+            app.view_window(main),
+            Size::new(width, 120.0),
+            name,
+        );
+    };
+    render(&mut app, 1400.0, "header-usage");
+    render(&mut app, 640.0, "header-usage-narrow");
+    app.layout_mut().tiles.truncate(1);
+    app.conversations
+        .iter_mut()
+        .find(|c| c.id == ALPHA)
+        .unwrap()
+        .context = claudo_protocol::ContextUsage {
+        used: 123_400,
+        window: Some(1_000_000),
+    };
+    render(&mut app, 600.0, "header-usage-one-tile");
+    render(&mut app, 480.0, "header-usage-tight");
 }
 
 #[test]

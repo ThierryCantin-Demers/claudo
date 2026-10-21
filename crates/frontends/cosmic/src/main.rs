@@ -5711,6 +5711,10 @@ mod app {
                 self.window_color(main)
                     .map(|color| window_mark(Some(color), 10.0, 10.0)),
             );
+            start.extend(
+                self.header_usage(main)
+                    .map(|usage| usage.map(move |message| Message::In(main, Box::new(message)))),
+            );
             start
         }
 
@@ -5745,6 +5749,9 @@ mod app {
                 .start(self.sidebar_toggle(id));
             if let Some(color) = self.window_color(id) {
                 header = header.start(window_mark(Some(color), 10.0, 10.0));
+            }
+            if let Some(usage) = self.header_usage(id) {
+                header = header.start(usage);
             }
             for element in self.header_center_of(id) {
                 header = header.center(element);
