@@ -466,8 +466,15 @@ pub enum Command {
         settings: Settings,
     },
     ListConversations,
+    /// Answered by `History`, which leaves out the start of a long conversation.
     OpenConversation {
         id: ConversationId,
+    },
+    /// A page of the entries before the first `before` of a conversation, answered by
+    /// `Earlier`.
+    LoadEarlier {
+        id: ConversationId,
+        before: usize,
     },
     SetOverrides {
         id: ConversationId,
@@ -577,6 +584,16 @@ pub enum ServerEvent {
     History {
         conversation_id: ConversationId,
         items: Vec<Item>,
+        /// How many entries come before these: a long conversation sends its last ones, and
+        /// `LoadEarlier` the rest.
+        #[serde(default)]
+        earlier: usize,
+    },
+    /// Entries that come before the ones sent so far, and how many still come before them.
+    Earlier {
+        conversation_id: ConversationId,
+        items: Vec<Item>,
+        earlier: usize,
     },
     Started {
         conversation_id: ConversationId,

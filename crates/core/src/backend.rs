@@ -447,6 +447,20 @@ impl Backend {
 
             Command::OpenConversation { id } => self.open(from, id),
 
+            Command::LoadEarlier { id, before } => {
+                let Some(mut items) = self.items(&id) else {
+                    return;
+                };
+                let before = before.min(items.len());
+                let start = page_start(&items, before);
+                items.truncate(before);
+                reply(ServerEvent::Earlier {
+                    conversation_id: id,
+                    items: items.split_off(start),
+                    earlier: start,
+                });
+            }
+
             Command::Delete { id } => {
                 let session = self.live.remove(&id);
                 let (events, store) = (self.events.clone(), self.store.clone());
@@ -558,6 +572,7 @@ impl Backend {
             ServerEvent::History {
                 conversation_id: id.clone(),
                 items: Vec::new(),
+                earlier: 0,
             },
         );
         self.events.to(
@@ -578,12 +593,28 @@ impl Backend {
     }
 
     fn open(&self, from: ClientId, id: String) {
+        let Some(mut items) = self.items(&id) else {
+            return;
+        };
+        let earlier = page_start(&items, items.len());
+        self.events.to(
+            from,
+            ServerEvent::History {
+                conversation_id: id,
+                items: items.split_off(earlier),
+                earlier,
+            },
+        );
+        // Title may have been upgraded from the transcript's ai-title.
+        self.emit(conversations_event(&self.store));
+    }
+
+    /// Everything a conversation's transcript holds, its calls in the background as its
+    /// process knows them.
+    fn items(&self, id: &str) -> Option<Vec<Item>> {
         let session = {
             let store = self.store.lock().unwrap();
-            match store.get(&id) {
-                Some(meta) => meta.session_id.clone(),
-                None => return,
-            }
+            store.get(id)?.session_id.clone()
         };
 
         let mut items = match &session {
@@ -591,13 +622,13 @@ impl Backend {
                 let (items, ai_title) = load_transcript(sid);
                 if let Some(title) = ai_title {
                     let mut store = self.store.lock().unwrap();
-                    if let Some(meta) = store.get_mut(&id)
+                    if let Some(meta) = store.get_mut(id)
                         && meta.imported_from.is_none()
                         && !meta.renamed
                         && meta.title != title
                     {
                         meta.title = title.clone();
-                        self.live.rename(&id, &title);
+                        self.live.rename(id, &title);
                     }
                     store.save();
                 }
@@ -608,8 +639,8 @@ impl Backend {
 
         // The transcript cannot tell whether a call in the background still runs; the
         // conversation's process can, and without one nothing here hears such a call end.
-        let running = self.live.in_background(&id);
-        let alive = self.live.pid(&id).is_some();
+        let running = self.live.in_background(id);
+        let alive = self.live.pid(id).is_some();
         for item in &mut items {
             let Item::Tool(call) = item else {
                 continue;
@@ -627,15 +658,7 @@ impl Backend {
                 background.status = TaskStatus::Unknown;
             }
         }
-        self.events.to(
-            from,
-            ServerEvent::History {
-                conversation_id: id,
-                items,
-            },
-        );
-        // Title may have been upgraded from the transcript's ai-title.
-        self.emit(conversations_event(&self.store));
+        Some(items)
     }
 }
 
@@ -782,6 +805,27 @@ impl Agents {
         self.forward(turn, forward);
         Ok(())
     }
+}
+
+/// How many of a long conversation's last entries open it, and how many more each time
+/// earlier ones are asked for: all of one this long took seconds to send to another
+/// computer and lay out.
+const PAGE: usize = 300;
+
+/// Where the page of entries ending at `end` starts: at the turn starting there, or else
+/// at the latest one within half a page more, so a page opens with a message when it can.
+fn page_start(items: &[Item], end: usize) -> usize {
+    let start = end.saturating_sub(PAGE);
+    let reach = start.saturating_sub(PAGE / 2);
+    (reach..=start)
+        .rev()
+        .find(|&i| {
+            matches!(
+                items.get(i),
+                Some(Item::User(_) | Item::Incoming { .. } | Item::Notice(_))
+            )
+        })
+        .unwrap_or(start)
 }
 
 /// `path` with a leading `~` read as this computer's home, as typed in claudo on another.
@@ -1086,4 +1130,34 @@ fn conversations_event(store: &Mutex<Store>) -> ServerEvent {
         })
         .collect();
     ServerEvent::Conversations { list }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_conversation_opens_at_a_message_a_page_back() {
+        let turns = |n: usize, each: usize| -> Vec<Item> {
+            (0..n)
+                .flat_map(|turn| {
+                    std::iter::once(Item::User(format!("turn {turn}")))
+                        .chain((1..each).map(|_| Item::Assistant("step".to_string())))
+                })
+                .collect()
+        };
+        assert_eq!(page_start(&turns(3, 10), 30), 0, "short: all of it");
+        let items = turns(100, 7);
+        let start = page_start(&items, items.len());
+        assert!(matches!(items[start], Item::User(_)));
+        assert!((PAGE..=PAGE + 7).contains(&(items.len() - start)));
+        let earlier = page_start(&items, start);
+        assert!(matches!(items[earlier], Item::User(_)) && earlier < start);
+        let one_turn = turns(1, 2000);
+        assert_eq!(
+            page_start(&one_turn, 2000),
+            2000 - PAGE,
+            "a turn longer than a page is cut where the page starts"
+        );
+    }
 }

@@ -73,6 +73,8 @@ struct ClaudoApp {
 
     current: Option<String>,
     items: Vec<Item>,
+    /// Entries before `items` the backend has yet to send.
+    earlier: usize,
 
     input: String,
     /// Files the next message sends.
@@ -123,6 +125,7 @@ impl ClaudoApp {
             sessions: None,
             streaming: false,
             assistant_idx: None,
+            earlier: 0,
             reveal: 0.0,
             error: None,
             approvals: Vec::new(),
@@ -317,10 +320,25 @@ impl ClaudoApp {
                 ServerEvent::History {
                     conversation_id,
                     items,
+                    earlier,
                 } => {
                     if self.is_current(&conversation_id) {
                         self.items = items;
                         self.assistant_idx = None;
+                        self.earlier = earlier;
+                    }
+                }
+
+                ServerEvent::Earlier {
+                    conversation_id,
+                    items,
+                    earlier,
+                } => {
+                    if self.is_current(&conversation_id) {
+                        let n = items.len();
+                        self.items.splice(0..0, items);
+                        self.assistant_idx = self.assistant_idx.map(|i| i + n);
+                        self.earlier = earlier;
                     }
                 }
 
@@ -1048,6 +1066,15 @@ impl ClaudoApp {
                         ui.weak(
                             "Start a conversation. This runs your Claude Code CLI under the hood.",
                         );
+                    }
+                    if self.earlier > 0
+                        && let Some(id) = self.current.clone()
+                        && ui.button("Show earlier messages").clicked()
+                    {
+                        self.transport.send(Command::LoadEarlier {
+                            id,
+                            before: self.earlier,
+                        });
                     }
                     // Clone each item so the transcript borrow ends before the
                     // markdown viewer needs `&mut self.md_cache`.

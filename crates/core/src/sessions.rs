@@ -748,6 +748,9 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        let joined = joined(&v);
+        let mid_turn = joined.is_some();
+        let v = joined.unwrap_or(v);
         let pushed = items.len();
         let kind = v.get("type").and_then(Value::as_str);
         let at = v
@@ -869,12 +872,13 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
         let Some(at) = at.map(|millis| millis / 1000) else {
             continue;
         };
-        let starts_turn = items[pushed..].iter().any(|item| {
-            matches!(
-                item,
-                Item::User(_) | Item::Incoming { .. } | Item::Notice(_) | Item::File(_)
-            )
-        });
+        let starts_turn = !mid_turn
+            && items[pushed..].iter().any(|item| {
+                matches!(
+                    item,
+                    Item::User(_) | Item::Incoming { .. } | Item::Notice(_) | Item::File(_)
+                )
+            });
         if starts_turn {
             if let Some(ended) = turn.take() {
                 items.insert(pushed, Item::Ended(ended));
@@ -897,6 +901,28 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
     items.extend(turn.map(Item::Ended));
 
     (items, ai_title)
+}
+
+/// A message sent while a turn ran, which joined it at its next step: the user's, another
+/// agent's or a background task's end. Claude Code writes it as an attachment rather than a
+/// user line; this is the user line it reads as.
+fn joined(v: &Value) -> Option<Value> {
+    let attachment = v.get("attachment")?;
+    if v.get("type")?.as_str()? != "attachment"
+        || attachment.get("type")?.as_str()? != "queued_command"
+        || flag(attachment, "isMeta")
+    {
+        return None;
+    }
+    let mut user = serde_json::json!({
+        "type": "user",
+        "timestamp": v.get("timestamp"),
+        "message": { "content": attachment.get("prompt")? },
+    });
+    if let Some(origin) = attachment.get("origin").filter(|origin| !origin.is_null()) {
+        user["origin"] = origin.clone();
+    }
+    Some(user)
 }
 
 fn flag(v: &Value, key: &str) -> bool {
@@ -1148,6 +1174,55 @@ mod tests {
         };
         assert_eq!(review.findings[0].title.as_deref(), Some("Off by one"));
         assert!(review.findings[0].bug);
+    }
+
+    #[test]
+    fn messages_that_joined_a_running_turn_are_kept_where_they_joined() {
+        let at = |s: u32| format!("2026-10-21T18:20:{s:02}.000Z");
+        let queued = |s: u32, prompt: serde_json::Value, origin: serde_json::Value| {
+            serde_json::json!({
+                "type": "attachment", "timestamp": at(s),
+                "attachment": { "type": "queued_command", "prompt": prompt, "commandMode": "prompt", "origin": origin },
+            })
+        };
+        let transcript = [
+            serde_json::json!({ "type": "user", "timestamp": at(1), "message": { "content": "fix it" } }),
+            serde_json::json!({ "type": "assistant", "timestamp": at(2), "message": { "content": [{ "type": "text", "text": "On it." }] } }),
+            queued(3, "also the docs".into(), serde_json::Value::Null),
+            queued(4, serde_json::json!([{ "type": "text", "text": "and push" }]), serde_json::json!({ "kind": "human" })),
+            queued(5, "the build is red".into(), serde_json::json!({ "kind": "peer", "name": "ci" })),
+            serde_json::json!({ "type": "attachment", "timestamp": at(6), "attachment": { "type": "queued_command", "prompt": "reminder", "isMeta": true } }),
+            serde_json::json!({ "type": "assistant", "timestamp": at(7), "message": { "content": [{ "type": "text", "text": "Done." }] } }),
+        ]
+        .map(line)
+        .concat();
+        let path = std::env::temp_dir().join(format!("claudo-joined-{}.jsonl", Uuid::new_v4()));
+        fs::write(&path, transcript).unwrap();
+        let (items, _) = parse_transcript(&path);
+        let _ = fs::remove_file(&path);
+        let shown: Vec<String> = items
+            .iter()
+            .map(|item| match item {
+                Item::User(text) => format!("user {text}"),
+                Item::Assistant(text) => format!("claude {text}"),
+                Item::Incoming { from, text } => format!("{from} {text}"),
+                Item::Ended(_) => "ended".to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "user fix it",
+                "claude On it.",
+                "user also the docs",
+                "user and push",
+                "ci the build is red",
+                "claude Done.",
+                "ended",
+            ],
+            "one turn, with what joined it"
+        );
     }
 
     #[test]

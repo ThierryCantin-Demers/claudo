@@ -1691,6 +1691,7 @@ fn a_conversation_being_loaded_is_not_shown_as_a_new_chat() {
     let _ = app.update(Message::Events(vec![ServerEvent::History {
         conversation_id: charlie.to_string(),
         items: vec![Item::User("hi".to_string())],
+        earlier: 0,
     }]));
     assert!(!app.views[charlie].loading);
     assert_eq!(app.views[charlie].items.len(), 1);
@@ -2777,6 +2778,7 @@ fn messages_not_yet_taken_at_an_update_stay_queued_in_the_new_build() {
         ServerEvent::History {
             conversation_id: charlie.to_string(),
             items: vec![Item::User("run the tests".to_string())],
+            earlier: 0,
         },
     ]));
     assert_eq!(
@@ -3364,6 +3366,7 @@ fn a_command_running_in_the_background_of_an_untiled_conversation_stays_listed()
     let _ = app.update(Message::Events(vec![ServerEvent::History {
         conversation_id: CHARLIE.to_string(),
         items: vec![claudo_protocol::Item::Tool(call)],
+        earlier: 0,
     }]));
     assert!(listed(&app));
 
@@ -3612,4 +3615,43 @@ fn background_badge_snapshot() {
     app.views.get_mut(ALPHA).unwrap().streaming = false;
     app.views.get_mut(BRAVO).unwrap().streaming = true;
     Harness::new(app).snapshot("background-badge");
+}
+
+#[test]
+fn a_long_conversation_shows_its_end_and_earlier_messages_on_demand() {
+    let mut app = two_tiles();
+    let (commands, sent) = claudo_transport::Commands::recorded();
+    app.commands = Some(commands);
+    let _ = app.update(Message::Events(vec![ServerEvent::History {
+        conversation_id: ALPHA.to_string(),
+        items: vec![Item::User("latest".to_string())],
+        earlier: 600,
+    }]));
+    let mut h = Harness::new(app);
+    let at = h
+        .where_is("Show earlier messages")
+        .expect("offered at the top");
+    h.move_to(at.x, at.y);
+    h.send(vec![button(true), button(false)]);
+    assert!(sent.take().iter().any(|c| matches!(
+        c,
+        Command::LoadEarlier { id, before: 600 } if id == ALPHA
+    )));
+    assert!(h.where_is("Loading earlier messages…").is_some());
+
+    let _ = h.app.update(Message::Events(vec![ServerEvent::Earlier {
+        conversation_id: ALPHA.to_string(),
+        items: vec![
+            Item::User("older".to_string()),
+            Item::Assistant("older reply".to_string()),
+        ],
+        earlier: 0,
+    }]));
+    let view = &h.app.views[ALPHA];
+    assert!(matches!(&view.items[0], Entry::User(text) if text == "older"));
+    assert!(matches!(&view.items[2], Entry::User(text) if text == "latest"));
+    assert!(
+        h.where_is("Show earlier messages").is_none(),
+        "nothing more before"
+    );
 }

@@ -182,6 +182,14 @@ Events consumed from the JSONL stream:
 Parse defensively by field extraction, not strict structs, so unrelated schema changes do
 not break chat.
 
+A message sent while a turn runs that joins it at its next step is not a `user` line in
+the transcript but an `attachment` line (`attachment.type: "queued_command"`, its text in
+`prompt`, with the `origin` a user line would carry); the loader reads it as the user line
+it stands for, in the turn it joined. A long conversation opens with its last page of
+entries (`History.earlier` counts the rest, cut where a turn starts) and `LoadEarlier`
+pages back through it, since all of one at once took seconds to send to another computer
+and lay out.
+
 Transcripts live at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Locate one by its
 `<session-id>.jsonl` filename rather than reversing the directory encoding. Relevant line
 types: `user` (content is a plain string for prompts, or an array containing `tool_result`),

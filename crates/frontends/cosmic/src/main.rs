@@ -265,6 +265,9 @@ mod app {
         history: undo::History,
         /// Runs of calls opened, by their first entry.
         groups_open: std::collections::HashSet<usize>,
+        /// Entries before `items` the backend has yet to send, and whether it was asked to.
+        earlier: usize,
+        fetching_earlier: bool,
     }
 
     impl ConversationView {
@@ -296,6 +299,8 @@ mod app {
                 suggestion: None,
                 history: Default::default(),
                 groups_open: Default::default(),
+                earlier: 0,
+                fetching_earlier: false,
             }
         }
 
@@ -474,13 +479,25 @@ mod app {
 
         fn apply(&mut self, ev: ServerEvent) {
             match ev {
-                ServerEvent::History { items, .. } => {
+                ServerEvent::History { items, earlier, .. } => {
                     self.loading = false;
                     self.items = items.into_iter().map(Entry::from).collect();
                     self.generation += 1;
                     self.assistant_idx = None;
                     self.commands_open.clear();
                     self.groups_open.clear();
+                    self.earlier = earlier;
+                    self.fetching_earlier = false;
+                }
+                ServerEvent::Earlier { items, earlier, .. } => {
+                    let n = items.len();
+                    self.items.splice(0..0, items.into_iter().map(Entry::from));
+                    self.generation += 1;
+                    self.assistant_idx = self.assistant_idx.map(|i| i + n);
+                    self.commands_open = self.commands_open.iter().map(|i| i + n).collect();
+                    self.groups_open = self.groups_open.iter().map(|i| i + n).collect();
+                    self.earlier = earlier;
+                    self.fetching_earlier = false;
                 }
                 ServerEvent::Background {
                     call_id,
@@ -1066,6 +1083,8 @@ mod app {
         Link(markdown::Uri),
         /// Expand or collapse a thinking or tool row.
         Toggle(ConversationId, usize),
+        /// Ask for the page of a long conversation before what it shows.
+        ShowEarlier(ConversationId),
         /// Expand or collapse a review finding's failure scenario, or with `None` all of them.
         ToggleFinding(ConversationId, usize, Option<usize>),
         /// Open or fold the run of calls that starts at this entry.
@@ -2383,6 +2402,10 @@ mod app {
                     ref conversation_id,
                     ..
                 }
+                | ServerEvent::Earlier {
+                    ref conversation_id,
+                    ..
+                }
                 | ServerEvent::Started {
                     ref conversation_id,
                     ..
@@ -3693,6 +3716,32 @@ mod app {
                 size,
             };
             let mut rows: Vec<Element<Message>> = Vec::new();
+            if view.loading && view.items.is_empty() {
+                rows.push(
+                    widget::text("Loading the conversation…")
+                        .size(size)
+                        .class(dim())
+                        .into(),
+                );
+            }
+            if view.earlier > 0 {
+                let label = if view.fetching_earlier {
+                    "Loading earlier messages…"
+                } else {
+                    "Show earlier messages"
+                };
+                rows.push(
+                    widget::container(
+                        widget::button::text(label)
+                            .leading_icon(widget::icon::from_name("go-up-symbolic"))
+                            .on_press_maybe(
+                                (!view.fetching_earlier).then(|| Message::ShowEarlier(id.clone())),
+                            ),
+                    )
+                    .center_x(Length::Fill)
+                    .into(),
+                );
+            }
             let mut k = 0;
             while k < top.len() {
                 let work = top[k..]
@@ -5163,6 +5212,16 @@ mod app {
                             }
                             None => review.toggle_all(),
                         }
+                    }
+                }
+                Message::ShowEarlier(id) => {
+                    if let Some(view) = self.views.get_mut(&id)
+                        && view.earlier > 0
+                        && !view.fetching_earlier
+                    {
+                        view.fetching_earlier = true;
+                        let before = view.earlier;
+                        self.cmd(Command::LoadEarlier { id, before });
                     }
                 }
                 Message::Toggle(id, idx) => {
