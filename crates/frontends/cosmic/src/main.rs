@@ -848,6 +848,8 @@ mod app {
         titled: u64,
         /// The windows reopened at launch still have to go back to their workspaces.
         placing: bool,
+        /// Started by restarting into a new build rather than launched.
+        restarted: bool,
         /// They are being sent back.
         restoring: bool,
     }
@@ -885,6 +887,8 @@ mod app {
         windows: Vec<SavedWindow>,
         /// The main window's workspace.
         spot: Option<placement::Spot>,
+        /// Saved just before restarting into a new build; any later save clears it.
+        restarting: bool,
         /// Files attached to unsent messages, which can be large, so they are kept apart and
         /// written only when they change.
         #[serde(skip)]
@@ -956,6 +960,7 @@ mod app {
                 drafts: HashMap::new(),
                 windows: Vec::new(),
                 spot: None,
+                restarting: false,
                 unsent: HashMap::new(),
             }
         }
@@ -1548,7 +1553,7 @@ mod app {
 
         /// Gives each window the focused conversation's title, made unique: the compositor's
         /// window list knows windows by title alone. Once the windows reopened at launch
-        /// have theirs, sends each back to the workspace it was on.
+        /// have theirs, sends those left apart back to their workspace.
         fn retitle(&mut self) {
             use std::hash::{DefaultHasher, Hasher};
             let key = self
@@ -1569,13 +1574,7 @@ mod app {
             }
             if self.placing && self.restore.is_empty() {
                 self.placing = false;
-                let spots: HashMap<String, placement::Spot> = self
-                    .windows
-                    .iter()
-                    .filter_map(|(w, layout)| {
-                        Some((self.titles.get(w)?.clone(), layout.spot.clone()?))
-                    })
-                    .collect();
+                let spots = self.sent_back();
                 if !spots.is_empty() {
                     self.restoring = true;
                     self.tasks.push(Task::perform(
@@ -1614,6 +1613,21 @@ mod app {
                 }
             }
             self.titles.retain(|w, _| self.windows.contains_key(w));
+        }
+
+        /// The workspace each reopened window goes back to, by title. A launch leaves the
+        /// main window where claudo was launched from, with those that shared its workspace,
+        /// and sends back only those left apart; a restart into a new build sends back all.
+        fn sent_back(&self) -> HashMap<String, placement::Spot> {
+            let main = self.main_window();
+            let with_main = self.window(main).spot.as_ref();
+            self.windows
+                .iter()
+                .filter(|(w, layout)| {
+                    self.restarted || (**w != main && layout.spot.as_ref() != with_main)
+                })
+                .filter_map(|(w, layout)| Some((self.titles.get(w)?.clone(), layout.spot.clone()?)))
+                .collect()
         }
 
         /// Notes where each window is. Returns whether any moved.
@@ -2171,9 +2185,12 @@ mod app {
         }
 
         fn persist(&self) {
-            if self.beside {
-                return;
+            if !self.beside {
+                self.ui_state().save();
             }
+        }
+
+        fn ui_state(&self) -> UiState {
             let mut drafts = self.drafts.clone();
             for (id, view) in &self.views {
                 let text = view.draft.text();
@@ -2196,6 +2213,7 @@ mod app {
                 drafts,
                 unsent: HashMap::new(),
                 spot: main.spot.clone(),
+                restarting: false,
                 windows: {
                     let mut others: Vec<_> = self
                         .windows
@@ -2209,7 +2227,6 @@ mod app {
                         .collect()
                 },
             }
-            .save();
         }
 
         fn revealing(&self) -> bool {
@@ -4739,6 +4756,7 @@ mod app {
                 titles: HashMap::new(),
                 titled: 0,
                 placing: !beside,
+                restarted: ui.restarting,
                 restoring: false,
             };
             let mut app = app;
@@ -5123,7 +5141,13 @@ mod app {
                 }
                 Message::CheckUpdate => self.update_ready = instance::replaced(),
                 Message::Restart => {
-                    self.persist();
+                    if !self.beside {
+                        UiState {
+                            restarting: true,
+                            ..self.ui_state()
+                        }
+                        .save();
+                    }
                     self.cmd(Command::Restart);
                 }
                 // Until the reopened windows are back where they were, where they are is not

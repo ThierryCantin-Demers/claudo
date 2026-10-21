@@ -1,4 +1,5 @@
-//! Which workspace each of claudo's windows is on, so a restart puts it back there. A
+//! Which workspace each of claudo's windows is on, so a restart puts one left apart from
+//! the main window back there. A
 //! Wayland app cannot place its own windows; COSMIC lets one read where every window is and
 //! move it, through a connection of its own. Windows are known to it by title alone, so
 //! each of claudo's has its own.

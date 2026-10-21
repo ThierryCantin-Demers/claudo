@@ -85,7 +85,7 @@ Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
 | Focus the previous or next tile | Alt+Left/Right |
 | Close a tile | Its ✕, or Ctrl+W; a window other than the first closes with its last tile |
 | Move a tile to its own window | Right-click its title → Move to new window, or Alt+click it in the sidebar |
-| Get your windows back | They reopen on the workspaces they were on, after an update or a relaunch; each is titled with its focused conversation |
+| Get your windows back | Launched, claudo opens where you are, with the windows that were beside its main one, and sends a window you kept on another workspace back there; after an update every window reopens where it was. Each is titled with its focused conversation |
 | Move a tile to another window | Drag it there by its title (or Ctrl+drag), or right-click its title → Move to window N; dropped outside every window, it gets its own |
 | Rename a conversation | Click its title, or right-click it in the sidebar → Rename; Enter keeps it, Escape cancels |
 | Archive a conversation | Right-click it in the sidebar → Archive; it moves under Archived at the end of the list, kept whole. Unarchive, or a new message in it, brings it back |

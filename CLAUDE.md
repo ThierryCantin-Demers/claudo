@@ -323,7 +323,10 @@ drop (`app/tile_drag.rs`): a window learns nothing of the cursor outside it, so 
 compositor can say which window the tile was dropped on. A window cannot place itself on
 Wayland either, so `app/placement.rs` watches which workspace each window is on through
 COSMIC's toplevel protocols, on a Wayland connection of its own, saves it as soon as one
-moves, and sends the reopened windows back. That list knows windows by title alone, so
+moves, and sends the reopened windows back. A launch leaves the main window where claudo
+was launched from, with the windows that shared its workspace, and sends back only those
+left apart; Update saves `restarting` in the window state first, so the new build sends
+back every window. That list knows windows by title alone, so
 each window is titled with its focused conversation, made unique. Where a window sits on
 its workspace is the compositor's to decide and is not restored.
 

@@ -1288,6 +1288,36 @@ fn two_windows() -> (ClaudoApp, window::Id, window::Id) {
 }
 
 #[test]
+fn a_launch_sends_back_only_the_windows_left_apart_from_the_main_one() {
+    let (mut app, main, second) = two_windows();
+    app.set_titles();
+    let spot = |workspace: &str| placement::Spot {
+        output: "DP-1".to_string(),
+        workspace: workspace.to_string(),
+    };
+    app.windows.get_mut(&main).unwrap().spot = Some(spot("1"));
+    app.windows.get_mut(&second).unwrap().spot = Some(spot("1"));
+    assert!(
+        app.sent_back().is_empty(),
+        "both stay where claudo is launched"
+    );
+
+    app.windows.get_mut(&second).unwrap().spot = Some(spot("3"));
+    let (main_title, second_title) = (app.titles[&main].clone(), app.titles[&second].clone());
+    assert_eq!(
+        app.sent_back(),
+        HashMap::from([(second_title.clone(), spot("3"))])
+    );
+
+    app.restarted = true;
+    assert_eq!(
+        app.sent_back(),
+        HashMap::from([(main_title, spot("1")), (second_title, spot("3"))]),
+        "an update puts every window back"
+    );
+}
+
+#[test]
 fn each_window_has_its_own_color_once_there_are_several() {
     let app = two_tiles();
     assert!(
