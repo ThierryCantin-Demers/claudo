@@ -367,7 +367,11 @@ Each conversation has at most one live `claude` process (`core/src/live.rs`), dr
 - **A call in the background keeps its process alive**, stdin closed or not, until it
   ends. Only that process reports its end, so one running a call in the background is
   never closed for idling nor replaced for new flags (a message keeps the flags it has).
-  A conversation reopened with no process of this claudo's shows such a call as ended.
+  The transcript cannot tell whether such a call still runs, so a reopened conversation
+  takes that from its process (`LiveSessions::in_background`), and one with no process of
+  this claudo's shows the call as ended. After a restart the new build reports each call an
+  adopted process still runs in the background (`ServerEvent::Background`), which opens its
+  conversation in COSMIC, and a view whose commands still run is kept without a tile.
 - **Restarting into a new build hands every process over.** Once the binary claudo runs
   from is replaced (`/proc/self/exe` reads as deleted), the sidebar offers an Update
   button beside Settings, which execs the new build in the same process, so each `claude` child keeps its

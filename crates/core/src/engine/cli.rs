@@ -510,6 +510,11 @@ impl SessionState {
     pub fn running(&self) -> Option<Running> {
         self.running
     }
+
+    /// The calls still running in the background, by id.
+    pub fn in_background(&self) -> &HashSet<String> {
+        &self.background
+    }
 }
 
 /// What a session taken over from the process this one replaced was doing.
@@ -966,6 +971,11 @@ impl Session {
     /// A call runs in the background, such as a listener waiting for messages.
     pub fn has_background(&self) -> bool {
         !self.shared.background.lock().unwrap().is_empty()
+    }
+
+    /// The calls running in the background, by id.
+    pub fn in_background(&self) -> HashSet<String> {
+        self.shared.background.lock().unwrap().clone()
     }
 
     /// A turn is running or waiting to.

@@ -439,6 +439,15 @@ impl LiveSessions {
             .map_err(|e| format!("could not answer the approval: {e}"))
     }
 
+    /// The calls a conversation's process runs in the background, by id.
+    pub fn in_background(&self, conversation_id: &str) -> HashSet<String> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .get(conversation_id)
+            .map(Session::in_background)
+            .unwrap_or_default()
+    }
+
     /// The process currently serving a conversation, if any.
     pub fn pid(&self, conversation_id: &str) -> Option<u32> {
         let sessions = self.sessions.lock().unwrap();

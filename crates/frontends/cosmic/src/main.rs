@@ -1345,7 +1345,8 @@ mod app {
 
         /// Drop a view no tile shows once its turn is over, keeping the unsent message.
         fn release(&mut self, id: &str) {
-            if self.tile_of(id).is_some() || self.views.get(id).is_none_or(|v| v.streaming) {
+            let busy = |view: &ConversationView| view.streaming || view.running_commands() > 0;
+            if self.tile_of(id).is_some() || self.views.get(id).is_none_or(busy) {
                 return;
             }
             if let Some(view) = self.views.remove(id) {
@@ -2426,6 +2427,13 @@ mod app {
                         ev,
                         ServerEvent::Completed { .. } | ServerEvent::Error { .. }
                     );
+                    let (started, ended) = match &ev {
+                        ServerEvent::Background { background, .. } => {
+                            let running = background.status == claudo_protocol::TaskStatus::Running;
+                            (running, !running)
+                        }
+                        _ => (false, false),
+                    };
                     // A turn in a conversation no tile shows still gets a view, which
                     // the sidebar marks as working.
                     if matches!(
@@ -2441,12 +2449,14 @@ mod app {
                     }
                     // What the app this one replaced was doing: a turn's history so far comes
                     // now, and again once it ends.
-                    if matches!(
-                        ev,
-                        ServerEvent::Working { .. }
-                            | ServerEvent::Queued { .. }
-                            | ServerEvent::Waiting { .. }
-                    ) && !self.views.contains_key(&id)
+                    if (started
+                        || matches!(
+                            ev,
+                            ServerEvent::Working { .. }
+                                | ServerEvent::Queued { .. }
+                                | ServerEvent::Waiting { .. }
+                        ))
+                        && !self.views.contains_key(&id)
                     {
                         let mut view = self.revived(&id);
                         view.loading = true;
@@ -2465,6 +2475,8 @@ mod app {
                             view.partial = false;
                             self.cmd(Command::OpenConversation { id: id.clone() });
                         }
+                        self.release(&id);
+                    } else if ended {
                         self.release(&id);
                     }
                 }

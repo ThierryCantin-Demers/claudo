@@ -3246,3 +3246,66 @@ fn ctrl_z_takes_back_a_pasted_image() {
     h.send(vec![ctrl_letter('z', true)]);
     assert_eq!(files(&h), 1, "and redo puts it back");
 }
+
+#[test]
+fn a_command_running_in_the_background_of_an_untiled_conversation_stays_listed() {
+    const CHARLIE: &str = "ccccc333-0000-4000-8000-000000000000";
+    let mut app = two_tiles();
+    app.conversations.push(ConversationInfo {
+        id: CHARLIE.to_string(),
+        title: "Charlie".to_string(),
+        cwd: "/tmp".to_string(),
+        attached: false,
+        archived: false,
+        overrides: Overrides::default(),
+        context: Default::default(),
+    });
+    let background = |status| ServerEvent::Background {
+        conversation_id: CHARLIE.to_string(),
+        call_id: "c1".to_string(),
+        background: Background {
+            status,
+            output: None,
+        },
+        at: None,
+    };
+    let listed = |app: &ClaudoApp| {
+        app.command_groups(app.main_window())
+            .iter()
+            .any(|(id, view)| id.as_str() == CHARLIE && view.running_commands() == 1)
+    };
+
+    let _ = app.update(Message::Events(vec![background(TaskStatus::Running)]));
+    assert!(
+        app.views.get(CHARLIE).is_some_and(|view| view.loading),
+        "a restart's report opens it"
+    );
+    let mut call = bash("c1", "cargo build --release", "Build");
+    call.result = Some("Command running in background with ID: b1.".to_string());
+    call.background = Some(Background {
+        status: TaskStatus::Running,
+        output: None,
+    });
+    let _ = app.update(Message::Events(vec![ServerEvent::History {
+        conversation_id: CHARLIE.to_string(),
+        items: vec![claudo_protocol::Item::Tool(call)],
+    }]));
+    assert!(listed(&app));
+
+    let _ = app.update(Message::Events(vec![ServerEvent::Completed {
+        conversation_id: CHARLIE.to_string(),
+        is_error: false,
+        context: Default::default(),
+        time: None,
+    }]));
+    assert!(
+        listed(&app),
+        "a turn ending leaves it while the command runs"
+    );
+
+    let _ = app.update(Message::Events(vec![background(TaskStatus::Completed)]));
+    assert!(
+        !app.views.contains_key(CHARLIE),
+        "and lets it go once the command ends"
+    );
+}

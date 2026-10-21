@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
-    Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, ServerEvent, TaskStatus,
-    ToolCall, TurnTime,
+    Background, Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, ServerEvent,
+    TaskStatus, ToolCall, TurnTime,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
@@ -109,10 +109,22 @@ impl Backend {
         } in handover.sessions
         {
             let working = state.running().is_some();
+            let background: Vec<String> = state.in_background().iter().cloned().collect();
             let adopted = self.live.adopt(&conversation, state);
             if working {
                 self.emit(ServerEvent::Working {
                     conversation_id: conversation.clone(),
+                });
+            }
+            for call_id in background {
+                self.emit(ServerEvent::Background {
+                    conversation_id: conversation.clone(),
+                    call_id,
+                    background: Background {
+                        status: TaskStatus::Running,
+                        output: None,
+                    },
+                    at: None,
                 });
             }
             for (request_id, call, scope) in adopted.approvals {
@@ -463,16 +475,25 @@ impl Backend {
             None => Vec::new(),
         };
 
-        // Without a process of this claudo's, nothing here hears a background call end, so
-        // one still marked running is shown as having ended.
-        if self.live.pid(&id).is_none() {
-            for item in &mut items {
-                if let Item::Tool(call) = item
-                    && let Some(background) = &mut call.background
-                    && background.status == TaskStatus::Running
-                {
-                    background.status = TaskStatus::Unknown;
-                }
+        // The transcript cannot tell whether a call in the background still runs; the
+        // conversation's process can, and without one nothing here hears such a call end.
+        let running = self.live.in_background(&id);
+        let alive = self.live.pid(&id).is_some();
+        for item in &mut items {
+            let Item::Tool(call) = item else {
+                continue;
+            };
+            if running.contains(&call.call_id) {
+                call.background = Some(Background {
+                    status: TaskStatus::Running,
+                    output: None,
+                });
+                call.ended = None;
+            } else if let Some(background) = &mut call.background
+                && background.status == TaskStatus::Running
+                && !alive
+            {
+                background.status = TaskStatus::Unknown;
             }
         }
         self.emit(ServerEvent::History {

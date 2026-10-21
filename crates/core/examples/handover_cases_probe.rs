@@ -1,7 +1,7 @@
 //! Manual probe for what a restart hands over besides a running command: an approval
 //! waiting for its answer, a message queued behind a running call, a command in the
-//! background and a forked command's subagent. Each held command reads a fifo, so the new
-//! process decides when it ends.
+//! background, which shows as running until it ends, and a forked command's subagent. Each
+//! held command reads a fifo, so the new process decides when it ends.
 //! Usage: cargo run -p claudo-core --example handover_cases_probe
 
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use claudo_core::backend::Backend;
-use claudo_protocol::{Command, Decision, Effort, Profile, ServerEvent, TaskStatus};
+use claudo_protocol::{Command, Decision, Effort, Item, Profile, ServerEvent, TaskStatus};
 use tokio::sync::mpsc::unbounded_channel;
 
 const CASES: [&str; 4] = ["approval", "queued", "background", "forked"];
@@ -161,10 +161,13 @@ fn after(tmp: &Path) {
         .collect();
     let (tx, mut rx) = unbounded_channel::<ServerEvent>();
     let backend = Backend::new(tx);
-    for case in &CASES[1..] {
+    let release = |case: &str| {
         let fifo = fifo(tmp, case);
         std::thread::spawn(move || std::fs::write(fifo, "go\n"));
-    }
+    };
+    // The background command is let go only once it was seen running after the restart.
+    release("queued");
+    release("forked");
 
     let mut seen: HashMap<String, Vec<String>> = HashMap::new();
     let mut replies: HashMap<String, String> = HashMap::new();
@@ -191,6 +194,23 @@ fn after(tmp: &Path) {
                 if background.status != TaskStatus::Running =>
             {
                 "background ended".to_string()
+            }
+            ServerEvent::Background { .. } => {
+                backend.handle(Command::OpenConversation {
+                    id: conversation(&ev).unwrap().to_string(),
+                });
+                "background running".to_string()
+            }
+            ServerEvent::History { items, .. } => {
+                let running = items.iter().any(|item| {
+                    matches!(item, Item::Tool(call) if call.background.as_ref()
+                        .is_some_and(|b| b.status == TaskStatus::Running))
+                });
+                release(&case);
+                format!(
+                    "reopened with the call {}",
+                    if running { "running" } else { "ended" }
+                )
             }
             ServerEvent::Notice { .. } => "notice".to_string(),
             ServerEvent::ToolResult { .. } => "call ended".to_string(),
@@ -238,6 +258,14 @@ fn after(tmp: &Path) {
         "it reaches Claude once the running call ends",
     );
     check(
+        saw("background", "background running"),
+        "a command still in the background is reported running after the restart",
+    );
+    check(
+        saw("background", "reopened with the call running"),
+        "and its conversation, reopened, shows it running",
+    );
+    check(
         saw("background", "background ended") && saw("background", "notice"),
         "a background command's end is heard, and starts a turn",
     );
@@ -257,6 +285,9 @@ fn conversation(ev: &ServerEvent) -> Option<&str> {
             conversation_id, ..
         }
         | ServerEvent::Delivered { conversation_id }
+        | ServerEvent::History {
+            conversation_id, ..
+        }
         | ServerEvent::Background {
             conversation_id, ..
         }
