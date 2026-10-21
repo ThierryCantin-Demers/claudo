@@ -237,6 +237,8 @@ mod app {
         queued: Vec<(String, Vec<attach::Shown>)>,
         /// What the user would likely send next, offered in the empty message box.
         suggestion: Option<String>,
+        /// What Ctrl+Z takes back in the message box.
+        history: undo::History,
         /// Runs of calls opened, by their first entry.
         groups_open: std::collections::HashSet<usize>,
     }
@@ -268,6 +270,7 @@ mod app {
                 attachments: Vec::new(),
                 queued: Vec::new(),
                 suggestion: None,
+                history: Default::default(),
                 groups_open: Default::default(),
             }
         }
@@ -317,6 +320,9 @@ mod app {
                 0 => String::new(),
                 _ => self.prompts()[back - 1].to_string(),
             };
+            if self.recalled == 0 {
+                self.history.replacing(&self.draft);
+            }
             self.recalled = back;
             self.draft = text_editor::Content::with_text(&text);
             self.draft.perform(text_editor::Action::Move(if older {
@@ -1145,6 +1151,9 @@ mod app {
         /// Ctrl+V in a message box: an image on the clipboard is attached too.
         PasteImage(ConversationId),
         PickFiles(ConversationId),
+        /// Take back the message box's last change, files attached included.
+        Undo(ConversationId),
+        Redo(ConversationId),
         /// Files for a conversation's next message, or why they could not be read.
         Attach(
             ConversationId,
@@ -2175,6 +2184,7 @@ mod app {
             }
             if let Some(view) = self.views.get_mut(&id) {
                 view.draft = text_editor::Content::new();
+                view.history.clear();
                 view.recalled = 0;
                 view.menu_closed = false;
             }
@@ -4637,6 +4647,20 @@ mod app {
         if arrow && modifiers.alt() {
             return None;
         }
+        if focused && modifiers.control() {
+            match press.key.as_ref() {
+                keyboard::Key::Character("z" | "Z") if modifiers.shift() => {
+                    return Some(Binding::Custom(Message::Redo(conversation.clone())));
+                }
+                keyboard::Key::Character("z" | "Z") => {
+                    return Some(Binding::Custom(Message::Undo(conversation.clone())));
+                }
+                keyboard::Key::Character("y" | "Y") => {
+                    return Some(Binding::Custom(Message::Redo(conversation.clone())));
+                }
+                _ => {}
+            }
+        }
         if focused
             && modifiers.control()
             && matches!(press.key.as_ref(), keyboard::Key::Character("v" | "V"))
@@ -4919,6 +4943,13 @@ mod app {
                         if edit {
                             view.recalled = 0;
                         }
+                        match &action {
+                            text_editor::Action::Edit(change) => {
+                                view.history.edit(&view.draft, change);
+                            }
+                            text_editor::Action::Scroll { .. } => {}
+                            _ => view.history.moved(),
+                        }
                         view.draft.perform(action);
                         if edit {
                             view.menu = 0;
@@ -5000,6 +5031,7 @@ mod app {
                         && let Some(suggestion) = view.suggestion.take()
                     {
                         view.recalled = 0;
+                        view.history.replacing(&view.draft);
                         view.draft = text_editor::Content::with_text(&suggestion);
                         view.draft
                             .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
@@ -5124,11 +5156,28 @@ mod app {
                 Message::Attach(id, files) => {
                     if let Some(view) = self.views.get_mut(&id) {
                         match files {
-                            Ok(files) => view
-                                .attachments
-                                .extend(files.into_iter().map(attach::Shown::new)),
+                            Ok(files) if files.is_empty() => {}
+                            Ok(files) => {
+                                view.history.attaching(view.attachments.len());
+                                view.attachments
+                                    .extend(files.into_iter().map(attach::Shown::new));
+                            }
                             Err(error) => view.error = Some(error),
                         }
+                    }
+                }
+                Message::Undo(ref id) | Message::Redo(ref id) => {
+                    let undo = matches!(message, Message::Undo(_));
+                    if let Some(view) = self.views.get_mut(id) {
+                        let (draft, files) = (&mut view.draft, &mut view.attachments);
+                        if undo {
+                            view.history.undo(draft, files);
+                        } else {
+                            view.history.redo(draft, files);
+                        }
+                        view.recalled = 0;
+                        view.menu = 0;
+                        view.menu_closed &= view.draft.text().starts_with('/');
                     }
                 }
                 Message::Detach(id, index) => {
@@ -6050,6 +6099,7 @@ mod app {
     mod tests;
     mod tile_drag;
     mod time;
+    mod undo;
     mod usage;
 
     /// A subscription identified by a fixed name. `Subscription::run` hashes its

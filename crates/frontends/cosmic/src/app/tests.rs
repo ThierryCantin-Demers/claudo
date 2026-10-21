@@ -3173,3 +3173,76 @@ fn the_tile_row_takes_dropped_files_only_as_a_copy() {
         "{inner:?}"
     );
 }
+
+/// Ctrl, and Shift with it when `shift`, held with a letter.
+fn ctrl_letter(c: char, shift: bool) -> Event {
+    let text = c.to_string();
+    let mut modifiers = keyboard::Modifiers::CTRL;
+    if shift {
+        modifiers |= keyboard::Modifiers::SHIFT;
+    }
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Character(text.clone().into()),
+        modified_key: keyboard::Key::Character(text.into()),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    })
+}
+
+#[test]
+fn ctrl_z_takes_back_a_paste_then_the_words_typed_before_it() {
+    let mut h = Harness::new(two_tiles());
+    h.focus(composer_id(ALPHA));
+    let draft = |h: &Harness| h.app.views[ALPHA].draft.text();
+    h.send("hello world".chars().map(typed).collect());
+    let pasted = text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new(
+        " and a pasted\nblock".to_string(),
+    )));
+    let _ = h.app.update(Message::Edit(ALPHA.to_string(), pasted));
+    assert_eq!(draft(&h), "hello world and a pasted\nblock");
+
+    h.send(vec![ctrl_letter('z', false)]);
+    assert_eq!(draft(&h), "hello world", "the paste goes back in one step");
+    h.send(vec![ctrl_letter('z', false)]);
+    assert_eq!(draft(&h), "hello ", "then a word at a time");
+    h.send(vec![ctrl_letter('z', false)]);
+    assert_eq!(draft(&h), "");
+
+    h.send(vec![ctrl_letter('z', true)]);
+    assert_eq!(draft(&h), "hello ");
+    h.send(vec![ctrl_letter('y', false)]);
+    assert_eq!(draft(&h), "hello world");
+    h.send(vec![typed('!')]);
+    assert_eq!(
+        draft(&h),
+        "hello world!",
+        "typing goes on where the text was"
+    );
+    h.send(vec![ctrl_letter('y', false)]);
+    assert_eq!(draft(&h), "hello world!", "and leaves nothing to redo");
+}
+
+#[test]
+fn ctrl_z_takes_back_a_pasted_image() {
+    let mut h = Harness::new(two_tiles());
+    h.focus(composer_id(ALPHA));
+    h.send("look".chars().map(typed).collect());
+    let _ = h
+        .app
+        .update(Message::Attach(ALPHA.to_string(), Ok(vec![picture()])));
+    let files = |h: &Harness| h.app.views[ALPHA].attachments.len();
+    assert_eq!(files(&h), 1);
+
+    h.send(vec![ctrl_letter('z', false)]);
+    assert_eq!(
+        (files(&h), h.app.views[ALPHA].draft.text()),
+        (0, "look".to_string())
+    );
+    h.send(vec![ctrl_letter('z', true)]);
+    assert_eq!(files(&h), 1, "and redo puts it back");
+}
