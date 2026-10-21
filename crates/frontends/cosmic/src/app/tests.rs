@@ -2875,7 +2875,10 @@ fn a_closed_sidebar_leaves_the_usage_in_the_header() {
     };
     assert!(header(&app).is_empty(), "the open sidebar shows it");
     app.layout_mut().sidebar_open = false;
-    assert_eq!(header(&app), ["Session", "42%", "Week", "86%"]);
+    assert_eq!(
+        header(&app),
+        ["Session", "42%", "2 h 30 min", "Week", "86%", "2 d 13 h"]
+    );
     app.layout_mut().size = Some((480.0, 600.0));
     assert!(header(&app).is_empty(), "a narrow window keeps the room");
 }
@@ -2907,7 +2910,7 @@ fn header_usage_snapshot() {
         used: 123_400,
         window: Some(1_000_000),
     };
-    render(&mut app, 600.0, "header-usage-one-tile");
+    render(&mut app, 660.0, "header-usage-one-tile");
     render(&mut app, 480.0, "header-usage-tight");
 }
 

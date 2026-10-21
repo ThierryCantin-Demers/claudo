@@ -47,53 +47,54 @@ impl ClaudoApp {
         )
     }
 
-    /// Each window as a short meter, with when it resets in a tooltip.
+    /// Each window on a line of its own: how much is used and when it resets.
     pub(super) fn header_usage(&self, w: window::Id) -> Option<Element<'_, Message>> {
         const SIZE: f32 = 11.0;
         // Narrower, they would run under the title or the context.
-        const ROOM: f32 = 600.0;
+        const ROOM: f32 = 660.0;
         let layout = self.window(w);
         if layout.sidebar_open || layout.size.is_some_and(|(width, _)| width < ROOM) {
             return None;
         }
         let now = now();
         let quota = self.quota?;
-        let windows: Vec<_> = [("Session", quota.five_hour), ("Week", quota.seven_day)]
-            .into_iter()
-            .filter_map(|(label, window)| Some((label, standing(window?, now))))
-            .collect();
-        if windows.is_empty() {
+        let lines: Vec<Element<Message>> =
+            [("Session", quota.five_hour), ("Week", quota.seven_day)]
+                .into_iter()
+                .filter_map(|(label, window)| {
+                    let (used, left) = standing(window?, now);
+                    let resets = left.map_or("not started".to_string(), span);
+                    Some(
+                        widget::Row::with_children(vec![
+                            widget::text(label)
+                                .size(SIZE)
+                                .width(Length::Fixed(44.0))
+                                .into(),
+                            widget::container(meter(used))
+                                .width(Length::Fixed(48.0))
+                                .into(),
+                            widget::container(
+                                widget::text(format!("{:.0}%", used * 100.0))
+                                    .size(SIZE)
+                                    .class(dim()),
+                            )
+                            .align_right(Length::Fixed(32.0))
+                            .into(),
+                            widget::text(resets).size(SIZE).class(dim()).into(),
+                        ])
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .into(),
+                    )
+                })
+                .collect();
+        if lines.is_empty() {
             return None;
         }
-        let mut lines: Vec<String> = windows
-            .iter()
-            .map(|(label, (_, left))| format!("{label}: {}", resets(*left)))
-            .collect();
-        lines.push(self.status(now));
-        let meters: Vec<Element<Message>> = windows
-            .into_iter()
-            .map(|(label, (used, _))| {
-                widget::Column::with_children(vec![
-                    widget::Row::with_children(vec![
-                        widget::text(label).size(SIZE).into(),
-                        widget::space::horizontal().into(),
-                        widget::text(format!("{:.0}%", used * 100.0))
-                            .size(SIZE)
-                            .class(dim())
-                            .into(),
-                    ])
-                    .into(),
-                    meter(used),
-                ])
-                .spacing(3)
-                .width(Length::Fixed(72.0))
-                .into()
-            })
-            .collect();
         Some(
             widget::tooltip(
-                widget::container(widget::Row::with_children(meters).spacing(12)).padding([0, 8]),
-                widget::text(lines.join("\n").trim_end().to_string()),
+                widget::container(widget::Column::with_children(lines)).padding([0, 8]),
+                widget::text(format!("Time left until each resets\n{}", self.status(now))),
                 widget::tooltip::Position::Bottom,
             )
             .into(),
