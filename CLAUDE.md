@@ -213,6 +213,10 @@ background, and a background one keeps streaming after the turn that started it 
 which the engine passes on between turns. The main transcript keeps none of them: each
 subagent writes `<session-id>/subagents/agent-<id>.jsonl`, beside an `agent-<id>.meta.json`
 whose `toolUseId` names the Agent call, and the loader places its calls after that call.
+A subagent `SendMessage` resumes, as after a usage limit, keeps its task id and its calls
+still name the Agent call, but its `task_started` and `task_notification` name the
+`SendMessage` call; claudo puts them on the Agent call, which `toolUseId` names after a
+restart too, so the subagent shows running again where it was.
 
 **A forked slash command streams nothing while it runs.** A skill with `context: fork`, such
 as `/code-review` in an older process (see below), starts with `system` / `task_started` (`task_type: "local_agent"`, no

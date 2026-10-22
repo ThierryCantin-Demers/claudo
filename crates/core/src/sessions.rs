@@ -20,8 +20,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::engine::cli::{
-    attachment, backgrounded, command_echo, command_output, compaction, incoming, reported_review,
-    review, task_notification, tool_call, unix_millis,
+    agent_call, attachment, backgrounded, command_echo, command_output, compaction, incoming,
+    reported_review, review, task_notification, tool_call, unix_millis,
 };
 
 /// claudo's data root, e.g. `~/.local/share/claudo`.
@@ -511,11 +511,7 @@ fn with_subagents(items: Vec<Item>, dir: &Path) -> Vec<Item> {
         else {
             continue;
         };
-        let parent = fs::read_to_string(&meta)
-            .ok()
-            .and_then(|meta| serde_json::from_str::<Value>(&meta).ok())
-            .and_then(|meta| Some(meta.get("toolUseId")?.as_str()?.to_owned()));
-        let Some(parent) = parent else {
+        let Some(parent) = agent_call(&meta) else {
             continue;
         };
         let (subagent, _) = parse_transcript(&dir.join(format!("{agent}.jsonl")));
@@ -743,6 +739,7 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
     let mut items: Vec<Item> = Vec::new();
     let mut ai_title = None;
     let mut turn: Option<TurnTime> = None;
+    let subagents = path.with_extension("").join("subagents");
 
     for line in content.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -808,7 +805,14 @@ fn parse_transcript(path: &Path) -> (Vec<Item>, Option<String>) {
                 }
                 Some(Value::String(s)) => match task_notification(s) {
                     Some(end) => {
-                        if let Some(call) = call_mut(&mut items, &end.call_id) {
+                        // A resumed subagent's end names the call that resumed it.
+                        let call_id = end
+                            .task
+                            .and_then(|task| {
+                                agent_call(&subagents.join(format!("agent-{task}.meta.json")))
+                            })
+                            .unwrap_or(end.call_id);
+                        if let Some(call) = call_mut(&mut items, &call_id) {
                             call.background = Some(end.background);
                             call.ended = at.or(call.ended);
                         }
@@ -1174,6 +1178,52 @@ mod tests {
         };
         assert_eq!(review.findings[0].title.as_deref(), Some("Off by one"));
         assert!(review.findings[0].bug);
+    }
+
+    #[test]
+    fn a_resumed_subagents_end_goes_to_the_agent_call_that_started_it() {
+        let call = |id: &str, name: &str| {
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "content": [{ "type": "tool_use", "id": id, "name": name, "input": {} }] },
+            })
+        };
+        let ended = |call: &str, status: &str| {
+            serde_json::json!({
+                "type": "user",
+                "message": { "content": format!("<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>{call}</tool-use-id>\n<status>{status}</status>\n<summary>It {status}</summary>\n</task-notification>") },
+            })
+        };
+        let transcript = [
+            call("agent", "Agent"),
+            ended("agent", "failed"),
+            call("send", "SendMessage"),
+            ended("send", "completed"),
+        ]
+        .map(line)
+        .concat();
+        let path = std::env::temp_dir().join(format!("claudo-resumed-{}.jsonl", Uuid::new_v4()));
+        let subagents = path.with_extension("").join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        fs::write(subagents.join("agent-a1.meta.json"), r#"{"toolUseId":"agent"}"#).unwrap();
+        fs::write(&path, transcript).unwrap();
+        let (items, _) = parse_transcript(&path);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(path.with_extension(""));
+        let status: Vec<(&str, Option<TaskStatus>)> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Tool(call) => Some((
+                    call.call_id.as_str(),
+                    call.background.as_ref().map(|b| b.status),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            status,
+            [("agent", Some(TaskStatus::Completed)), ("send", None)]
+        );
     }
 
     #[test]

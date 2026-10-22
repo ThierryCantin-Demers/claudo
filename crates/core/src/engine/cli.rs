@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -365,6 +365,9 @@ struct Reading {
     last_request: u64,
     /// Forked commands' subagents followed, by task: their session, and what stops it.
     following: HashMap<String, (String, Arc<AtomicBool>)>,
+    /// The call each background task belongs to: a subagent resumed by `SendMessage` is
+    /// reported under that call, but is still the Agent call's.
+    tasks: HashMap<String, String>,
     /// Reviews reported by call, held until the CLI accepts the call: it refuses one
     /// whose input breaks its schema, and the reviewer then reports again.
     reported: HashMap<String, Review>,
@@ -429,6 +432,19 @@ impl Reading {
                 }),
             },
             ev => Some(ev),
+        }
+    }
+
+    /// Puts a background task's start or end, from line `v`, on the call it belongs to.
+    fn belong(&mut self, v: &Value, ev: &mut EngineEvent) {
+        if let EngineEvent::Background { call_id, .. } = ev
+            && let Some(task) = v.get("task_id").and_then(Value::as_str)
+        {
+            *call_id = self
+                .tasks
+                .entry(task.to_string())
+                .or_insert_with(|| started_by(v).unwrap_or_else(|| call_id.clone()))
+                .clone();
         }
     }
 }
@@ -757,6 +773,7 @@ impl Session {
                 notices: state.notices,
                 last_request: state.last_request,
                 following: HashMap::new(),
+                tasks: HashMap::new(),
                 reported: state.reported,
                 closed: false,
             }),
@@ -1198,6 +1215,7 @@ impl Shared {
             None => decode(v),
         };
         for mut ev in events {
+            reading.belong(v, &mut ev);
             if let EngineEvent::Background {
                 call_id,
                 background,
@@ -1893,7 +1911,7 @@ fn follow_subagent(shared: &Shared, session: &str, task: &str, stop: &AtomicBool
     loop {
         let stopping = stop.load(Ordering::Relaxed);
         if transcript.is_none() {
-            transcript = subagent_transcript(&name)
+            transcript = subagent_file(&name)
                 .and_then(|path| File::open(path).ok())
                 .map(BufReader::new);
         }
@@ -1925,7 +1943,7 @@ fn follow_subagent(shared: &Shared, session: &str, task: &str, stop: &AtomicBool
     }
 }
 
-fn subagent_transcript(name: &str) -> Option<PathBuf> {
+fn subagent_file(name: &str) -> Option<PathBuf> {
     let projects = PathBuf::from(std::env::var_os("HOME")?).join(".claude/projects");
     std::fs::read_dir(projects)
         .ok()?
@@ -1934,10 +1952,28 @@ fn subagent_transcript(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The Agent call that started the subagent a task line is about, after a restart too.
+fn started_by(v: &Value) -> Option<String> {
+    let field = |key| v.get(key).and_then(Value::as_str);
+    let meta = format!(
+        "{}/subagents/agent-{}.meta.json",
+        field("session_id")?,
+        field("task_id")?
+    );
+    agent_call(&subagent_file(&meta)?)
+}
+
+/// The Agent call that started a subagent, from the meta file beside its transcript.
+pub(crate) fn agent_call(meta: &Path) -> Option<String> {
+    let meta: Value = serde_json::from_str(&std::fs::read_to_string(meta).ok()?).ok()?;
+    Some(meta.get("toolUseId")?.as_str()?.to_owned())
+}
+
 /// A background task's end, from the message the CLI gives the model when one ends, which
 /// the transcript keeps as a user prompt.
 pub(crate) struct TaskEnd {
     pub call_id: String,
+    pub task: Option<String>,
     pub background: Background,
     pub summary: String,
 }
@@ -1948,6 +1984,7 @@ pub(crate) fn task_notification(text: &str) -> Option<TaskEnd> {
     }
     Some(TaskEnd {
         call_id: xml_tag(text, "tool-use-id")?.to_string(),
+        task: xml_tag(text, "task-id").map(str::to_owned),
         background: ended(xml_tag(text, "status")?, xml_tag(text, "output-file")),
         summary: xml_tag(text, "summary")
             .unwrap_or("A background command ended")
@@ -2509,6 +2546,36 @@ mod tests {
         assert!(ask_rule_in("cd /x\ngh issue create | cat").is_some());
         assert!(ask_rule_in("cd /x && gh issue list").is_none());
         assert!(ask_rule_in("gh issue created").is_none());
+    }
+
+    #[test]
+    fn a_resumed_subagent_stays_the_agent_call_that_started_it() {
+        let task = |subtype: &str, call: &str| {
+            line(&format!(
+                r#"{{"type":"system","subtype":"{subtype}","task_id":"a1","tool_use_id":"{call}","is_backgrounded":true,"task_type":"local_agent","status":"completed","session_id":"s"}}"#
+            ))
+        };
+        let mut reading = Reading::default();
+        let calls: Vec<String> = [
+            task("task_started", "agent"),
+            task("task_notification", "agent"),
+            task("task_started", "send"),
+            task("task_notification", "send"),
+        ]
+        .iter()
+        .flat_map(|v| {
+            let mut events = decode(v);
+            for ev in &mut events {
+                reading.belong(v, ev);
+            }
+            events
+        })
+        .filter_map(|ev| match ev {
+            EngineEvent::Background { call_id, .. } => Some(call_id),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(calls, ["agent"; 4]);
     }
 
     #[test]
