@@ -316,7 +316,7 @@ impl Panel {
         );
         widget::container(widget::Column::with_children(rows).spacing(4))
             .padding(12)
-            .width(Length::Fixed(280.0))
+            .width(Length::Fill)
             .into()
     }
 }
