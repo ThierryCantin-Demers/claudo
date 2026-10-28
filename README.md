@@ -25,6 +25,10 @@ That installs `claudo-cosmic` into `~/.cargo/bin` with a Claudo entry and icon i
 launcher; `cargo xtask uninstall` removes all three. To run it from the checkout instead:
 `cargo xtask cosmic --release`.
 
+`cargo xtask install-applet` installs a panel applet showing your plan's five-hour session
+and week, which notifies you once when either would run out before it resets at the pace so
+far. Add it from Settings, Desktop, Panel, Configure applets.
+
 ### egui (Linux, macOS, Windows)
 
 ```bash

@@ -4,7 +4,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
-use claudo_protocol::{Quota, QuotaWindow};
+use claudo_protocol::{Quota, Standing, span};
 
 /// Usage is fetched this often when no turn reports it.
 pub(super) const USAGE_REFRESH_MINUTES: u32 = 10;
@@ -28,10 +28,13 @@ impl ClaudoApp {
     pub(super) fn usage(&self) -> Option<Element<'_, Message>> {
         let now = now();
         let size = 12.0 * self.zoom;
-        let mut rows: Vec<Element<Message>> = windows(self.quota)
+        let mut rows: Vec<Element<Message>> = self
+            .quota
+            .unwrap_or_default()
+            .windows()
             .into_iter()
             .filter_map(|(label, window, length)| {
-                Some(usage_row(label, standing(window?, length, now), size))
+                Some(usage_row(label, window?.standing(length, now), size))
             })
             .collect();
         if rows.is_empty() && self.quota_error.is_none() {
@@ -59,10 +62,13 @@ impl ClaudoApp {
         }
         let now = now();
         let mut tip = vec!["Time left until each resets".to_string()];
-        let lines: Vec<Element<Message>> = windows(self.quota)
+        let lines: Vec<Element<Message>> = self
+            .quota
+            .unwrap_or_default()
+            .windows()
             .into_iter()
             .filter_map(|(label, window, length)| {
-                let standing = standing(window?, length, now);
+                let standing = window?.standing(length, now);
                 let mut line = vec![
                     widget::text(label)
                         .size(SIZE)
@@ -147,52 +153,6 @@ impl ClaudoApp {
         ])
         .align_y(Alignment::Center)
         .into()
-    }
-}
-
-/// Each window with its label and its length in seconds.
-fn windows(quota: Option<Quota>) -> [(&'static str, Option<QuotaWindow>, u64); 2] {
-    let quota = quota.unwrap_or_default();
-    [
-        ("Session", quota.five_hour, 5 * 3600),
-        ("Week", quota.seven_day, 7 * 86_400),
-    ]
-}
-
-/// Where a window stands.
-#[derive(Debug, PartialEq)]
-struct Standing {
-    used: f32,
-    /// Until it resets, or None once past it, until a report says it started again.
-    left: Option<u64>,
-    /// How much an even pace would have used by now.
-    even: Option<f32>,
-    /// Until it runs out at the pace so far, when that comes before its reset.
-    out_in: Option<u64>,
-}
-
-fn standing(window: QuotaWindow, length: u64, now: u64) -> Standing {
-    let Some(left) = window.resets_at.checked_sub(now).filter(|&left| left > 0) else {
-        return Standing {
-            used: 0.0,
-            left: None,
-            even: None,
-            out_in: None,
-        };
-    };
-    let used = window.used.clamp(0.0, 1.0);
-    let elapsed = length.saturating_sub(left);
-    let even = elapsed as f32 / length as f32;
-    // A turn or two in a window's first minutes says nothing yet of its pace.
-    let judged = used >= 0.1 || even >= 0.1;
-    let out_in = (judged && elapsed > 0 && used > 0.0 && used < 1.0)
-        .then(|| ((1.0 - used) / used * elapsed as f32) as u64)
-        .filter(|&out_in| out_in < left);
-    Standing {
-        used,
-        left: Some(left),
-        even: Some(even),
-        out_in,
     }
 }
 
@@ -314,75 +274,4 @@ fn meter<'a>(standing: &Standing) -> Element<'a, Message> {
     ])
     .width(Length::Fill)
     .into()
-}
-
-/// How long until a reset, to the minute: "45 min", "4 h 35 min", "2 d 13 h".
-fn span(seconds: u64) -> String {
-    let minutes = seconds.div_ceil(60);
-    let (days, hours, minutes) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
-    match (days, hours) {
-        (0, 0) => format!("{minutes} min"),
-        (0, _) => format!("{hours} h {minutes} min"),
-        _ => format!("{days} d {hours} h"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const HOUR: u64 = 3600;
-    const SESSION: u64 = 5 * HOUR;
-
-    fn session(used: f32, left: u64) -> Standing {
-        let now = 1_000_000;
-        standing(
-            QuotaWindow {
-                used,
-                resets_at: now + left,
-            },
-            SESSION,
-            now,
-        )
-    }
-
-    #[test]
-    fn a_window_used_faster_than_it_passes_runs_out_before_its_reset() {
-        let ahead = session(0.5, 4 * HOUR);
-        assert_eq!(ahead.even, Some(0.2));
-        assert_eq!(
-            ahead.out_in,
-            Some(HOUR),
-            "half in an hour, the rest in another"
-        );
-        assert_eq!(
-            session(0.4, SESSION / 2).out_in,
-            None,
-            "behind an even pace"
-        );
-        assert_eq!(
-            session(0.05, SESSION - 120).out_in,
-            None,
-            "too early to judge"
-        );
-        assert_eq!(session(1.0, HOUR).out_in, None, "already used up");
-        assert_eq!(
-            session(0.5, 0),
-            Standing {
-                used: 0.0,
-                left: None,
-                even: None,
-                out_in: None
-            },
-            "a window past its reset starts over"
-        );
-    }
-
-    #[test]
-    fn reset_spans_read_at_a_glance() {
-        assert_eq!(span(30), "1 min");
-        assert_eq!(span(45 * 60), "45 min");
-        assert_eq!(span(4 * 3600 + 35 * 60), "4 h 35 min");
-        assert_eq!(span(2 * 86_400 + 13 * 3600 + 59), "2 d 13 h");
-    }
 }

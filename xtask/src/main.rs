@@ -12,6 +12,8 @@ use need::Need;
 
 const APP_ID: &str = "com.claudo.Cosmic";
 const COSMIC_BIN: &str = "claudo-cosmic";
+const APPLET_ID: &str = "com.claudo.Usage";
+const APPLET_BIN: &str = "claudo-applet";
 const WEB_OUT: &str = "crates/frontends/egui/dist";
 
 #[derive(Parser)]
@@ -32,7 +34,10 @@ enum Task {
         #[arg(long, value_name = "HOST")]
         on: Option<String>,
     },
-    /// Remove what `install` put in place.
+    /// Install the panel applet showing the subscription's usage; add it to the panel from
+    /// Settings, Desktop, Panel, Configure applets.
+    InstallApplet,
+    /// Remove what `install` and `install-applet` put in place.
     Uninstall,
     /// Run the COSMIC app.
     Cosmic {
@@ -79,7 +84,7 @@ fn main() -> ExitCode {
 impl Task {
     fn needs(&self) -> &'static [Need] {
         match self {
-            Task::Install { on: None } | Task::Cosmic { hot: false, .. } => {
+            Task::Install { on: None } | Task::InstallApplet | Task::Cosmic { hot: false, .. } => {
                 &[Need::PkgConfig, Need::Xkbcommon, Need::Claude]
             }
             Task::Install { on: Some(_) } => &[Need::PkgConfig, Need::Xkbcommon],
@@ -105,6 +110,7 @@ fn run(task: Task) -> Result<(), String> {
     match task {
         Task::Setup => need::setup(),
         Task::Install { on } => install(on.as_deref()),
+        Task::InstallApplet => install_applet(),
         Task::Uninstall => uninstall(),
         Task::Cosmic { hot: true, .. } => hot(),
         Task::Cosmic { release, .. } => {
@@ -202,8 +208,45 @@ fn install(on: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+fn install_applet() -> Result<(), String> {
+    cargo(&[
+        "install",
+        "--path",
+        "crates/applet",
+        "--features",
+        "cosmic",
+        "--locked",
+    ])?;
+    let bin = cargo_bin_dir()?.join(APPLET_BIN);
+    let desktop = applet_desktop_file()?;
+    fs::create_dir_all(desktop.parent().unwrap())
+        .map_err(|e| format!("cannot create {}: {e}", desktop.parent().unwrap().display()))?;
+    // The panel lists an entry only with X-CosmicApplet, and NoDisplay keeps it out of the launcher.
+    let entry = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Claude usage\n\
+         Comment=The Claude subscription's session and week, and a warning when either runs out too fast\n\
+         Exec={}\n\
+         Icon=utilities-system-monitor-symbolic\n\
+         Terminal=false\n\
+         Categories=COSMIC;\n\
+         NoDisplay=true\n\
+         X-CosmicApplet=true\n",
+        bin.display()
+    );
+    fs::write(&desktop, entry).map_err(|e| format!("cannot write {}: {e}", desktop.display()))?;
+    println!("installed {}", bin.display());
+    println!("applet entry {}", desktop.display());
+    println!("add it to the panel from Settings, Desktop, Panel, Configure applets");
+    Ok(())
+}
+
 fn uninstall() -> Result<(), String> {
     cargo(&["uninstall", COSMIC_BIN])?;
+    if cargo_bin_dir()?.join(APPLET_BIN).exists() {
+        cargo(&["uninstall", APPLET_BIN])?;
+    }
     let remote: Vec<PathBuf> = fs::read_dir(desktop_file()?.parent().unwrap())
         .into_iter()
         .flatten()
@@ -215,7 +258,10 @@ fn uninstall() -> Result<(), String> {
                 .is_some_and(|name| name.starts_with(&format!("{APP_ID}.on-")))
         })
         .collect();
-    for file in [desktop_file()?, icon_file()?].into_iter().chain(remote) {
+    for file in [desktop_file()?, icon_file()?, applet_desktop_file()?]
+        .into_iter()
+        .chain(remote)
+    {
         match fs::remove_file(&file) {
             Ok(()) => println!("removed {}", file.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -314,6 +360,10 @@ fn data_home() -> Result<PathBuf, String> {
 
 fn desktop_file() -> Result<PathBuf, String> {
     Ok(data_home()?.join(format!("applications/{APP_ID}.desktop")))
+}
+
+fn applet_desktop_file() -> Result<PathBuf, String> {
+    Ok(data_home()?.join(format!("applications/{APPLET_ID}.desktop")))
 }
 
 fn remote_desktop_file(host: &str) -> Result<PathBuf, String> {

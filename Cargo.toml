@@ -7,6 +7,7 @@ members = [
     "crates/daemon",
     "crates/frontends/egui",
     "crates/frontends/cosmic",
+    "crates/applet",
     "xtask",
 ]
 exclude = ["vendor"]
