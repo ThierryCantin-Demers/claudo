@@ -459,7 +459,7 @@ turn as a normal completion. A pending approval is withdrawn first with a
 
 ## Workflow
 
-- The project is a git repo (`origin` is a private GitHub repo). Commit at stable points
+- The project is a git repo (`origin` is on GitHub). Commit at stable points
   with a clear message.
 - **Never push, open a PR, or create an issue without asking first.**
 - Do not force push a branch that has an open PR.

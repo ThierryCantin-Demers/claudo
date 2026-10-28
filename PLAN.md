@@ -4,11 +4,11 @@ Status: M0 to M5 and M3b implemented; M6 (polish) in progress. COSMIC is the pri
 
 ## Decisions locked (from review)
 
-- **Directory:** `/home/thierrycd/prog/claude-native-client/` (for now).
+- **Directory:** `claude-native-client/`.
 - **First frontend:** egui (also unlocks the web client). libcosmic later.
 - **Permission posture:** **prompt-per-tool-call by default**, with a toggle to **auto mode** (pre-approve tools) per conversation / globally.
 - **No API-key fallback.** Subscription-via-CLI is the only engine. Keeps the project single-purpose.
-- **Distribution:** a **private shared GitHub repo**; coworkers build from source and each logs in with **their own** Claude subscription. Not published publicly.
+- **Distribution:** a **public GitHub repo**; people build from source and each logs in with **their own** Claude subscription.
 - **Conversation cwd:** **dedicated per-conversation data dir by default**, with an optional "attach to a project folder" mode.
 - **Subprocess model:** **one long-lived process per conversation** (bidirectional stream-json), closed after 30 minutes idle and respawned with `--resume`. Started as spawn-per-turn.
 - **Name:** **`claudo`** (for now). Used as the workspace/binary name; directory stays `claude-native-client/` for now.
@@ -23,7 +23,7 @@ This tool wraps the **Claude Code CLI in headless mode**: a documented, scriptab
 
 Hard constraints to stay on the defensible side of Anthropic's terms:
 
-- **Personal use, or a small internal share with coworkers via a private GitHub repo: not a published product.** Coworkers clone and build from source.
+- **Personal use, shared as a GitHub repo: not a packaged product.** Others clone and build from source.
 - **Every user logs in with their OWN Claude subscription** via their own CLI. The app is only a UI; it never routes anyone's requests through someone else's credentials.
 - **Never** ship or point it at a single shared subscription login on behalf of others: that's the explicitly-banned "route requests through Free/Pro/Max credentials on behalf of their users" pattern.
 - **Human-paced chat, not API-scale automation.** Don't turn it into a batch/throughput tool.
@@ -199,7 +199,7 @@ Even though tools live in Claude Code, exposing them through a socket is still a
 
 ## 13. Open questions for review
 
-All resolved in review (see "Decisions locked" at top): directory, name (`claudo`), egui-first, permission posture (prompt + auto toggle), no API-key fallback, distribution via private GitHub repo + build-from-source, conversation cwd strategy, subprocess model.
+All resolved in review (see "Decisions locked" at top): directory, name (`claudo`), egui-first, permission posture (prompt + auto toggle), no API-key fallback, distribution via GitHub repo + build-from-source, conversation cwd strategy, subprocess model.
 
 Nothing open. Plan is ready to build against.
 

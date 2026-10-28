@@ -128,8 +128,8 @@ mod tests {
     #[test]
     fn addresses_end_where_their_sentence_takes_over() {
         assert_eq!(
-            found("See https://github.com/tracel-ai/burn/pull/6111."),
-            ["https://github.com/tracel-ai/burn/pull/6111"]
+            found("See https://github.com/pop-os/libcosmic/pull/611."),
+            ["https://github.com/pop-os/libcosmic/pull/611"]
         );
         assert_eq!(
             found("(docs at http://docs.rs/iced) and https://a.b/c?d=1&e=(2), too"),

@@ -1415,7 +1415,7 @@ mod tests {
             fs::create_dir_all(&dir).unwrap();
             let line = serde_json::json!({
                 "type": "user", "cwd": cwd, "timestamp": "2026-10-17T21:31:33.835Z",
-                "message": {"content": "listen for dibs friction reports"},
+                "message": {"content": "summarize the build logs"},
             });
             fs::write(dir.join("s1.jsonl"), line.to_string()).unwrap();
         };
@@ -1437,7 +1437,7 @@ mod tests {
         assert_eq!(ids, ["listed", "lost"], "a deleted one stays deleted");
         let lost = &store.conversations[1];
         assert_eq!(lost.session_id.as_deref(), Some("s1"));
-        assert_eq!(lost.title, "listen for dibs friction reports");
+        assert_eq!(lost.title, "summarize the build logs");
     }
 
     #[test]

@@ -2118,8 +2118,8 @@ fn addresses_and_markdown_links_open_when_clicked() {
     };
 
     assert_eq!(
-        reply("https://github.com/tracel-ai/burn/pull/6111, as asked."),
-        ["https://github.com/tracel-ai/burn/pull/6111"]
+        reply("https://github.com/pop-os/libcosmic/pull/611, as asked."),
+        ["https://github.com/pop-os/libcosmic/pull/611"]
     );
     assert_eq!(reply("[docs](https://docs.rs) here"), ["https://docs.rs"]);
     assert!(reply("Opened https://x.io/p").is_empty());
@@ -3391,10 +3391,10 @@ fn a_command_running_in_the_background_of_an_untiled_conversation_stays_listed()
 #[test]
 fn a_lost_computer_keeps_the_message_and_once_back_is_asked_anew() {
     let mut app = two_tiles();
-    app.remote = Some("korodale-xps");
+    app.remote = Some("devbox");
     let (commands, sent) = claudo_transport::Commands::recorded();
     app.commands = Some(commands);
-    let lost = "ssh: connect to host korodale-xps port 22: No route to host";
+    let lost = "ssh: connect to host devbox port 22: No route to host";
     let _ = app.update(Message::Events(vec![ServerEvent::Connection {
         connected: false,
         detail: lost.to_string(),
@@ -3473,7 +3473,7 @@ fn a_folder_on_the_other_computer_is_typed_and_sent_as_typed() {
     let mut app = two_tiles();
     let (commands, sent) = claudo_transport::Commands::recorded();
     app.commands = Some(commands);
-    app.remote = Some("korodale-xps");
+    app.remote = Some("devbox");
     app.views.get_mut(ALPHA).unwrap().items.clear();
     let _ = app.update(Message::MoveTo(ALPHA.to_string(), folder::Choice::Pick));
     assert!(
@@ -3533,10 +3533,10 @@ fn an_approval_answered_on_another_computer_stops_asking_here() {
 #[ignore = "writes images; run with --ignored"]
 fn lost_computer_snapshot() {
     let mut app = two_tiles();
-    app.remote = Some("korodale-xps");
+    app.remote = Some("devbox");
     let _ = app.update(Message::Events(vec![ServerEvent::Connection {
         connected: false,
-        detail: "ssh: connect to host korodale-xps port 22: No route to host".to_string(),
+        detail: "ssh: connect to host devbox port 22: No route to host".to_string(),
     }]));
     Harness::new(app).snapshot("lost-computer");
 }
@@ -3559,15 +3559,15 @@ fn claudo_showing_another_computer_says_so_in_its_header() {
         header(&app).is_empty(),
         "nothing for the claudo running agents here"
     );
-    app.remote = Some("korodale-xps");
-    assert_eq!(header(&app), ["On korodale-xps"]);
+    app.remote = Some("devbox");
+    assert_eq!(header(&app), ["On devbox"]);
 }
 
 #[test]
 #[ignore = "writes images; run with --ignored"]
 fn remote_chip_snapshot() {
     let mut app = with_usage();
-    app.remote = Some("korodale-xps");
+    app.remote = Some("devbox");
     app.layout_mut().sidebar_open = false;
     let mut renderer = Harness::new(two_tiles()).renderer;
     let main = app.main_window();
@@ -3579,7 +3579,7 @@ fn remote_chip_snapshot() {
     );
     let _ = app.update(Message::Events(vec![ServerEvent::Connection {
         connected: false,
-        detail: "ssh: connect to host korodale-xps.local port 22: No route to host".to_string(),
+        detail: "ssh: connect to host devbox.local port 22: No route to host".to_string(),
     }]));
     render_sized(
         &mut renderer,
