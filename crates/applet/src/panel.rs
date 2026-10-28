@@ -161,7 +161,8 @@ impl Application for Panel {
             if !parts.is_empty() {
                 parts.push(label(applet.text("·")).class(dim()).into());
             }
-            let text = label(applet.text(format!("{short} {:.0}%", standing.used * 100.0)));
+            parts.push(label(applet.text(short)).class(accent()).into());
+            let text = label(applet.text(format!("{:.0}%", standing.used * 100.0)));
             parts.push(match severity(&standing) {
                 Some(class) => text.class(class).into(),
                 None => text.into(),
@@ -384,6 +385,10 @@ fn severity(standing: &Standing) -> Option<cosmic::theme::Text> {
     } else {
         None
     }
+}
+
+fn accent() -> cosmic::theme::Text {
+    cosmic::theme::Text::Color(cosmic::theme::active().cosmic().accent_color().into())
 }
 
 fn warning() -> cosmic::theme::Text {
