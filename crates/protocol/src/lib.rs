@@ -112,6 +112,10 @@ pub const DEFAULT_MODEL: &str = "opus";
 pub struct Quota {
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
+    /// When the server measured these, in Unix seconds. The CLI answers an ask for usage
+    /// from a snapshot up to 30 minutes old; None from a peer too old to say.
+    #[serde(default)]
+    pub measured_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

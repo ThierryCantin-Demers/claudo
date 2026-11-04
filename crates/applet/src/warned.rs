@@ -37,6 +37,7 @@ mod tests {
         Quota {
             five_hour: Some(QuotaWindow { used, resets_at }),
             seven_day: None,
+            measured_at: None,
         }
     }
 

@@ -29,7 +29,8 @@ use uuid::Uuid;
 use crate::claude_bin;
 
 /// The answer to one control request, from a short-lived process: no turn, no tokens.
-fn ask(subtype: &str) -> io::Result<Value> {
+fn ask(request: Value) -> io::Result<Value> {
+    let subtype = request["subtype"].as_str().unwrap_or_default().to_string();
     let mut child = Command::new(claude_bin())
         .current_dir(std::env::temp_dir())
         .arg("-p")
@@ -41,11 +42,11 @@ fn ask(subtype: &str) -> io::Result<Value> {
         .stderr(Stdio::null())
         .spawn()?;
     let mut stdin = child.stdin.take().expect("stdin piped");
-    for request in ["initialize", subtype] {
+    for (id, request) in [("initialize", json!({ "subtype": "initialize" })), (&*subtype, request)] {
         writeln!(
             stdin,
             "{}",
-            json!({ "type": "control_request", "request_id": request, "request": { "subtype": request } })
+            json!({ "type": "control_request", "request_id": id, "request": request })
         )?;
     }
     let stdout = child.stdout.take().expect("stdout piped");
@@ -55,7 +56,7 @@ fn ask(subtype: &str) -> io::Result<Value> {
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
         .find(|v| {
             v.get("type").and_then(Value::as_str) == Some("control_response")
-                && v.pointer("/response/request_id").and_then(Value::as_str) == Some(subtype)
+                && v.pointer("/response/request_id").and_then(Value::as_str) == Some(subtype.as_str())
         });
     drop(stdin);
     let _ = child.wait();
@@ -68,7 +69,7 @@ fn ask(subtype: &str) -> io::Result<Value> {
 /// lists them. A family is offered by the alias that runs its newest version; pinned
 /// older versions and `default` are left out.
 pub fn capabilities() -> io::Result<(Vec<ModelOption>, Vec<CliCommand>)> {
-    let response = ask("initialize")?;
+    let response = ask(json!({ "subtype": "initialize" }))?;
     let list = |key: &str| {
         response
             .get(key)
@@ -102,10 +103,13 @@ pub fn capabilities() -> io::Result<(Vec<ModelOption>, Vec<CliCommand>)> {
 
 /// The subscription's usage windows, without waiting for a turn to report them.
 pub fn usage() -> io::Result<Quota> {
-    let response = ask("get_usage")?;
-    let limits = response
-        .get("rate_limits")
-        .ok_or(io::ErrorKind::InvalidData)?;
+    // Without skip_behaviors the CLI scans a week of transcripts, seconds of CPU per ask.
+    let response = ask(json!({ "subtype": "get_usage", "skip_behaviors": true }))?;
+    usage_answer(&response).ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
+fn usage_answer(response: &Value) -> Option<Quota> {
+    let limits = response.get("rate_limits")?;
     // Percents here, where a turn's `rate_limit_event` gives fractions.
     let window = |key: &str| {
         let window = limits.get(key)?;
@@ -114,9 +118,14 @@ pub fn usage() -> io::Result<Quota> {
             resets_at: unix_seconds(window.get("resets_at")?.as_str()?)?,
         })
     };
-    Ok(Quota {
+    let as_of = limits
+        .pointer("/seven_day_breakdown/as_of")
+        .and_then(Value::as_str)
+        .and_then(unix_seconds);
+    Some(Quota {
         five_hour: window("five_hour"),
         seven_day: window("seven_day"),
+        measured_at: Some(as_of.unwrap_or_else(crate::sessions::now_secs)),
     })
 }
 
@@ -2088,6 +2097,7 @@ fn quota(v: &Value) -> Option<Quota> {
     Some(Quota {
         five_hour: window("five_hour"),
         seven_day: window("seven_day"),
+        measured_at: Some(crate::sessions::now_secs()),
     })
 }
 
@@ -2614,6 +2624,18 @@ mod tests {
         assert_eq!(end.background.status, TaskStatus::Completed);
         assert_eq!(end.summary, "It ended");
         assert!(task_notification("please read <task-notification> docs").is_none());
+    }
+
+    #[test]
+    fn asked_usage_is_dated_by_its_snapshot() {
+        let response = json!({ "rate_limits": {
+            "five_hour": { "utilization": 7, "resets_at": "2026-11-04T21:30:00.971516+00:00" },
+            "seven_day": { "utilization": 27, "resets_at": "2026-11-08T05:59:59.971543+00:00" },
+            "seven_day_breakdown": { "as_of": "2026-11-04T16:30:22.014943+00:00" },
+        }});
+        let quota = usage_answer(&response).unwrap();
+        assert_eq!(quota.five_hour.unwrap().used, 0.07);
+        assert_eq!(quota.measured_at, unix_seconds("2026-11-04T16:30:22Z"));
     }
 
     #[test]

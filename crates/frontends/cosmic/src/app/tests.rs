@@ -2046,6 +2046,30 @@ fn the_end_of_a_conversation_counts_its_background_commands() {
 }
 
 #[test]
+fn an_older_usage_snapshot_leaves_a_turns_newer_report() {
+    let window = |used| {
+        Some(claudo_protocol::QuotaWindow {
+            used,
+            resets_at: usage::now() + 3600,
+        })
+    };
+    let turn = claudo_protocol::Quota {
+        five_hour: window(0.07),
+        seven_day: None,
+        measured_at: Some(1_000),
+    };
+    let snapshot = claudo_protocol::Quota {
+        five_hour: window(0.0),
+        seven_day: window(0.26),
+        measured_at: Some(400),
+    };
+    let quota = usage::merged(Some(turn), snapshot);
+    assert_eq!(quota.five_hour.unwrap().used, 0.07);
+    assert_eq!(quota.seven_day.unwrap().used, 0.26);
+    assert_eq!(quota.measured_at, Some(1_000));
+}
+
+#[test]
 fn the_usage_says_when_it_was_updated_and_refreshes_on_demand() {
     let mut app = two_tiles();
     assert!(app.quota_asked, "the first report is asked for at launch");
@@ -2055,6 +2079,7 @@ fn the_usage_says_when_it_was_updated_and_refreshes_on_demand() {
             resets_at: usage::now() + 3600,
         }),
         seven_day: None,
+        measured_at: None,
     };
     let _ = app.update(Message::Events(vec![ServerEvent::Quota(quota)]));
     assert!(!app.quota_asked);
@@ -2566,6 +2591,7 @@ fn restart_snapshot() {
             resets_at: usage::now() + 7200,
         }),
         seven_day: None,
+        measured_at: None,
     });
     app.quota_asked = false;
     let mut h = Harness::new(app);
@@ -2855,6 +2881,7 @@ fn with_usage() -> ClaudoApp {
     app.quota = Some(claudo_protocol::Quota {
         five_hour: Some(window(0.42, 2)),
         seven_day: Some(window(0.86, 61)),
+        measured_at: None,
     });
     app.quota_asked = false;
     app.quota_at = Some(now - 180);

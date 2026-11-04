@@ -875,7 +875,7 @@ mod app {
         focus_composer: Option<ConversationId>,
         /// The subscription's usage windows, as last reported.
         quota: Option<Quota>,
-        /// When `quota` was last reported, in Unix seconds.
+        /// When the server measured `quota`, in Unix seconds.
         quota_at: Option<u64>,
         /// A report is on its way; the first goes out at launch.
         quota_asked: bool,
@@ -2350,8 +2350,9 @@ mod app {
                 ServerEvent::Models(models) => self.models = models,
                 ServerEvent::Commands(commands) => self.cli_commands = commands,
                 ServerEvent::Quota(quota) => {
-                    self.quota = Some(usage::merged(self.quota, quota));
-                    self.quota_at = Some(usage::now());
+                    let quota = usage::merged(self.quota, quota);
+                    self.quota = Some(quota);
+                    self.quota_at = Some(quota.measured_at.unwrap_or_else(usage::now));
                     self.quota_asked = false;
                     self.quota_error = None;
                 }

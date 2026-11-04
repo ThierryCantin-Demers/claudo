@@ -26,7 +26,7 @@ pub struct Panel {
     core: Core,
     popup: Option<Id>,
     quota: Option<Quota>,
-    /// When the windows were last reported, in Unix seconds.
+    /// When the server measured the windows, in Unix seconds.
     quota_at: Option<u64>,
     error: Option<String>,
     asking: bool,
@@ -93,7 +93,7 @@ impl Application for Panel {
                     Ok(quota) => {
                         let now = now();
                         self.quota = Some(quota);
-                        self.quota_at = Some(now);
+                        self.quota_at = Some(quota.measured_at.unwrap_or(now));
                         self.error = None;
                         for (label, out_in) in self.warned.fresh(quota, now) {
                             notify(label, out_in);

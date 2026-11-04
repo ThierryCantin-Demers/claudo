@@ -9,12 +9,18 @@ use claudo_protocol::{Quota, Standing, span};
 /// Usage is fetched this often when no turn reports it.
 pub(super) const USAGE_REFRESH_MINUTES: u32 = 10;
 
-/// A turn's report may carry one window; keep the other from before.
+/// A turn's report may carry one window; keep the other from before. An asked-for
+/// snapshot can be older than the last turn's report, which then stays.
 pub(super) fn merged(old: Option<Quota>, new: Quota) -> Quota {
-    let old = old.unwrap_or_default();
+    let Some(old) = old else { return new };
+    let (newer, older) = match (old.measured_at, new.measured_at) {
+        (Some(old_at), Some(new_at)) if old_at > new_at => (old, new),
+        _ => (new, old),
+    };
     Quota {
-        five_hour: new.five_hour.or(old.five_hour),
-        seven_day: new.seven_day.or(old.seven_day),
+        five_hour: newer.five_hour.or(older.five_hour),
+        seven_day: newer.seven_day.or(older.seven_day),
+        measured_at: newer.measured_at,
     }
 }
 
