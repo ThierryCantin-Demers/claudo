@@ -1271,7 +1271,7 @@ mod app {
         FocusStep(i32),
         Resized(cosmic::iced::window::Id, cosmic::iced::Size),
         /// Opens and closes popups, such as context menus.
-        Surface(cosmic::surface::Action),
+        Surface(cosmic::surface::Action<Message>),
         /// The main window is closing.
         Quit,
         /// "New chat"; with Shift it gets a new tile, with Alt a window.
@@ -3438,7 +3438,7 @@ mod app {
                 None if view.items.is_empty() => "Message Claude".to_string(),
                 None => "Reply to Claude…".to_string(),
             };
-            let editor = widget::text_editor(&view.draft)
+            let editor = cosmic::iced::widget::text_editor(&view.draft)
                 .id(composer_id(id))
                 .placeholder(placeholder)
                 .on_action(move |action| Message::Edit(id.clone(), action))
@@ -5766,9 +5766,7 @@ mod app {
                     }
                 }
                 Message::Surface(action) => {
-                    return cosmic::task::message(cosmic::Action::Cosmic(
-                        cosmic::app::Action::Surface(action),
-                    ));
+                    return cosmic::task::message(cosmic::Action::Surface(action));
                 }
                 Message::Answer {
                     conversation_id,

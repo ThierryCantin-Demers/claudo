@@ -2710,7 +2710,6 @@ impl Harness {
         use cosmic::iced::advanced::widget::operation::{Outcome, black_box};
         struct Find<'a> {
             text: &'a str,
-            translation: cosmic::iced::Vector,
             found: Option<Point>,
         }
         impl Operation<Option<Point>> for Find<'_> {
@@ -2725,8 +2724,12 @@ impl Harness {
                 translation: cosmic::iced::Vector,
                 _state: &mut dyn cosmic::iced::advanced::widget::operation::Scrollable,
             ) {
-                if content_bounds.height > bounds.height {
-                    self.translation = translation;
+                // A scrollable is reported after its children, so its offset applies to a
+                // point already found inside it.
+                if let Some(found) = self.found.filter(|p| content_bounds.contains(*p))
+                    && content_bounds.height > bounds.height
+                {
+                    self.found = Some(found - translation);
                 }
             }
             fn text(
@@ -2736,7 +2739,7 @@ impl Harness {
                 text: &str,
             ) {
                 if text == self.text && self.found.is_none() {
-                    self.found = Some(bounds.center() - self.translation);
+                    self.found = Some(bounds.center());
                 }
             }
             fn finish(&self) -> Outcome<Option<Point>> {
@@ -2746,7 +2749,6 @@ impl Harness {
         self.frame(|ui, renderer| {
             let mut find = Find {
                 text,
-                translation: cosmic::iced::Vector::ZERO,
                 found: None,
             };
             ui.operate(renderer, &mut black_box(&mut find));

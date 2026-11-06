@@ -1,4 +1,4 @@
-# iced_core from libcosmic 7e777077b81e3a1b9c7b723f35399e80f1b2cba5 (iced/core), with
+# iced_core from libcosmic 896b252dfc3c6cb0c678b844432016415dc104b1 (iced/core), with
 # workspace inheritance resolved. Only change: the `hot` feature in src/widget/tree.rs.
 # Refresh this copy whenever the libcosmic rev in crates/frontends/cosmic changes.
 [package]
@@ -39,7 +39,7 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 window_clipboard = { git = "https://github.com/pop-os/window_clipboard.git", tag = "sctk-0.20" }
 dnd = { git = "https://github.com/pop-os/window_clipboard.git", tag = "sctk-0.20" }
 mime = { git = "https://github.com/pop-os/window_clipboard.git", tag = "sctk-0.20" }
-iced_accessibility = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }
+iced_accessibility = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
@@ -48,4 +48,4 @@ raw-window-handle = "0.6"
 cctk = { git = "https://github.com/pop-os/cosmic-protocols", rev = "32283d7", package = "cosmic-client-toolkit", optional = true }
 
 [build-dependencies]
-build_helpers = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5" }
+build_helpers = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1" }

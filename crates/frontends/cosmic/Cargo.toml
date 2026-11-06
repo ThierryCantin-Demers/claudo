@@ -26,11 +26,11 @@ jiff = { version = "0.2", optional = true }
 libc = { version = "0.2", optional = true }
 # Already in libcosmic's tree; reads the file addresses a file manager drops.
 url = { version = "2", optional = true }
-libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true, features = ["markdown", "highlighter", "wgpu", "xdg-portal"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1", optional = true, features = ["markdown", "highlighter", "wgpu", "xdg-portal"] }
 # libcosmic's own iced, named only to turn on its `hot` feature; same source, so one crate.
-iced = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true, features = ["hot"] }
-iced_core = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }
-iced_debug = { git = "https://github.com/pop-os/libcosmic", rev = "7e777077b81e3a1b9c7b723f35399e80f1b2cba5", optional = true }
+iced = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1", optional = true, features = ["hot"] }
+iced_core = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1", optional = true }
+iced_debug = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1", optional = true }
 
 [dev-dependencies]
 # Writes the headless tests' snapshots.

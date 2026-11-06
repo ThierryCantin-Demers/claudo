@@ -41,7 +41,7 @@ pub enum Message {
     Usage(Result<Quota, String>),
     Toggle(Rectangle),
     PopupClosed(Id),
-    Surface(cosmic::surface::Action),
+    Surface(cosmic::surface::Action<Message>),
 }
 
 impl Application for Panel {
@@ -351,8 +351,8 @@ fn label(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Them
     text.wrapping(Wrapping::None)
 }
 
-fn surface(action: cosmic::surface::Action) -> Task<Message> {
-    cosmic::task::message(cosmic::Action::Cosmic(cosmic::app::Action::Surface(action)))
+fn surface(action: cosmic::surface::Action<Message>) -> Task<Message> {
+    cosmic::task::message(cosmic::Action::Surface(action))
 }
 
 fn now() -> u64 {
