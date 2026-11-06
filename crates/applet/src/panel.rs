@@ -28,9 +28,39 @@ pub struct Panel {
     quota: Option<Quota>,
     /// When the server measured the windows, in Unix seconds.
     quota_at: Option<u64>,
-    error: Option<String>,
+    error: Option<Problem>,
     asking: bool,
     warned: Warned,
+}
+
+/// Why the last ask failed. Only a failed ask checks the login, which costs another process.
+#[derive(Debug, Clone)]
+pub enum Problem {
+    NotInstalled,
+    LoggedOut,
+    Failed(String),
+}
+
+impl Problem {
+    fn of(error: std::io::Error) -> Self {
+        let system = claudo_core::detect_system();
+        if !system.claude_installed {
+            Problem::NotInstalled
+        } else if !system.auth.logged_in {
+            Problem::LoggedOut
+        } else {
+            Problem::Failed(error.to_string())
+        }
+    }
+
+    /// What the panel shows in place of the usage.
+    fn brief(&self) -> Option<&'static str> {
+        match self {
+            Problem::NotInstalled => Some("not found"),
+            Problem::LoggedOut => Some("log in"),
+            Problem::Failed(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +68,7 @@ pub enum Message {
     Refresh,
     /// Redraws the time left between refreshes.
     Tick,
-    Usage(Result<Quota, String>),
+    Usage(Result<Quota, Problem>),
     Toggle(Rectangle),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
@@ -99,7 +129,14 @@ impl Application for Panel {
                             notify(label, out_in);
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(problem) => {
+                        // Numbers from before the logout would read as current.
+                        if problem.brief().is_some() {
+                            self.quota = None;
+                            self.quota_at = None;
+                        }
+                        self.error = Some(problem);
+                    }
                 }
             }
             Message::Toggle(anchor) => {
@@ -172,18 +209,26 @@ impl Application for Panel {
                 parts.push(label(applet.text(brief(left))).class(dim()).into());
             }
             if let Some(out_in) = standing.out_in {
-                let color: Color = cosmic::theme::active().cosmic().warning_color().into();
-                parts.push(glyph("dialog-warning-symbolic", color));
+                parts.push(glyph("dialog-warning-symbolic", warning_color()));
                 parts.push(label(applet.text(brief(out_in))).class(warning()).into());
             }
         }
         if parts.is_empty() {
-            let waiting = if self.error.is_some() {
-                "Claude ?"
-            } else {
-                "Claude …"
-            };
-            parts.push(label(applet.text(waiting)).class(dim()).into());
+            match &self.error {
+                Some(problem) if let Some(brief) = problem.brief() => {
+                    parts.push(label(applet.text("Claude")).class(dim()).into());
+                    parts.push(glyph("dialog-warning-symbolic", warning_color()));
+                    parts.push(label(applet.text(brief)).class(warning()).into());
+                }
+                error => {
+                    let waiting = if error.is_some() {
+                        "Claude ?"
+                    } else {
+                        "Claude …"
+                    };
+                    parts.push(label(applet.text(waiting)).class(dim()).into());
+                }
+            }
         }
 
         let (major, minor) = applet.suggested_padding(true);
@@ -239,13 +284,13 @@ impl Panel {
         self.asking = true;
         let (sender, answer) = oneshot::channel();
         std::thread::spawn(move || {
-            let _ = sender.send(cli::usage().map_err(|error| error.to_string()));
+            let _ = sender.send(cli::usage().map_err(Problem::of));
         });
         cosmic::task::future(async move {
             Message::Usage(
                 answer
                     .await
-                    .unwrap_or_else(|_| Err("no answer".to_string())),
+                    .unwrap_or_else(|_| Err(Problem::Failed("no answer".to_string()))),
             )
         })
     }
@@ -255,6 +300,22 @@ impl Panel {
     fn popup_view(&self) -> Element<'_, Message> {
         let now = now();
         let mut rows: Vec<Element<Message>> = Vec::new();
+        let help = match &self.error {
+            Some(Problem::LoggedOut) => Some((
+                "Not logged in to Claude",
+                "Run `claude auth login` in a terminal, then refresh.",
+            )),
+            Some(Problem::NotInstalled) => Some((
+                "Claude Code not found",
+                "Install the `claude` command and log in with `claude auth login`.",
+            )),
+            _ => None,
+        };
+        if let Some((heading, body)) = help {
+            rows.push(widget::text::heading(heading).class(warning()).into());
+            rows.push(widget::text::body(body).into());
+            rows.push(widget::space::vertical().height(Length::Fixed(6.0)).into());
+        }
         for (label, window, length) in self.quota.unwrap_or_default().windows() {
             let Some(window) = window else { continue };
             let standing = window.standing(length, now);
@@ -293,7 +354,8 @@ impl Panel {
         }
         let status = match (self.asking, &self.error, self.quota_at) {
             (true, ..) => "Updating…".to_string(),
-            (false, Some(error), _) => format!("Could not update: {error}"),
+            (false, Some(Problem::Failed(error)), _) => format!("Could not update: {error}"),
+            (false, Some(_), _) => String::new(),
             (false, None, Some(at)) => match now.saturating_sub(at) / 60 {
                 0 => "Updated just now".to_string(),
                 minutes => format!("Updated {minutes} min ago"),
@@ -391,8 +453,12 @@ fn accent() -> cosmic::theme::Text {
     cosmic::theme::Text::Color(cosmic::theme::active().cosmic().accent_color().into())
 }
 
+fn warning_color() -> Color {
+    cosmic::theme::active().cosmic().warning_color().into()
+}
+
 fn warning() -> cosmic::theme::Text {
-    cosmic::theme::Text::Color(cosmic::theme::active().cosmic().warning_color().into())
+    cosmic::theme::Text::Color(warning_color())
 }
 
 fn dim() -> cosmic::theme::Text {
