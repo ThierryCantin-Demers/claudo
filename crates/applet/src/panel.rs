@@ -96,7 +96,7 @@ impl Application for Panel {
             quota_at: None,
             error: None,
             asking: false,
-            warned: Warned::default(),
+            warned: Warned::shared(),
         };
         let ask = panel.ask();
         (panel, ask)
