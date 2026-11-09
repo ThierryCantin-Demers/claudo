@@ -154,14 +154,7 @@ fn install(on: Option<&str>) -> Result<(), String> {
     {
         return Err(format!("{host:?} is not a host ssh can reach"));
     }
-    cargo(&[
-        "install",
-        "--path",
-        "crates/frontends/cosmic",
-        "--features",
-        "cosmic",
-        "--locked",
-    ])?;
+    cargo_install("crates/frontends/cosmic")?;
     let bin = cargo_bin_dir()?.join(COSMIC_BIN);
     let (desktop, icon) = (desktop_file()?, icon_file()?);
     for file in [&desktop, &icon] {
@@ -209,14 +202,7 @@ fn install(on: Option<&str>) -> Result<(), String> {
 }
 
 fn install_applet() -> Result<(), String> {
-    cargo(&[
-        "install",
-        "--path",
-        "crates/applet",
-        "--features",
-        "cosmic",
-        "--locked",
-    ])?;
+    cargo_install("crates/applet")?;
     let bin = cargo_bin_dir()?.join(APPLET_BIN);
     let desktop = applet_desktop_file()?;
     fs::create_dir_all(desktop.parent().unwrap())
@@ -315,6 +301,23 @@ fn web() -> Result<(), String> {
 /// Plain `cargo` from PATH rather than `$CARGO`, so a wrapper there still sees the build.
 fn cargo(args: &[&str]) -> Result<(), String> {
     status(Command::new("cargo").args(args))
+}
+
+fn cargo_install(path: &str) -> Result<(), String> {
+    let mut command = Command::new("cargo");
+    // `cargo install` warns of a toolchain it takes from the environment, which is
+    // where the cargo running this task left its own.
+    if let Some(toolchain) = env::var_os("RUSTUP_TOOLCHAIN") {
+        command.arg(format!("+{}", toolchain.to_string_lossy()));
+    }
+    status(command.args([
+        "install",
+        "--path",
+        path,
+        "--features",
+        "cosmic",
+        "--locked",
+    ]))
 }
 
 fn status(command: &mut Command) -> Result<(), String> {
