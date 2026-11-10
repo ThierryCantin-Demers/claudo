@@ -479,13 +479,14 @@ fn notify(name: &'static str, label: String, out_in: u64) {
     });
 }
 
-/// The warning color for a window over pace or past 80%, the destructive one past 95%.
+/// The warning color for a window used faster than its pace, the destructive one past 95%,
+/// when a single long turn can use up the rest whatever the pace.
 fn severity(standing: &Standing) -> Option<cosmic::theme::Text> {
     if standing.used >= 0.95 {
         Some(cosmic::theme::Text::Color(
             cosmic::theme::active().cosmic().destructive_color().into(),
         ))
-    } else if standing.used >= 0.8 || standing.out_in.is_some() {
+    } else if standing.out_in.is_some() {
         Some(warning())
     } else {
         None
@@ -508,10 +509,10 @@ fn dim() -> cosmic::theme::Text {
     cosmic::theme::Text::Color(Color { a: 0.6, ..on_bg() })
 }
 
-/// A thin bar, in the accent color, the warning one past 80% and the destructive one past
-/// 95%, marked where an even pace would be.
+/// A thin bar, colored as its percent is, marked where an even pace would be.
 fn bar<'a>(standing: &Standing) -> Element<'a, Message> {
     let used = standing.used;
+    let ahead = standing.out_in.is_some();
     let filled = (used * 1000.0).round() as u16;
     let rounded = |theme: &cosmic::Theme, color: Color| container::Style {
         background: Some(color.into()),
@@ -528,7 +529,7 @@ fn bar<'a>(standing: &Standing) -> Element<'a, Message> {
             let cosmic = theme.cosmic();
             let color = if used >= 0.95 {
                 cosmic.destructive_color()
-            } else if used >= 0.8 {
+            } else if ahead {
                 cosmic.warning_color()
             } else {
                 cosmic.accent_color()
