@@ -62,8 +62,19 @@ struct Agents {
 
 impl Backend {
     pub fn new(local: UnboundedSender<ServerEvent>) -> Self {
+        Self::serving(Some(local))
+    }
+
+    /// A backend no frontend was made with: every frontend joins it with `connect`.
+    pub fn headless() -> Self {
+        Self::serving(None)
+    }
+
+    fn serving(local: Option<UnboundedSender<ServerEvent>>) -> Self {
         let events = Clients::default();
-        events.add(LOCAL, local);
+        if let Some(local) = local {
+            events.add(LOCAL, local);
+        }
         let store = Arc::new(Mutex::new(Store::load()));
         let handover = crate::handover::take();
         let progress: Running = Arc::new(Mutex::new(

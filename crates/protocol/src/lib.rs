@@ -475,6 +475,85 @@ pub struct SessionInfo {
     pub updated: u64,
 }
 
+pub type NodeId = String;
+
+/// What the control room draws: an agent, or something an agent started, such as a Codex
+/// run or a subagent. Its `parent` is the edge, so the room is a forest, and its `repo` the
+/// cluster it sits in. Several collectors may describe one node, each with the fields it
+/// knows, so every field but the id may be missing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Node {
+    pub id: NodeId,
+    #[serde(default)]
+    pub parent: Option<NodeId>,
+    #[serde(default)]
+    pub kind: Option<NodeKind>,
+    /// Such as an agent's herdr name or a run's title.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// What it says it is doing, such as its terminal's title.
+    #[serde(default)]
+    pub doing: Option<String>,
+    #[serde(default)]
+    pub state: Option<NodeState>,
+    /// The repository it works in, as a path on `machine`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The hostname it runs on.
+    #[serde(default)]
+    pub machine: Option<String>,
+}
+
+impl Node {
+    /// Takes each field `other` knows and this one does not.
+    pub fn fill(&mut self, other: Node) {
+        self.parent = self.parent.take().or(other.parent);
+        self.kind = self.kind.take().or(other.kind);
+        self.name = self.name.take().or(other.name);
+        self.doing = self.doing.take().or(other.doing);
+        self.state = self.state.take().or(other.state);
+        self.repo = self.repo.take().or(other.repo);
+        self.machine = self.machine.take().or(other.machine);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeKind {
+    Agent(Provider),
+    /// A folder under `agent-runs`: `review`, `explore` or `task`.
+    Run(String),
+    Subagent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Provider {
+    Claude,
+    Codex,
+    /// Another agent herdr knows, by its name there.
+    Other(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeState {
+    Idle,
+    Working,
+    /// Waiting on a person, such as for an approval.
+    Blocked,
+    Done,
+    Failed,
+    Unknown,
+}
+
+/// Changes to the control room, sent to every client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoomEvent {
+    /// Every node, to a client that just arrived.
+    Snapshot(Vec<Node>),
+    /// A node appeared or changed, and is sent whole.
+    Upserted(Node),
+    Removed(NodeId),
+}
+
 /// The model, thinking and permissions new conversations start with. These are concrete
 /// values, so the user isn't guessing what "Default" means.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,6 +874,7 @@ pub enum ServerEvent {
     Quota(Quota),
     /// Asking for the usage windows failed, for this reason.
     QuotaUnavailable(String),
+    Room(RoomEvent),
     /// The backend runs in claudo on another computer, and was reached, or lost: then
     /// `detail` says why, and the transport tries again. Once reached, the frontend asks
     /// again for what it shows.

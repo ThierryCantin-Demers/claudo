@@ -493,6 +493,7 @@ impl ClaudoApp {
 
                 ServerEvent::Quota(_)
                 | ServerEvent::QuotaUnavailable(_)
+                | ServerEvent::Room(_)
                 | ServerEvent::Connection { .. }
                 | ServerEvent::Answered { .. } => {}
 

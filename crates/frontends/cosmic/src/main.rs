@@ -2363,6 +2363,8 @@ mod app {
                 ServerEvent::Connection { connected, detail } => {
                     self.connection(connected, detail);
                 }
+                // The control room is the web page's.
+                ServerEvent::Room(_) => {}
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
                     self.restore_tiles();

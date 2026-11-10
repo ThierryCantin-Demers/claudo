@@ -1,6 +1,6 @@
 //! Headless backend host: a `127.0.0.1` WebSocket server wrapping the same
 //! `Backend` the native app uses in-process, plus static serving of the web
-//! client bundle. Each WS connection gets its own backend instance.
+//! client bundle. Every WS connection is a client of one shared backend.
 //!
 //! Auth: a random token is generated on startup and must be presented as
 //! `?token=…` on the WS upgrade. The token is part of the URL we print, so the
@@ -17,7 +17,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use claudo_core::backend::Backend;
+use claudo_core::hub::Hub;
 use claudo_protocol::{Command, ServerEvent};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::unbounded_channel;
@@ -26,6 +26,7 @@ use tower_http::services::ServeDir;
 #[derive(Clone)]
 struct AppState {
     token: Arc<String>,
+    hub: Hub,
 }
 
 #[tokio::main]
@@ -40,8 +41,11 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("crates/frontends/egui/dist"));
 
+    let hub = Hub::spawn();
+    claudo_core::herdr::spawn(hub.feed("herdr"));
     let state = AppState {
         token: Arc::new(token.clone()),
+        hub,
     };
 
     let app = Router::new()
@@ -70,13 +74,13 @@ async fn ws_handler(
     if params.get("token").map(String::as_str) != Some(state.token.as_str()) {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    ws.on_upgrade(handle_socket)
+    ws.on_upgrade(move |socket| handle_socket(socket, state.hub))
 }
 
-async fn handle_socket(socket: WebSocket) {
+async fn handle_socket(socket: WebSocket, hub: Hub) {
     let (mut sink, mut stream) = socket.split();
     let (events_tx, mut events_rx) = unbounded_channel::<ServerEvent>();
-    let backend = Backend::new(events_tx);
+    let client = hub.connect(events_tx);
 
     // Forward backend events to the socket.
     let send_task = tokio::spawn(async move {
@@ -95,7 +99,7 @@ async fn handle_socket(socket: WebSocket) {
         match msg {
             Message::Text(text) => {
                 if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
-                    backend.handle(cmd);
+                    client.send(cmd);
                 }
             }
             Message::Close(_) => break,

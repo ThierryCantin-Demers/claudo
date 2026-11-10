@@ -22,8 +22,9 @@ mod inproc {
     use std::sync::mpsc::{Sender, channel};
 
     use claudo_core::backend::Backend;
-    use claudo_core::clients::{ClientId, LOCAL};
-    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+    use claudo_core::clients::LOCAL;
+    pub(crate) use claudo_core::hub::Input;
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     /// Bundled-desktop transport: the backend runs on a worker thread and talks
     /// to the UI over in-memory channels (no socket, no port).
@@ -61,13 +62,6 @@ mod inproc {
             }
             out
         }
-    }
-
-    /// What reaches the thread that owns the backend.
-    pub(crate) enum Input {
-        Command(ClientId, Command),
-        Connect(ClientId, UnboundedSender<ServerEvent>),
-        Disconnect(ClientId),
     }
 
     /// Command sender for the event-driven (async) integration used by the
@@ -142,13 +136,7 @@ mod inproc {
             if serve {
                 crate::remote::serve(served);
             }
-            while let Ok(input) = received.recv() {
-                match input {
-                    Input::Command(client, cmd) => backend.handle_from(client, cmd),
-                    Input::Connect(client, events) => backend.connect(client, events),
-                    Input::Disconnect(client) => backend.disconnect(client),
-                }
-            }
+            claudo_core::hub::run(backend, received);
         });
         (Commands(inputs), Events(evt_rx))
     }

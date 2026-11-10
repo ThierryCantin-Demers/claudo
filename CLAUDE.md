@@ -457,6 +457,30 @@ turn still ends with a `result`, flagged `is_error` with `terminal_reason` `abor
 turn as a normal completion. A pending approval is withdrawn first with a
 `control_cancel_request`. The process stays up for the next turn.
 
+## Control room
+
+The daemon is becoming a web control room over every agent herdr runs, Claude and Codex
+alike; COSMIC stays the chat client. The plan lives outside the repo, with the agent that
+wrote it.
+
+- **One hub per daemon** (`core/src/hub.rs`). Every WebSocket is a client of one headless
+  `Backend`, on the thread that owns it, as the transport's clients are; a backend per
+  socket ran every agent and collector once per tab. `examples/hub_probe` checks it.
+- **The room** (`core/src/room.rs`) is a forest of `Node`s: agents, and what they started
+  (Codex runs, subagents) under them by `parent`, clustered by `repo`. Each collector
+  replaces its whole set of nodes through a `Feed`; the room merges them by id, the first
+  collector to join winning a field both know, and sends clients `RoomEvent`s: a
+  `Snapshot` on arrival, then only what changed. An agent's id is `session:<id>`, the id
+  its transcript, board file and run folders share, so a collector that knows only that
+  can add to the node.
+- **herdr** (`core/src/herdr.rs`, all its shapes in that file). Newline JSON on
+  `$HERDR_SOCKET_PATH`. A connection answers one request; a second `events.subscribe` on
+  one connection drops it, so the collector subscribes once to the pane lifecycle and to
+  each agent pane's `pane.agent_status_changed`, and subscribes again when the panes
+  change. Agent names come only from `session.snapshot`, so every event reads it again,
+  and with no replay cursor it is read every 15 seconds anyway. `pane.rename` emits
+  nothing. `examples/room_probe` prints what the collector sees.
+
 ## Workflow
 
 - The project is a git repo (`origin` is on GitHub). Commit at stable points
