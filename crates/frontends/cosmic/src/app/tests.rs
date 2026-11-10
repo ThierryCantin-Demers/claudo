@@ -471,21 +471,21 @@ fn snapshots() {
     let home = std::env::var("HOME").unwrap_or_default();
     app.sessions = Some(vec![
         session(
-            "Replace QuantLevel with a nested list of scale levels",
+            "Replace the config loader with a streaming one",
             "Claude Desktop",
-            &format!("{home}/prog/cubek"),
+            &format!("{home}/prog/alpha"),
             now - 3 * 3600,
         ),
         session(
-            "nvidia-smi broken after update",
+            "Printer missing after an update",
             "Claude Desktop",
             &format!(
-                "{home}/.config/Claude/scratch-workspaces/70e96d5e-cde6-4590-aef3-a4258baaa080/scratch-2026-10-04"
+                "{home}/.config/Claude/scratch-workspaces/eeeee555-0000-4000-8000-000000000000/scratch-2026-10-04"
             ),
             now - 30 * 3600,
         ),
         session(
-            "GitHub CLI signature verification error",
+            "Shell prompt slow to start",
             "Claude Code",
             &format!("{home}/dotfiles"),
             now - 9 * 86_400,
@@ -496,13 +496,13 @@ fn snapshots() {
     Harness::new(with_runs(6, 3)).snapshot("tool-groups");
 
     let mut app = two_tiles();
-    app.folders = ["prog/claudo", "prog/burn", "dotfiles"]
+    app.folders = ["prog/claudo", "prog/bravo", "dotfiles"]
         .map(|folder| format!("{home}/{folder}"))
         .to_vec();
     for (info, folder) in app
         .conversations
         .iter_mut()
-        .zip(["prog/cubek", "prog/claudo"])
+        .zip(["prog/alpha", "prog/claudo"])
     {
         info.cwd = format!("{home}/{folder}");
         info.attached = true;
@@ -562,7 +562,7 @@ fn with_runs(done: usize, running: usize) -> ClaudoApp {
     let view = app.views.get_mut(ALPHA).unwrap();
     let commands = [
         "git status",
-        "cat crates/cubecl-runtime/src/tune.rs",
+        "cat crates/engine-runtime/src/tune.rs",
         "rg 'fn remove'",
     ];
     for n in 0..done {
@@ -1060,7 +1060,7 @@ fn with_subagent() -> ClaudoApp {
     let commands = [
         "git diff main",
         "rg 'fn tune'",
-        "cargo test -p cubecl-runtime",
+        "cargo test -p engine-runtime",
     ];
     let events = commands
         .iter()
@@ -2169,7 +2169,7 @@ fn reviewed() -> ClaudoApp {
             .to_string(),
         findings: vec![
             finding(
-                "crates/cubecl-runtime/src/tune/tuner.rs",
+                "crates/engine-runtime/src/tune/tuner.rs",
                 Some("480"),
                 "When a device is lost, the tune is unmarked, so every later launch of that \
                  key runs the whole tune again.",
@@ -2179,7 +2179,7 @@ fn reviewed() -> ClaudoApp {
                 ),
             ),
             finding(
-                "crates/cubecl-runtime/src/tune/local.rs",
+                "crates/engine-runtime/src/tune/local.rs",
                 Some("55"),
                 "`get_or_open` returns `by_id[id]` whatever `operations` is.",
                 Some("Two candidate lists on one part never share a tuner."),
@@ -2216,7 +2216,7 @@ fn a_review_lists_its_findings_and_unfolds_their_scenarios() {
     assert!(
         folded.starts_with("I reviewed PR #1848 at head 15db4cc99.")
             && folded.contains(
-                "\n\n1. crates/cubecl-runtime/src/tune/tuner.rs:480\n\nWhen a device is lost"
+                "\n\n1. crates/engine-runtime/src/tune/tuner.rs:480\n\nWhen a device is lost"
             )
             && folded.contains("\n\n3. README.md\n\nA stale line."),
         "{folded:?}"
