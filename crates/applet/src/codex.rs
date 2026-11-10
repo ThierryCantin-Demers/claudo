@@ -102,6 +102,7 @@ fn usage_answer(result: &Value) -> Option<Usage> {
                     used: window.get("usedPercent")?.as_f64()? as f32 / 100.0,
                     resets_at: window.get("resetsAt")?.as_u64()?,
                 },
+                model: None,
             })
         })
         .collect();
@@ -137,7 +138,7 @@ mod tests {
         }});
         let usage = usage_answer(&result).unwrap();
         assert_eq!(usage.meters.len(), 1);
-        let week = usage.meters[0];
+        let week = &usage.meters[0];
         assert_eq!(
             (week.length, week.window.resets_at),
             (7 * 86_400, 1796929772)

@@ -14,20 +14,26 @@ pub struct Usage {
 
 /// One window, which plans size differently: Claude's run five hours and a week, a Codex
 /// plan's whatever its server says.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meter {
     /// In seconds.
     pub length: u64,
     pub window: QuotaWindow,
+    /// The one model it meters, for a window beside the one of every model.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl Meter {
-    pub fn standing(self, now: u64) -> Standing {
+    pub fn standing(&self, now: u64) -> Standing {
         self.window.standing(self.length, now)
     }
 
-    /// What the panel calls it: "5h", "7d".
-    pub fn short(self) -> String {
+    /// What the panel calls it: "5h", "7d", "Fable".
+    pub fn short(&self) -> String {
+        if let Some(model) = &self.model {
+            return model.clone();
+        }
         let hours = self.length / 3600;
         match (hours % 24, hours) {
             (_, 0) => format!("{}m", self.length.div_ceil(60)),
@@ -36,30 +42,47 @@ impl Meter {
         }
     }
 
-    /// What the popup calls it.
-    pub fn label(self) -> String {
-        match self.length / 86_400 {
+    /// What the popup calls it: "Session", "Week", "Fable week".
+    pub fn label(&self) -> String {
+        let span = match self.length / 86_400 {
             0 if self.length == 5 * 3600 => "Session".to_string(),
             7 => "Week".to_string(),
             28..=31 => "Month".to_string(),
-            _ => format!("{} window", self.short()),
+            days if self.length.is_multiple_of(86_400) => format!("{days}d window"),
+            _ => format!("{}h window", self.length / 3600),
+        };
+        match &self.model {
+            Some(model) => format!("{model} {}", span.to_lowercase()),
+            None => span,
         }
+    }
+
+    /// Tells it from the plan's other windows, without spaces.
+    pub fn key(&self) -> String {
+        format!("{}-{}", self.model.as_deref().unwrap_or("all"), self.length)
+            .replace(char::is_whitespace, "_")
     }
 }
 
-impl From<Quota> for Usage {
-    fn from(quota: Quota) -> Self {
-        Usage {
-            meters: quota
-                .windows()
-                .into_iter()
-                .filter_map(|(_, window, length)| {
-                    Some(Meter {
-                        length,
-                        window: window?,
-                    })
+impl Usage {
+    fn claude(quota: Quota, weeks: Vec<cli::ModelWeek>) -> Self {
+        let plan = quota
+            .windows()
+            .into_iter()
+            .filter_map(|(_, window, length)| {
+                Some(Meter {
+                    length,
+                    window: window?,
+                    model: None,
                 })
-                .collect(),
+            });
+        let models = weeks.into_iter().map(|week| Meter {
+            length: 7 * 86_400,
+            window: week.window,
+            model: Some(week.model),
+        });
+        Usage {
+            meters: plan.chain(models).collect(),
             measured_at: quota.measured_at,
         }
     }
@@ -121,7 +144,8 @@ impl Source for Claude {
     ];
 
     fn usage() -> Result<Usage, Problem> {
-        cli::usage().map(Usage::from).map_err(|error| {
+        let usage = cli::plan_usage().map(|(quota, weeks)| Usage::claude(quota, weeks));
+        usage.map_err(|error| {
             // Only a failed ask checks the login, which costs another process.
             let system = claudo_core::detect_system();
             if !system.claude_installed {
@@ -167,6 +191,7 @@ mod tests {
                 used: 0.0,
                 resets_at: 0,
             },
+            model: None,
         }
     }
 
@@ -184,5 +209,19 @@ mod tests {
                 "3d 3d window"
             ]
         );
+    }
+
+    #[test]
+    fn a_model_week_is_named_and_kept_apart_by_its_model() {
+        let week = meter(7 * 86_400);
+        let fable = Meter {
+            model: Some("Fable".to_string()),
+            ..week.clone()
+        };
+        assert_eq!(
+            (fable.short(), fable.label()),
+            ("Fable".into(), "Fable week".into())
+        );
+        assert_ne!(fable.key(), week.key());
     }
 }

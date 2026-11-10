@@ -115,6 +115,7 @@ mod tests {
                     used: 0.11,
                     resets_at: at + 3600,
                 },
+                model: None,
             }],
             measured_at: Some(at),
         }

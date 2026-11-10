@@ -271,10 +271,8 @@ impl<S: Source> Application for Panel<S> {
 }
 
 impl<S: Source> Panel<S> {
-    fn meters(&self) -> impl Iterator<Item = crate::usage::Meter> + '_ {
-        self.usage
-            .iter()
-            .flat_map(|usage| usage.meters.iter().copied())
+    fn meters(&self) -> impl Iterator<Item = &crate::usage::Meter> {
+        self.usage.iter().flat_map(|usage| &usage.meters)
     }
 
     fn ask(&mut self, force: bool) -> Task<Message> {

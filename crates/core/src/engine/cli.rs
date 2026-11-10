@@ -42,7 +42,10 @@ fn ask(request: Value) -> io::Result<Value> {
         .stderr(Stdio::null())
         .spawn()?;
     let mut stdin = child.stdin.take().expect("stdin piped");
-    for (id, request) in [("initialize", json!({ "subtype": "initialize" })), (&*subtype, request)] {
+    for (id, request) in [
+        ("initialize", json!({ "subtype": "initialize" })),
+        (&*subtype, request),
+    ] {
         writeln!(
             stdin,
             "{}",
@@ -56,7 +59,8 @@ fn ask(request: Value) -> io::Result<Value> {
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
         .find(|v| {
             v.get("type").and_then(Value::as_str) == Some("control_response")
-                && v.pointer("/response/request_id").and_then(Value::as_str) == Some(subtype.as_str())
+                && v.pointer("/response/request_id").and_then(Value::as_str)
+                    == Some(subtype.as_str())
         });
     drop(stdin);
     let _ = child.wait();
@@ -103,9 +107,41 @@ pub fn capabilities() -> io::Result<(Vec<ModelOption>, Vec<CliCommand>)> {
 
 /// The subscription's usage windows, without waiting for a turn to report them.
 pub fn usage() -> io::Result<Quota> {
+    plan_usage().map(|(quota, _)| quota)
+}
+
+/// A week metered for one model alone, beside the week of every model.
+#[derive(Debug, Clone)]
+pub struct ModelWeek {
+    /// As the CLI's `/usage` names it, such as `Fable`.
+    pub model: String,
+    pub window: QuotaWindow,
+}
+
+/// The usage windows with each model's own week.
+pub fn plan_usage() -> io::Result<(Quota, Vec<ModelWeek>)> {
     // Without skip_behaviors the CLI scans a week of transcripts, seconds of CPU per ask.
     let response = ask(json!({ "subtype": "get_usage", "skip_behaviors": true }))?;
-    usage_answer(&response).ok_or_else(|| io::ErrorKind::InvalidData.into())
+    let quota = usage_answer(&response).ok_or(io::ErrorKind::InvalidData)?;
+    Ok((quota, model_weeks(&response)))
+}
+
+fn model_weeks(response: &Value) -> Vec<ModelWeek> {
+    let rows = response
+        .pointer("/rate_limits/model_scoped")
+        .and_then(Value::as_array);
+    rows.into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some(ModelWeek {
+                model: row.get("display_name")?.as_str()?.to_string(),
+                window: QuotaWindow {
+                    used: row.get("utilization")?.as_f64()? as f32 / 100.0,
+                    resets_at: unix_seconds(row.get("resets_at")?.as_str()?)?,
+                },
+            })
+        })
+        .collect()
 }
 
 fn usage_answer(response: &Value) -> Option<Quota> {
@@ -2636,6 +2672,22 @@ mod tests {
         let quota = usage_answer(&response).unwrap();
         assert_eq!(quota.five_hour.unwrap().used, 0.07);
         assert_eq!(quota.measured_at, unix_seconds("2026-11-04T16:30:22Z"));
+    }
+
+    #[test]
+    fn a_model_metered_alone_has_a_week_of_its_own() {
+        let response = json!({ "rate_limits": { "model_scoped": [
+            { "display_name": "Fable", "utilization": 7, "resets_at": "2026-11-15T05:59:59.938983+00:00" },
+            { "display_name": "Unmeasured", "utilization": null, "resets_at": null },
+        ]}});
+        let weeks = model_weeks(&response);
+        assert_eq!(weeks.len(), 1);
+        assert_eq!(weeks[0].model, "Fable");
+        assert_eq!(weeks[0].window.used, 0.07);
+        assert_eq!(
+            weeks[0].window.resets_at,
+            unix_seconds("2026-11-15T05:59:59Z").unwrap()
+        );
     }
 
     #[test]

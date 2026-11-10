@@ -5,11 +5,10 @@ use std::path::{Path, PathBuf};
 
 use crate::usage::Usage;
 
-/// For each window, by its length, the reset of the last one warned of, so a window warns
-/// once.
+/// For each window, by its key, the reset of the last one warned of, so a window warns once.
 #[derive(Debug, Default)]
 pub struct Warned {
-    resets: BTreeMap<u64, u64>,
+    resets: BTreeMap<String, u64>,
     /// The panel of each display runs an applet of its own, and they keep the resets
     /// here, so only the first to see a window ahead of its pace warns.
     shared: Option<PathBuf>,
@@ -42,11 +41,11 @@ impl Warned {
             .iter()
             .filter_map(|meter| {
                 let out_in = meter.standing(now).out_in?;
-                let warned = self.resets.get(&meter.length);
+                let warned = self.resets.get(&meter.key());
                 if warned.is_some_and(|&reset| now < reset) {
                     return None;
                 }
-                self.resets.insert(meter.length, meter.window.resets_at);
+                self.resets.insert(meter.key(), meter.window.resets_at);
                 Some((meter.label(), out_in))
             })
             .collect();
@@ -62,11 +61,11 @@ impl Warned {
         let mut text = String::new();
         let _ = file.read_to_string(&mut text);
         let theirs = text.split_whitespace().filter_map(|pair| {
-            let (length, reset) = pair.split_once(':')?;
-            Some((length.parse().ok()?, reset.parse().ok()?))
+            let (key, reset) = pair.rsplit_once(':')?;
+            Some((key.to_string(), reset.parse().ok()?))
         });
-        for (length, reset) in theirs {
-            let ours = self.resets.entry(length).or_insert(reset);
+        for (key, reset) in theirs {
+            let ours = self.resets.entry(key).or_insert(reset);
             *ours = (*ours).max(reset);
         }
     }
@@ -75,7 +74,7 @@ impl Warned {
         let text = self
             .resets
             .iter()
-            .map(|(length, reset)| format!("{length}:{reset}"))
+            .map(|(key, reset)| format!("{key}:{reset}"))
             .collect::<Vec<_>>()
             .join(" ");
         file.set_len(0)?;
@@ -114,6 +113,7 @@ mod tests {
             meters: vec![Meter {
                 length: 5 * HOUR,
                 window: QuotaWindow { used, resets_at },
+                model: None,
             }],
             measured_at: None,
         }
