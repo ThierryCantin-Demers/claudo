@@ -229,27 +229,27 @@ mod tests {
         std::fs::create_dir_all(repo.join("crates/core")).unwrap();
         let snapshot = json!({ "agents": [
             {
-                "pane_id": "w0:p1", "agent": "claude", "name": "pegasus_control-room",
+                "pane_id": "w0:p1", "agent": "claude", "name": "builder_hub",
                 "agent_status": "blocked", "terminal_title_stripped": "Hub for the daemon",
                 "cwd": repo.join("crates/core"),
-                "agent_session": { "kind": "id", "value": "33610535" },
+                "agent_session": { "kind": "id", "value": "0a1b2c3d" },
             },
             { "pane_id": "w1:p2", "agent": "codex", "name": "", "agent_status": "working", "cwd": "/" },
             { "agent": "claude" },
         ]});
-        let nodes = nodes(&snapshot, "tower", &mut Repos::default());
+        let nodes = nodes(&snapshot, "host-a", &mut Repos::default());
         let _ = std::fs::remove_dir_all(&repo);
 
         assert_eq!(nodes.len(), 2, "a pane id is what makes an agent");
         let claude = &nodes[0];
-        assert_eq!(claude.id, "session:33610535");
+        assert_eq!(claude.id, "session:0a1b2c3d");
         assert_eq!(claude.kind, Some(NodeKind::Agent(Provider::Claude)));
         assert_eq!(claude.state, Some(NodeState::Blocked));
         assert_eq!(claude.repo.as_deref(), Some(repo.to_str().unwrap()));
         assert_eq!(claude.doing.as_deref(), Some("Hub for the daemon"));
         let codex = &nodes[1];
         assert_eq!(
-            codex.id, "pane:tower:w1:p2",
+            codex.id, "pane:host-a:w1:p2",
             "no session yet: known by its pane"
         );
         assert_eq!(codex.name, None);

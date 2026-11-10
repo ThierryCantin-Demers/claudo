@@ -140,7 +140,7 @@ mod tests {
     fn collectors_describing_one_node_add_up() {
         let room = Arc::new(Mutex::new(Room::default()));
         Feed::new(room.clone(), "herdr").replace(vec![Node {
-            name: Some("pegasus".into()),
+            name: Some("builder".into()),
             state: Some(NodeState::Blocked),
             ..node("a")
         }]);
@@ -150,7 +150,7 @@ mod tests {
             ..node("a")
         }]);
         let shown = &room.lock().unwrap().shown["a"];
-        assert_eq!(shown.name.as_deref(), Some("pegasus"));
+        assert_eq!(shown.name.as_deref(), Some("builder"));
         assert_eq!(shown.doing.as_deref(), Some("waiting on review"));
         assert_eq!(
             shown.state,
