@@ -197,6 +197,11 @@ impl Room {
         let width = ui.available_width();
         let clusters = self.clusters();
         let islands: Vec<Island> = clusters.iter().map(Island::of).collect();
+        let scale = fit(&islands, width);
+        let islands: Vec<Island> = islands
+            .into_iter()
+            .map(|island| island.scaled(scale))
+            .collect();
         let (centers, height) = pack(&islands, width);
         let (response, painter) =
             ui.allocate_painter(vec2(width, height.max(200.0)), Sense::hover());
@@ -218,7 +223,7 @@ impl Room {
         for (island, center) in islands.iter().zip(&centers) {
             let key = island.repo.unwrap_or("");
             let middle = glide(&format!("island:{key}"), *center);
-            shore(&painter, &visuals, island, middle);
+            shore(&painter, &visuals, island, middle, scale);
             let at: BTreeMap<&str, Pos2> = island
                 .placed
                 .iter()
@@ -235,14 +240,15 @@ impl Room {
                     *parent,
                     at[placed.node.id.as_str()],
                     now,
+                    scale,
                 );
             }
             for placed in island.placed.iter().rev() {
                 let here = at[placed.node.id.as_str()];
-                let radius = if placed.depth == 0 { AGENT } else { CHILD };
-                body(&painter, &visuals, placed.node, here, radius, now);
+                let radius = scale * if placed.depth == 0 { AGENT } else { CHILD };
+                body(&painter, &visuals, placed.node, here, radius, now, scale);
                 if placed.depth == 0 {
-                    caption(&painter, &visuals, placed.node, here);
+                    caption(&painter, &visuals, placed.node, here, scale);
                 }
                 drawn.push((placed.node, here, radius));
             }
@@ -335,6 +341,16 @@ impl<'a> Island<'a> {
     }
 }
 
+impl Island<'_> {
+    fn scaled(mut self, scale: f32) -> Self {
+        self.radius *= scale;
+        for placed in &mut self.placed {
+            placed.at *= scale;
+        }
+        self
+    }
+}
+
 fn place<'a>(
     tree: &Tree<'a>,
     at: Vec2,
@@ -385,6 +401,17 @@ fn place<'a>(
     }
 }
 
+/// How much to shrink the map so its widest island fits across `width`: wrapping only moves
+/// whole islands, and the page does not scroll sideways.
+fn fit(islands: &[Island], width: f32) -> f32 {
+    let widest = islands
+        .iter()
+        .map(|island| island.radius * 2.0)
+        .fold(0.0, f32::max);
+    let room = (width - ISLAND_GAP).max(1.0);
+    if widest > room { room / widest } else { 1.0 }
+}
+
 /// Islands in rows across `width`, each row centred: their middles, and the height it takes.
 fn pack(islands: &[Island], width: f32) -> (Vec<Pos2>, f32) {
     let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
@@ -415,10 +442,20 @@ fn pack(islands: &[Island], width: f32) -> (Vec<Pos2>, f32) {
     (centers, top + ISLAND_GAP / 2.0)
 }
 
-fn shore(painter: &egui::Painter, visuals: &egui::Visuals, island: &Island, middle: Pos2) {
+fn shore(
+    painter: &egui::Painter,
+    visuals: &egui::Visuals,
+    island: &Island,
+    middle: Pos2,
+    scale: f32,
+) {
     let sea = hue(island.repo.unwrap_or(""), visuals.dark_mode);
     for (grow, alpha) in [(16.0, 0.05), (8.0, 0.08)] {
-        painter.circle_filled(middle, island.radius + grow, sea.gamma_multiply(alpha));
+        painter.circle_filled(
+            middle,
+            island.radius + grow * scale,
+            sea.gamma_multiply(alpha),
+        );
     }
     painter.circle_filled(middle, island.radius, visuals.extreme_bg_color);
     painter.circle_filled(middle, island.radius, sea.gamma_multiply(0.12));
@@ -429,10 +466,10 @@ fn shore(painter: &egui::Painter, visuals: &egui::Visuals, island: &Island, midd
     );
     let name = island.repo.map_or("elsewhere", short);
     painter.text(
-        middle - vec2(0.0, island.radius - 12.0),
+        middle - vec2(0.0, island.radius - 12.0 * scale),
         Align2::CENTER_TOP,
         name,
-        FontId::proportional(14.0),
+        FontId::proportional(14.0 * scale),
         visuals.strong_text_color(),
     );
 }
@@ -444,9 +481,10 @@ fn edge(
     from: Pos2,
     to: Pos2,
     now: f64,
+    scale: f32,
 ) {
     let tint = color(visuals, node.state);
-    let bend = (to - from).rot90().normalized() * 10.0;
+    let bend = (to - from).rot90().normalized() * 10.0 * scale;
     let curve = QuadraticBezierShape::from_points_stroke(
         [from, from + (to - from) / 2.0 + bend, to],
         false,
@@ -455,7 +493,7 @@ fn edge(
     );
     if node.state == Some(NodeState::Working) {
         let t = ((now * 0.6 + phase(&node.id)) % 1.0) as f32;
-        painter.circle_filled(curve.sample(t), 2.5, tint);
+        painter.circle_filled(curve.sample(t), 2.5 * scale, tint);
     }
     painter.add(curve);
 }
@@ -467,6 +505,7 @@ fn body(
     at: Pos2,
     radius: f32,
     now: f64,
+    scale: f32,
 ) {
     let tint = color(visuals, node.state);
     match node.state {
@@ -479,7 +518,7 @@ fn body(
             let breath = (0.5 + 0.5 * (now * 3.0).sin()) as f32;
             painter.circle_filled(
                 at,
-                radius + 5.0 + 4.0 * breath,
+                radius + (5.0 + 4.0 * breath) * scale,
                 tint.gamma_multiply(0.15 + 0.2 * breath),
             );
         }
@@ -500,33 +539,33 @@ fn body(
         Some(NodeState::Failed) => "x",
         _ => return,
     };
-    if radius >= AGENT {
+    if radius >= AGENT * scale {
         painter.text(
             at,
             Align2::CENTER_CENTER,
             mark,
-            FontId::proportional(16.0),
+            FontId::proportional(16.0 * scale),
             visuals.extreme_bg_color,
         );
     }
 }
 
-fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Pos2) {
-    let top = at + vec2(0.0, AGENT + 6.0);
+fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Pos2, scale: f32) {
+    let top = at + vec2(0.0, (AGENT + 6.0) * scale);
     let name = node.name.as_deref().unwrap_or("unnamed");
     painter.text(
         top,
         Align2::CENTER_TOP,
         clip(name, 22),
-        FontId::proportional(13.0),
+        FontId::proportional(13.0 * scale),
         visuals.strong_text_color(),
     );
     if let Some(doing) = &node.doing {
         painter.text(
-            top + vec2(0.0, 17.0),
+            top + vec2(0.0, 17.0 * scale),
             Align2::CENTER_TOP,
             clip(doing, 26),
-            FontId::proportional(11.0),
+            FontId::proportional(11.0 * scale),
             visuals.weak_text_color(),
         );
     }
@@ -794,5 +833,22 @@ mod tests {
                     .map(|island| island.radius * 2.0)
                     .sum::<f32>()
         );
+    }
+
+    #[test]
+    fn an_island_wider_than_the_page_shrinks_the_map_to_fit() {
+        let mut room = Room::default();
+        let nodes = (0..12)
+            .map(|i| node(&format!("agent-{i}"), Some("/src/alpha"), None))
+            .collect();
+        room.apply(RoomEvent::Snapshot(nodes));
+        let width = 700.0;
+        let islands: Vec<Island> = room.clusters().iter().map(Island::of).collect();
+        let scale = fit(&islands, width);
+        assert!(scale < 1.0);
+        let islands: Vec<Island> = islands.into_iter().map(|i| i.scaled(scale)).collect();
+        let (centers, _) = pack(&islands, width);
+        assert!(centers[0].x - islands[0].radius >= 0.0);
+        assert!(centers[0].x + islands[0].radius <= width);
     }
 }
