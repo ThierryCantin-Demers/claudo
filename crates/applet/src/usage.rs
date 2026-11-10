@@ -93,6 +93,8 @@ pub trait Source: 'static {
     /// The popup's heading and help for a missing command, then for a logged out one.
     const NOT_INSTALLED: (&'static str, &'static str);
     const LOGGED_OUT: (&'static str, &'static str);
+    /// Icon names its apps install, the first found shown in the panel.
+    const ICONS: &'static [&'static str];
 
     fn usage() -> Result<Usage, Problem>;
 }
@@ -111,6 +113,12 @@ impl Source for Claude {
         "Not logged in to Claude",
         "Run `claude auth login` in a terminal, then refresh.",
     );
+    const ICONS: &'static [&'static str] = &[
+        "claude",
+        "claude-desktop",
+        "com.anthropic.Claude",
+        "claude-desktop-unofficial",
+    ];
 
     fn usage() -> Result<Usage, Problem> {
         cli::usage().map(Usage::from).map_err(|error| {
@@ -141,6 +149,7 @@ impl Source for Codex {
         "Not logged in to Codex",
         "Run `codex login` in a terminal, then refresh.",
     );
+    const ICONS: &'static [&'static str] = &["codex", "com.openai.codex", "chatgpt"];
 
     fn usage() -> Result<Usage, Problem> {
         codex::usage()

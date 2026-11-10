@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::time::Duration;
@@ -34,6 +35,8 @@ pub struct Panel<S> {
     away: bool,
     asks: Asks,
     warned: Warned,
+    /// The installed app's icon, telling this applet from the other tool's.
+    logo: Option<widget::icon::Handle>,
     source: PhantomData<S>,
 }
 
@@ -78,6 +81,7 @@ impl<S: Source> Application for Panel<S> {
             away: false,
             asks: Asks::shared(S::FILES, REFRESH.as_secs()),
             warned: Warned::shared(S::FILES),
+            logo: logo(S::ICONS),
             source: PhantomData,
         };
         let ask = panel.ask(false);
@@ -180,12 +184,19 @@ impl<S: Source> Application for Panel<S> {
     fn view(&self) -> Element<'_, Message> {
         let now = now();
         let applet = &self.core.applet;
-        let mut parts: Vec<Element<Message>> = Vec::new();
+        let mut parts: Vec<Element<Message>> = vec![match &self.logo {
+            Some(logo) => widget::icon(logo.clone())
+                .size(applet.suggested_size(true).0)
+                .into(),
+            None => label(applet.text(S::NAME)).class(dim()).into(),
+        }];
+        let mut meters = 0;
         for meter in self.meters() {
             let standing = meter.standing(now);
-            if !parts.is_empty() {
+            if meters > 0 {
                 parts.push(label(applet.text("·")).class(dim()).into());
             }
+            meters += 1;
             parts.push(label(applet.text(meter.short())).class(accent()).into());
             let text = label(applet.text(used(&standing)));
             parts.push(match severity(&standing) {
@@ -201,16 +212,14 @@ impl<S: Source> Application for Panel<S> {
                 parts.push(label(applet.text(brief(out_in))).class(warning()).into());
             }
         }
-        if parts.is_empty() {
+        if meters == 0 {
             match &self.error {
                 Some(problem) if let Some(brief) = problem.brief() => {
-                    parts.push(label(applet.text(S::NAME)).class(dim()).into());
                     parts.push(glyph("dialog-warning-symbolic", warning_color()));
                     parts.push(label(applet.text(brief)).class(warning()).into());
                 }
                 error => {
                     let waiting = if error.is_some() { "?" } else { "…" };
-                    let waiting = format!("{} {waiting}", S::NAME);
                     parts.push(label(applet.text(waiting)).class(dim()).into());
                 }
             }
@@ -366,6 +375,26 @@ impl<S: Source> Panel<S> {
             .width(Length::Fill)
             .into()
     }
+}
+
+/// The first of `names` the icon theme or `/usr/share/pixmaps` has.
+fn logo(names: &[&str]) -> Option<widget::icon::Handle> {
+    names
+        .iter()
+        .find_map(|&name| {
+            let mut named = widget::icon::from_name(name).size(64);
+            // Its default would try `claude` for `claude-desktop`, and so on.
+            named.fallback = None;
+            named.path().or_else(|| {
+                ["png", "svg"]
+                    .map(|extension| {
+                        PathBuf::from(format!("/usr/share/pixmaps/{name}.{extension}"))
+                    })
+                    .into_iter()
+                    .find(|path| path.is_file())
+            })
+        })
+        .map(widget::icon::from_path)
 }
 
 /// How much of a window is used, unknown once the last measurement has outlived it.

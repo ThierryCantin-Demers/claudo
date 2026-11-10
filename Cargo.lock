@@ -1109,6 +1109,8 @@ dependencies = [
  "claudo-core",
  "claudo-protocol",
  "libcosmic",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
