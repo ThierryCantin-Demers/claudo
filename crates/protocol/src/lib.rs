@@ -923,9 +923,9 @@ pub enum ServerEvent {
     /// Asking for the usage windows failed, for this reason.
     QuotaUnavailable(String),
     Room(RoomEvent),
-    /// The backend runs in claudo on another computer, and was reached, or lost: then
-    /// `detail` says why, and the transport tries again. Once reached, the frontend asks
-    /// again for what it shows.
+    /// The backend runs in another process, claudo on another computer or the daemon, and
+    /// was reached, or lost: then `detail` says why. The ssh transport tries again, and once
+    /// reached the frontend asks again for what it shows; the web page's does not.
     Connection {
         connected: bool,
         detail: String,

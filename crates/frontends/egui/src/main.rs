@@ -108,6 +108,8 @@ struct ClaudoApp {
     md_cache: CommonMarkCache,
     /// The backend's protocol, when it is not this build's.
     other_build: Option<u32>,
+    /// Why the daemon was lost. Nothing reconnects, so what is shown stays as it was.
+    lost: Option<String>,
     page: Page,
     room: room::Room,
 }
@@ -149,6 +151,7 @@ impl ClaudoApp {
             working: Default::default(),
             md_cache: CommonMarkCache::default(),
             other_build: None,
+            lost: None,
             // Only the daemon has collectors to fill the room.
             page: if cfg!(target_arch = "wasm32") {
                 Page::Room
@@ -537,9 +540,11 @@ impl ClaudoApp {
                     }
                 }
 
-                ServerEvent::Quota(_)
-                | ServerEvent::QuotaUnavailable(_)
-                | ServerEvent::Connection { .. } => {}
+                ServerEvent::Quota(_) | ServerEvent::QuotaUnavailable(_) => {}
+
+                ServerEvent::Connection { connected, detail } => {
+                    self.lost = (!connected).then_some(detail);
+                }
 
                 ServerEvent::Room(event) => self.room.apply(event),
 
@@ -582,6 +587,17 @@ impl eframe::App for ClaudoApp {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
 
+        if let Some(detail) = &self.lost {
+            egui::Panel::top("lost").show(ui, |ui| {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!(
+                        "Lost the daemon ({detail}). What is shown may be out of date: reload the \
+                         page once it runs again."
+                    ),
+                );
+            });
+        }
         if let Some(version) = self.other_build {
             egui::Panel::top("other_build").show(ui, |ui| {
                 ui.colored_label(
