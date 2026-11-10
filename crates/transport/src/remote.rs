@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use claudo_core::clients::ClientId;
-use claudo_protocol::{Command, ServerEvent};
+use claudo_protocol::{Command, PROTOCOL_VERSION, ServerEvent};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::{Commands, Events, Input};
@@ -56,6 +56,9 @@ fn client(id: ClientId, stream: UnixStream, inputs: Sender<Input>) {
         return;
     };
     let (events, mut sent) = unbounded_channel();
+    let _ = events.send(ServerEvent::Hello {
+        version: PROTOCOL_VERSION,
+    });
     if inputs.send(Input::Connect(id, events)).is_err() {
         return;
     }

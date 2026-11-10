@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use claudo_protocol::{
-    Attachment, Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides, Profile,
-    Review, ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
+    Attachment, Command, ConversationInfo, Decision, Effort, Item, ModelOption, Overrides,
+    PROTOCOL_VERSION, Profile, Review, ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -104,6 +104,8 @@ struct ClaudoApp {
     /// Conversations whose turn runs, for the same reason.
     working: std::collections::HashSet<String>,
     md_cache: CommonMarkCache,
+    /// The backend's protocol, when it is not this build's.
+    other_build: Option<u32>,
 }
 
 impl ClaudoApp {
@@ -135,6 +137,7 @@ impl ClaudoApp {
             approvals: Vec::new(),
             working: Default::default(),
             md_cache: CommonMarkCache::default(),
+            other_build: None,
         }
     }
 
@@ -284,6 +287,9 @@ impl ClaudoApp {
     fn drain_events(&mut self) {
         for ev in self.transport.poll() {
             match ev {
+                ServerEvent::Hello { version } => {
+                    self.other_build = (version != PROTOCOL_VERSION).then_some(version);
+                }
                 ServerEvent::Status(s) => self.status = Some(s),
 
                 ServerEvent::Settings(s) => self.settings = s,
@@ -555,6 +561,19 @@ impl eframe::App for ClaudoApp {
             ui.ctx().request_repaint();
         } else {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
+
+        if let Some(version) = self.other_build {
+            egui::Panel::top("other_build").show(ui, |ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!(
+                        "The daemon runs another claudo build (protocol {version}, this page \
+                         {PROTOCOL_VERSION}), so some of what it sends cannot be shown. Reload \
+                         the page."
+                    ),
+                );
+            });
         }
 
         match &self.status {

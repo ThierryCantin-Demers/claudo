@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Command, ServerEvent};
+use claudo_protocol::{Command, PROTOCOL_VERSION, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::backend::Backend;
@@ -59,6 +59,9 @@ impl Hub {
     /// A new client, which hears at once what runs, and leaves when dropped.
     pub fn connect(&self, events: UnboundedSender<ServerEvent>) -> Client {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let _ = events.send(ServerEvent::Hello {
+            version: PROTOCOL_VERSION,
+        });
         self.room.lock().unwrap().connect(id, events.clone());
         let _ = self.inputs.send(Input::Connect(id, events));
         Client {

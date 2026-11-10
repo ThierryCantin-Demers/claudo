@@ -2365,6 +2365,18 @@ mod app {
                 }
                 // The control room is the web page's.
                 ServerEvent::Room(_) => {}
+                ServerEvent::Hello { version } => {
+                    if version != claudo_protocol::PROTOCOL_VERSION {
+                        self.connection(
+                            false,
+                            format!(
+                                "it runs another claudo build (protocol {version}, this one {}): \
+                                 update both",
+                                claudo_protocol::PROTOCOL_VERSION
+                            ),
+                        );
+                    }
+                }
                 ServerEvent::Conversations { list } => {
                     self.conversations = list;
                     self.restore_tiles();

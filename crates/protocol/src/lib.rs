@@ -5,8 +5,9 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-/// Bumped on any breaking change so the web client and backend can negotiate.
-pub const PROTOCOL_VERSION: u32 = 0;
+/// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
+/// cannot read. The backend sends it first, in `Hello`.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -740,6 +741,12 @@ pub enum Command {
 /// Backend -> frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerEvent {
+    /// The first event on a connection to another process, such as the daemon or claudo
+    /// on another computer: the backend's `PROTOCOL_VERSION`. Another number means it
+    /// runs another build, whose messages this one may not read.
+    Hello {
+        version: u32,
+    },
     Status(SystemStatus),
     Settings(Settings),
     Models(Vec<ModelOption>),
