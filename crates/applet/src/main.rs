@@ -4,6 +4,7 @@
 //! It asks the CLI itself rather than a claudo backend, so it depends on `core`: it is a
 //! panel item beside claudo, not one of its frontends, and never builds for the web.
 
+mod asks;
 mod warned;
 
 #[cfg(not(feature = "cosmic"))]

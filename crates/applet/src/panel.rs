@@ -1,6 +1,6 @@
 use std::process::Command;
 use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use claudo_core::engine::cli;
 use claudo_protocol::{Quota, Standing, span};
@@ -14,6 +14,7 @@ use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
+use crate::asks::{Asks, now};
 use crate::warned::Warned;
 
 /// Each ask starts a `claude` process for about three seconds of CPU.
@@ -30,6 +31,7 @@ pub struct Panel {
     quota_at: Option<u64>,
     error: Option<Problem>,
     asking: bool,
+    asks: Asks,
     warned: Warned,
 }
 
@@ -65,7 +67,10 @@ impl Problem {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Asks the CLI, unless another applet did recently.
     Refresh,
+    /// Asks the CLI anyway.
+    RefreshNow,
     /// Redraws the time left between refreshes.
     Tick,
     Usage(Result<Quota, Problem>),
@@ -96,9 +101,10 @@ impl Application for Panel {
             quota_at: None,
             error: None,
             asking: false,
+            asks: Asks::shared(REFRESH.as_secs()),
             warned: Warned::shared(),
         };
-        let ask = panel.ask();
+        let ask = panel.ask(false);
         (panel, ask)
     }
 
@@ -115,7 +121,8 @@ impl Application for Panel {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Refresh => return self.ask(),
+            Message::Refresh => return self.ask(false),
+            Message::RefreshNow => return self.ask(true),
             Message::Tick => {}
             Message::Usage(answer) => {
                 self.asking = false;
@@ -170,7 +177,7 @@ impl Application for Panel {
                 };
                 let surface = surface(action);
                 return if self.popup.is_none() {
-                    Task::batch([surface, self.ask()])
+                    Task::batch([surface, self.ask(false)])
                 } else {
                     surface
                 };
@@ -199,7 +206,7 @@ impl Application for Panel {
                 parts.push(label(applet.text("·")).class(dim()).into());
             }
             parts.push(label(applet.text(short)).class(accent()).into());
-            let text = label(applet.text(format!("{:.0}%", standing.used * 100.0)));
+            let text = label(applet.text(used(&standing)));
             parts.push(match severity(&standing) {
                 Some(class) => text.class(class).into(),
                 None => text.into(),
@@ -277,14 +284,15 @@ impl Application for Panel {
 }
 
 impl Panel {
-    fn ask(&mut self) -> Task<Message> {
+    fn ask(&mut self, force: bool) -> Task<Message> {
         if self.asking {
             return Task::none();
         }
         self.asking = true;
         let (sender, answer) = oneshot::channel();
+        let asks = self.asks.clone();
         std::thread::spawn(move || {
-            let _ = sender.send(cli::usage().map_err(Problem::of));
+            let _ = sender.send(asks.usage(force, cli::usage).map_err(Problem::of));
         });
         cosmic::task::future(async move {
             Message::Usage(
@@ -319,7 +327,7 @@ impl Panel {
         for (label, window, length) in self.quota.unwrap_or_default().windows() {
             let Some(window) = window else { continue };
             let standing = window.standing(length, now);
-            let percent = widget::text(format!("{:.0}%", standing.used * 100.0));
+            let percent = widget::text(used(&standing));
             rows.push(
                 widget::Row::with_children(vec![
                     widget::text::heading(label).into(),
@@ -333,13 +341,13 @@ impl Panel {
             );
             rows.push(meter(&standing));
             rows.push(
-                widget::text::caption(
-                    standing
-                        .left
-                        .map_or("Starts on your next message".to_string(), |left| {
-                            format!("Resets in {}", span(left))
-                        }),
-                )
+                widget::text::caption(standing.left.map_or_else(
+                    || {
+                        let ago = span(now.saturating_sub(window.resets_at));
+                        format!("Reset {ago} ago, not measured since")
+                    },
+                    |left| format!("Resets in {}", span(left)),
+                ))
                 .class(dim())
                 .into(),
             );
@@ -370,7 +378,7 @@ impl Panel {
                     .into(),
                 widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
                     .extra_small()
-                    .on_press_maybe((!self.asking).then_some(Message::Refresh))
+                    .on_press_maybe((!self.asking).then_some(Message::RefreshNow))
                     .into(),
             ])
             .align_y(Alignment::Center)
@@ -380,6 +388,14 @@ impl Panel {
             .padding(12)
             .width(Length::Fill)
             .into()
+    }
+}
+
+/// How much of a window is used, unknown once the last measurement has outlived it.
+fn used(standing: &Standing) -> String {
+    match standing.left {
+        Some(_) => format!("{:.0}%", standing.used * 100.0),
+        None => "?".to_string(),
     }
 }
 
@@ -415,12 +431,6 @@ fn label(text: widget::Text<'_, cosmic::Theme>) -> widget::Text<'_, cosmic::Them
 
 fn surface(action: cosmic::surface::Action<Message>) -> Task<Message> {
     cosmic::task::message(cosmic::Action::Surface(action))
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 fn notify(label: &'static str, out_in: u64) {

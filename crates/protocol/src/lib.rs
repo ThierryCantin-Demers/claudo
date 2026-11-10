@@ -113,7 +113,8 @@ pub struct Quota {
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
     /// When the server measured these, in Unix seconds. The CLI answers an ask for usage
-    /// from a snapshot up to 30 minutes old; None from a peer too old to say.
+    /// from its saved snapshot, up to an hour old when the usage endpoint refuses it; None
+    /// from a peer too old to say.
     #[serde(default)]
     pub measured_at: Option<u64>,
 }

@@ -16,4 +16,6 @@ cosmic = ["dep:libcosmic"]
 [dependencies]
 claudo-core.workspace = true
 claudo-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "896b252dfc3c6cb0c678b844432016415dc104b1", optional = true, default-features = false, features = ["applet"] }

@@ -79,7 +79,7 @@ impl Warned {
     }
 }
 
-fn locked(path: &Path) -> io::Result<File> {
+pub(crate) fn locked(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
