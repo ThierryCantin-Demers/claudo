@@ -271,7 +271,6 @@ impl ClaudoApp {
                 ServerEvent::Models(models) => self.models = models,
                 ServerEvent::Commands(_)
                 | ServerEvent::Waiting { .. }
-                | ServerEvent::Queued { .. }
                 | ServerEvent::Suggested { .. }
                 | ServerEvent::Retrying { .. }
                 | ServerEvent::Compacting { .. }
@@ -356,9 +355,15 @@ impl ClaudoApp {
                     }
                 }
 
+                // Typed in another app, or sent from another tab: the turn shows here too.
                 ServerEvent::Typed {
                     conversation_id,
                     text,
+                }
+                | ServerEvent::Queued {
+                    conversation_id,
+                    text,
+                    ..
                 } => {
                     if self.is_current(&conversation_id) {
                         self.assistant_idx = None;
@@ -494,8 +499,11 @@ impl ClaudoApp {
                 ServerEvent::Quota(_)
                 | ServerEvent::QuotaUnavailable(_)
                 | ServerEvent::Room(_)
-                | ServerEvent::Connection { .. }
-                | ServerEvent::Answered { .. } => {}
+                | ServerEvent::Connection { .. } => {}
+
+                ServerEvent::Answered { request_id, .. } => {
+                    self.approvals.retain(|(id, ..)| *id != request_id);
+                }
 
                 ServerEvent::Error {
                     conversation_id,
