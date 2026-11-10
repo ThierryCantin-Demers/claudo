@@ -1,9 +1,9 @@
+use std::marker::PhantomData;
 use std::process::Command;
 use std::rc::Rc;
 use std::time::Duration;
 
-use claudo_core::engine::cli;
-use claudo_protocol::{Quota, Standing, span};
+use claudo_protocol::{Standing, span};
 use cosmic::app::{Core, Task};
 use cosmic::iced::futures::channel::oneshot;
 use cosmic::iced::widget::text::Wrapping;
@@ -16,56 +16,25 @@ use cosmic::{Application, Element};
 
 use crate::asks::{Asks, now};
 use crate::presence;
+use crate::usage::{Problem, Source, Usage};
 use crate::warned::Warned;
 
-/// Each ask starts a `claude` process for about three seconds of CPU.
+/// Each ask starts a process, `claude` for about three seconds of CPU.
 const REFRESH: Duration = Duration::from_secs(120);
 
-/// What the panel calls each window, in the order `Quota::windows` gives them.
-const SHORT: [&str; 2] = ["5h", "7d"];
-
-pub struct Panel {
+pub struct Panel<S> {
     core: Core,
     popup: Option<Id>,
-    quota: Option<Quota>,
+    usage: Option<Usage>,
     /// When the server measured the windows, in Unix seconds.
-    quota_at: Option<u64>,
+    usage_at: Option<u64>,
     error: Option<Problem>,
     asking: bool,
     /// Nobody has used this computer for a while, so the timer asks nothing.
     away: bool,
     asks: Asks,
     warned: Warned,
-}
-
-/// Why the last ask failed. Only a failed ask checks the login, which costs another process.
-#[derive(Debug, Clone)]
-pub enum Problem {
-    NotInstalled,
-    LoggedOut,
-    Failed(String),
-}
-
-impl Problem {
-    fn of(error: std::io::Error) -> Self {
-        let system = claudo_core::detect_system();
-        if !system.claude_installed {
-            Problem::NotInstalled
-        } else if !system.auth.logged_in {
-            Problem::LoggedOut
-        } else {
-            Problem::Failed(error.to_string())
-        }
-    }
-
-    /// What the panel shows in place of the usage.
-    fn brief(&self) -> Option<&'static str> {
-        match self {
-            Problem::NotInstalled => Some("not found"),
-            Problem::LoggedOut => Some("log in"),
-            Problem::Failed(_) => None,
-        }
-    }
+    source: PhantomData<S>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,17 +47,17 @@ pub enum Message {
     Present(bool),
     /// Redraws the time left between refreshes.
     Tick,
-    Usage(Result<Quota, Problem>),
+    Usage(Result<Usage, Problem>),
     Toggle(Rectangle),
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
 }
 
-impl Application for Panel {
+impl<S: Source> Application for Panel<S> {
     type Executor = cosmic::SingleThreadExecutor;
     type Flags = ();
     type Message = Message;
-    const APP_ID: &'static str = "com.claudo.Usage";
+    const APP_ID: &'static str = S::APP_ID;
 
     fn core(&self) -> &Core {
         &self.core
@@ -102,13 +71,14 @@ impl Application for Panel {
         let mut panel = Panel {
             core,
             popup: None,
-            quota: None,
-            quota_at: None,
+            usage: None,
+            usage_at: None,
             error: None,
             asking: false,
             away: false,
-            asks: Asks::shared(REFRESH.as_secs()),
-            warned: Warned::shared(),
+            asks: Asks::shared(S::FILES, REFRESH.as_secs()),
+            warned: Warned::shared(S::FILES),
+            source: PhantomData,
         };
         let ask = panel.ask(false);
         (panel, ask)
@@ -142,20 +112,20 @@ impl Application for Panel {
             Message::Usage(answer) => {
                 self.asking = false;
                 match answer {
-                    Ok(quota) => {
+                    Ok(usage) => {
                         let now = now();
-                        self.quota = Some(quota);
-                        self.quota_at = Some(quota.measured_at.unwrap_or(now));
+                        self.usage_at = Some(usage.measured_at.unwrap_or(now));
                         self.error = None;
-                        for (label, out_in) in self.warned.fresh(quota, now) {
-                            notify(label, out_in);
+                        for (label, out_in) in self.warned.fresh(&usage, now) {
+                            notify(S::NAME, label, out_in);
                         }
+                        self.usage = Some(usage);
                     }
                     Err(problem) => {
                         // Numbers from before the logout would read as current.
                         if problem.brief().is_some() {
-                            self.quota = None;
-                            self.quota_at = None;
+                            self.usage = None;
+                            self.usage_at = None;
                         }
                         self.error = Some(problem);
                     }
@@ -164,9 +134,9 @@ impl Application for Panel {
             Message::Toggle(anchor) => {
                 let action = match self.popup {
                     Some(id) => destroy_popup(id),
-                    None => app_popup::<Panel>(
+                    None => app_popup::<Panel<S>>(
                         |_| Default::default(),
-                        move |panel: &mut Panel| {
+                        move |panel: &mut Panel<S>| {
                             let id = Id::unique();
                             panel.popup = Some(id);
                             let mut settings = panel.core.applet.get_popup_settings(
@@ -184,7 +154,7 @@ impl Application for Panel {
                             };
                             settings
                         },
-                        Some(Box::new(|panel: &Panel| {
+                        Some(Box::new(|panel: &Panel<S>| {
                             Element::from(panel.core.applet.popup_container(panel.popup_view()))
                                 .map(cosmic::Action::App)
                         })),
@@ -211,16 +181,12 @@ impl Application for Panel {
         let now = now();
         let applet = &self.core.applet;
         let mut parts: Vec<Element<Message>> = Vec::new();
-        for (short, (_, window, length)) in SHORT
-            .into_iter()
-            .zip(self.quota.unwrap_or_default().windows())
-        {
-            let Some(window) = window else { continue };
-            let standing = window.standing(length, now);
+        for meter in self.meters() {
+            let standing = meter.standing(now);
             if !parts.is_empty() {
                 parts.push(label(applet.text("·")).class(dim()).into());
             }
-            parts.push(label(applet.text(short)).class(accent()).into());
+            parts.push(label(applet.text(meter.short())).class(accent()).into());
             let text = label(applet.text(used(&standing)));
             parts.push(match severity(&standing) {
                 Some(class) => text.class(class).into(),
@@ -238,16 +204,13 @@ impl Application for Panel {
         if parts.is_empty() {
             match &self.error {
                 Some(problem) if let Some(brief) = problem.brief() => {
-                    parts.push(label(applet.text("Claude")).class(dim()).into());
+                    parts.push(label(applet.text(S::NAME)).class(dim()).into());
                     parts.push(glyph("dialog-warning-symbolic", warning_color()));
                     parts.push(label(applet.text(brief)).class(warning()).into());
                 }
                 error => {
-                    let waiting = if error.is_some() {
-                        "Claude ?"
-                    } else {
-                        "Claude …"
-                    };
+                    let waiting = if error.is_some() { "?" } else { "…" };
+                    let waiting = format!("{} {waiting}", S::NAME);
                     parts.push(label(applet.text(waiting)).class(dim()).into());
                 }
             }
@@ -281,7 +244,7 @@ impl Application for Panel {
         applet
             .autosize_window(applet.applet_tooltip::<Message>(
                 button,
-                "Claude usage",
+                format!("{} usage", S::NAME),
                 self.popup.is_some(),
                 Message::Surface,
                 None,
@@ -298,7 +261,13 @@ impl Application for Panel {
     }
 }
 
-impl Panel {
+impl<S: Source> Panel<S> {
+    fn meters(&self) -> impl Iterator<Item = crate::usage::Meter> + '_ {
+        self.usage
+            .iter()
+            .flat_map(|usage| usage.meters.iter().copied())
+    }
+
     fn ask(&mut self, force: bool) -> Task<Message> {
         if self.asking {
             return Task::none();
@@ -307,7 +276,7 @@ impl Panel {
         let (sender, answer) = oneshot::channel();
         let asks = self.asks.clone();
         std::thread::spawn(move || {
-            let _ = sender.send(asks.usage(force, cli::usage).map_err(Problem::of));
+            let _ = sender.send(asks.usage(force, S::usage));
         });
         cosmic::task::future(async move {
             Message::Usage(
@@ -324,14 +293,8 @@ impl Panel {
         let now = now();
         let mut rows: Vec<Element<Message>> = Vec::new();
         let help = match &self.error {
-            Some(Problem::LoggedOut) => Some((
-                "Not logged in to Claude",
-                "Run `claude auth login` in a terminal, then refresh.",
-            )),
-            Some(Problem::NotInstalled) => Some((
-                "Claude Code not found",
-                "Install the `claude` command and log in with `claude auth login`.",
-            )),
+            Some(Problem::LoggedOut) => Some(S::LOGGED_OUT),
+            Some(Problem::NotInstalled) => Some(S::NOT_INSTALLED),
             _ => None,
         };
         if let Some((heading, body)) = help {
@@ -339,13 +302,12 @@ impl Panel {
             rows.push(widget::text::body(body).into());
             rows.push(widget::space::vertical().height(Length::Fixed(6.0)).into());
         }
-        for (label, window, length) in self.quota.unwrap_or_default().windows() {
-            let Some(window) = window else { continue };
-            let standing = window.standing(length, now);
+        for meter in self.meters() {
+            let standing = meter.standing(now);
             let percent = widget::text(used(&standing));
             rows.push(
                 widget::Row::with_children(vec![
-                    widget::text::heading(label).into(),
+                    widget::text::heading(meter.label()).into(),
                     widget::space::horizontal().into(),
                     match severity(&standing) {
                         Some(class) => percent.class(class).into(),
@@ -354,11 +316,11 @@ impl Panel {
                 ])
                 .into(),
             );
-            rows.push(meter(&standing));
+            rows.push(bar(&standing));
             rows.push(
                 widget::text::caption(standing.left.map_or_else(
                     || {
-                        let ago = span(now.saturating_sub(window.resets_at));
+                        let ago = span(now.saturating_sub(meter.window.resets_at));
                         format!("Reset {ago} ago, not measured since")
                     },
                     |left| format!("Resets in {}", span(left)),
@@ -375,7 +337,7 @@ impl Panel {
             }
             rows.push(widget::space::vertical().height(Length::Fixed(6.0)).into());
         }
-        let status = match (self.asking, &self.error, self.quota_at) {
+        let status = match (self.asking, &self.error, self.usage_at) {
             (true, ..) => "Updating…".to_string(),
             (false, Some(Problem::Failed(error)), _) => format!("Could not update: {error}"),
             (false, Some(_), _) => String::new(),
@@ -448,11 +410,12 @@ fn surface(action: cosmic::surface::Action<Message>) -> Task<Message> {
     cosmic::task::message(cosmic::Action::Surface(action))
 }
 
-fn notify(label: &'static str, out_in: u64) {
+fn notify(name: &'static str, label: String, out_in: u64) {
     std::thread::spawn(move || {
         let sent = Command::new("notify-send")
-            .args(["--app-name=Claude usage", "--icon=dialog-warning-symbolic"])
-            .arg(format!("Claude: {label} usage is ahead of pace"))
+            .arg(format!("--app-name={name} usage"))
+            .arg("--icon=dialog-warning-symbolic")
+            .arg(format!("{name}: {label} usage is ahead of pace"))
             .arg(format!("At this pace, it runs out in {}.", span(out_in)))
             .status();
         if let Err(error) = sent {
@@ -492,7 +455,7 @@ fn dim() -> cosmic::theme::Text {
 
 /// A thin bar, in the accent color, the warning one past 80% and the destructive one past
 /// 95%, marked where an even pace would be.
-fn meter<'a>(standing: &Standing) -> Element<'a, Message> {
+fn bar<'a>(standing: &Standing) -> Element<'a, Message> {
     let used = standing.used;
     let filled = (used * 1000.0).round() as u16;
     let rounded = |theme: &cosmic::Theme, color: Color| container::Style {

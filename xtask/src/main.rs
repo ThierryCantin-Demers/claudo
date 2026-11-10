@@ -13,6 +13,7 @@ use need::Need;
 const APP_ID: &str = "com.claudo.Cosmic";
 const COSMIC_BIN: &str = "claudo-cosmic";
 const APPLET_ID: &str = "com.claudo.Usage";
+const CODEX_APPLET_ID: &str = "com.claudo.CodexUsage";
 const APPLET_BIN: &str = "claudo-applet";
 const WEB_OUT: &str = "crates/frontends/egui/dist";
 
@@ -34,8 +35,8 @@ enum Task {
         #[arg(long, value_name = "HOST")]
         on: Option<String>,
     },
-    /// Install the panel applet showing the subscription's usage; add it to the panel from
-    /// Settings, Desktop, Panel, Configure applets.
+    /// Install the panel applets showing the Claude and Codex plans' usage; add them to the
+    /// panel from Settings, Desktop, Panel, Configure applets.
     InstallApplet,
     /// Remove what `install` and `install-applet` put in place.
     Uninstall,
@@ -204,27 +205,36 @@ fn install(on: Option<&str>) -> Result<(), String> {
 fn install_applet() -> Result<(), String> {
     cargo_install("crates/applet")?;
     let bin = cargo_bin_dir()?.join(APPLET_BIN);
-    let desktop = applet_desktop_file()?;
-    fs::create_dir_all(desktop.parent().unwrap())
-        .map_err(|e| format!("cannot create {}: {e}", desktop.parent().unwrap().display()))?;
-    // The panel lists an entry only with X-CosmicApplet, and NoDisplay keeps it out of the launcher.
-    let entry = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Claude usage\n\
-         Comment=The Claude subscription's session and week, and a warning when either runs out too fast\n\
-         Exec={}\n\
-         Icon=utilities-system-monitor-symbolic\n\
-         Terminal=false\n\
-         Categories=COSMIC;\n\
-         NoDisplay=true\n\
-         X-CosmicApplet=true\n",
-        bin.display()
-    );
-    fs::write(&desktop, entry).map_err(|e| format!("cannot write {}: {e}", desktop.display()))?;
     println!("installed {}", bin.display());
-    println!("applet entry {}", desktop.display());
-    println!("add it to the panel from Settings, Desktop, Panel, Configure applets");
+    for (id, name, exec) in [
+        (APPLET_ID, "Claude", bin.display().to_string()),
+        (
+            CODEX_APPLET_ID,
+            "Codex",
+            format!("{} --codex", bin.display()),
+        ),
+    ] {
+        let desktop = applet_desktop_file(id)?;
+        fs::create_dir_all(desktop.parent().unwrap())
+            .map_err(|e| format!("cannot create {}: {e}", desktop.parent().unwrap().display()))?;
+        // The panel lists an entry only with X-CosmicApplet, and NoDisplay keeps it out of the launcher.
+        let entry = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name={name} usage\n\
+             Comment=The {name} plan's usage windows, and a warning when one runs out too fast\n\
+             Exec={exec}\n\
+             Icon=utilities-system-monitor-symbolic\n\
+             Terminal=false\n\
+             Categories=COSMIC;\n\
+             NoDisplay=true\n\
+             X-CosmicApplet=true\n"
+        );
+        fs::write(&desktop, entry)
+            .map_err(|e| format!("cannot write {}: {e}", desktop.display()))?;
+        println!("applet entry {}", desktop.display());
+    }
+    println!("add them to the panel from Settings, Desktop, Panel, Configure applets");
     Ok(())
 }
 
@@ -244,9 +254,14 @@ fn uninstall() -> Result<(), String> {
                 .is_some_and(|name| name.starts_with(&format!("{APP_ID}.on-")))
         })
         .collect();
-    for file in [desktop_file()?, icon_file()?, applet_desktop_file()?]
-        .into_iter()
-        .chain(remote)
+    for file in [
+        desktop_file()?,
+        icon_file()?,
+        applet_desktop_file(APPLET_ID)?,
+        applet_desktop_file(CODEX_APPLET_ID)?,
+    ]
+    .into_iter()
+    .chain(remote)
     {
         match fs::remove_file(&file) {
             Ok(()) => println!("removed {}", file.display()),
@@ -365,8 +380,8 @@ fn desktop_file() -> Result<PathBuf, String> {
     Ok(data_home()?.join(format!("applications/{APP_ID}.desktop")))
 }
 
-fn applet_desktop_file() -> Result<PathBuf, String> {
-    Ok(data_home()?.join(format!("applications/{APPLET_ID}.desktop")))
+fn applet_desktop_file(id: &str) -> Result<PathBuf, String> {
+    Ok(data_home()?.join(format!("applications/{id}.desktop")))
 }
 
 fn remote_desktop_file(host: &str) -> Result<PathBuf, String> {

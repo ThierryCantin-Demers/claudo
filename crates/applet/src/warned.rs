@@ -1,13 +1,15 @@
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use claudo_protocol::Quota;
+use crate::usage::Usage;
 
-/// For each window, the reset of the last one warned of, so a window warns once.
+/// For each window, by its length, the reset of the last one warned of, so a window warns
+/// once.
 #[derive(Debug, Default)]
 pub struct Warned {
-    resets: [Option<u64>; 2],
+    resets: BTreeMap<u64, u64>,
     /// The panel of each display runs an applet of its own, and they keep the resets
     /// here, so only the first to see a window ahead of its pace warns.
     shared: Option<PathBuf>,
@@ -15,40 +17,37 @@ pub struct Warned {
 
 #[cfg_attr(not(feature = "cosmic"), allow(dead_code))]
 impl Warned {
-    pub fn shared() -> Self {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        Self::sharing(dir.join("claudo-applet-warned"))
+    /// Shared by the applets showing one tool, whose files start with `files`.
+    pub fn shared(files: &str) -> Self {
+        Self::sharing(runtime_dir().join(format!("{files}-warned")))
     }
 
     fn sharing(path: PathBuf) -> Self {
         Self {
-            resets: [None; 2],
+            resets: BTreeMap::new(),
             shared: Some(path),
         }
     }
 
     /// The windows that would run out before their reset and have not warned yet: each
     /// label with how long until it runs out at the pace so far.
-    pub fn fresh(&mut self, quota: Quota, now: u64) -> Vec<(&'static str, u64)> {
+    pub fn fresh(&mut self, usage: &Usage, now: u64) -> Vec<(String, u64)> {
         // Held until the resets are written back. Without the file, this applet warns alone.
         let file = self.shared.as_deref().and_then(|path| locked(path).ok());
         if let Some(file) = &file {
             self.take_in(file);
         }
-        let fresh: Vec<_> = quota
-            .windows()
-            .into_iter()
-            .zip(&mut self.resets)
-            .filter_map(|((label, window, length), warned)| {
-                let window = window?;
-                let out_in = window.standing(length, now).out_in?;
-                if warned.is_some_and(|reset| now < reset) {
+        let fresh: Vec<_> = usage
+            .meters
+            .iter()
+            .filter_map(|meter| {
+                let out_in = meter.standing(now).out_in?;
+                let warned = self.resets.get(&meter.length);
+                if warned.is_some_and(|&reset| now < reset) {
                     return None;
                 }
-                *warned = Some(window.resets_at);
-                Some((label, out_in))
+                self.resets.insert(meter.length, meter.window.resets_at);
+                Some((meter.label(), out_in))
             })
             .collect();
         if let Some(file) = &file
@@ -62,21 +61,33 @@ impl Warned {
     fn take_in(&mut self, mut file: &File) {
         let mut text = String::new();
         let _ = file.read_to_string(&mut text);
-        let mut theirs = text.split_whitespace().map(|reset| reset.parse().ok());
-        for reset in &mut self.resets {
-            *reset = (*reset).max(theirs.next().flatten());
+        let theirs = text.split_whitespace().filter_map(|pair| {
+            let (length, reset) = pair.split_once(':')?;
+            Some((length.parse().ok()?, reset.parse().ok()?))
+        });
+        for (length, reset) in theirs {
+            let ours = self.resets.entry(length).or_insert(reset);
+            *ours = (*ours).max(reset);
         }
     }
 
     fn write(&self, mut file: &File) -> io::Result<()> {
         let text = self
             .resets
-            .map(|reset| reset.map_or("-".to_string(), |reset| reset.to_string()))
+            .iter()
+            .map(|(length, reset)| format!("{length}:{reset}"))
+            .collect::<Vec<_>>()
             .join(" ");
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
         file.write_all(text.as_bytes())
     }
+}
+
+pub(crate) fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 pub(crate) fn locked(path: &Path) -> io::Result<File> {
@@ -93,14 +104,17 @@ pub(crate) fn locked(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::Meter;
     use claudo_protocol::QuotaWindow;
 
     const HOUR: u64 = 3600;
 
-    fn session(used: f32, resets_at: u64) -> Quota {
-        Quota {
-            five_hour: Some(QuotaWindow { used, resets_at }),
-            seven_day: None,
+    fn session(used: f32, resets_at: u64) -> Usage {
+        Usage {
+            meters: vec![Meter {
+                length: 5 * HOUR,
+                window: QuotaWindow { used, resets_at },
+            }],
             measured_at: None,
         }
     }
@@ -111,17 +125,17 @@ mod tests {
         let now = 1_000_000;
         let reset = now + 4 * HOUR;
         assert_eq!(
-            warned.fresh(session(0.5, reset), now),
-            vec![("Session", HOUR)]
+            warned.fresh(&session(0.5, reset), now),
+            vec![("Session".to_string(), HOUR)]
         );
-        assert!(warned.fresh(session(0.6, reset + 1), now + 60).is_empty());
+        assert!(warned.fresh(&session(0.6, reset + 1), now + 60).is_empty());
         let next = reset + 5 * HOUR;
         assert!(
-            warned.fresh(session(0.4, next), reset).is_empty(),
+            warned.fresh(&session(0.4, next), reset).is_empty(),
             "just started"
         );
         assert_eq!(
-            warned.fresh(session(0.9, next), reset + HOUR).len(),
+            warned.fresh(&session(0.9, next), reset + HOUR).len(),
             1,
             "the next window warns again"
         );
@@ -134,13 +148,17 @@ mod tests {
         let mut panels = [Warned::sharing(path.clone()), Warned::sharing(path.clone())];
         let now = 1_000_000;
         let reset = now + 4 * HOUR;
-        assert_eq!(panels[0].fresh(session(0.5, reset), now).len(), 1);
-        assert!(panels[1].fresh(session(0.5, reset + 1), now).is_empty());
-        let restarted = Warned::sharing(path.clone()).fresh(session(0.6, reset), now + 60);
+        assert_eq!(panels[0].fresh(&session(0.5, reset), now).len(), 1);
+        assert!(panels[1].fresh(&session(0.5, reset + 1), now).is_empty());
+        let restarted = Warned::sharing(path.clone()).fresh(&session(0.6, reset), now + 60);
         assert!(restarted.is_empty(), "a restarted applet has warned too");
         let next = reset + 5 * HOUR;
-        assert_eq!(panels[1].fresh(session(0.9, next), reset + HOUR).len(), 1);
-        assert!(panels[0].fresh(session(0.9, next), reset + HOUR).is_empty());
+        assert_eq!(panels[1].fresh(&session(0.9, next), reset + HOUR).len(), 1);
+        assert!(
+            panels[0]
+                .fresh(&session(0.9, next), reset + HOUR)
+                .is_empty()
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
