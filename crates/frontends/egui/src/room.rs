@@ -277,7 +277,7 @@ const AGENT: f32 = 17.0;
 const CHILD: f32 = 7.0;
 const CHILD_DISTANCE: f32 = 54.0;
 /// How far an agent's caption reaches to either side.
-const CAPTION_REACH: f32 = 74.0;
+const CAPTION_REACH: f32 = 92.0;
 /// The space between neighbours on an island's ring, so their captions never meet.
 const ROOT_GAP: f32 = 2.0 * CAPTION_REACH + 16.0;
 /// Room at the top of an island for its name.
@@ -553,22 +553,48 @@ fn body(
 fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Pos2, scale: f32) {
     let top = at + vec2(0.0, (AGENT + 6.0) * scale);
     let name = node.name.as_deref().unwrap_or("unnamed");
-    painter.text(
-        top,
-        Align2::CENTER_TOP,
-        clip(name, 22),
-        FontId::proportional(13.0 * scale),
+    let name = lines(
+        painter,
+        name,
+        13.0 * scale,
         visuals.strong_text_color(),
+        2,
+        scale,
     );
+    let below = top + vec2(0.0, name.size().y + 2.0 * scale);
+    painter.galley(top, name, visuals.strong_text_color());
     if let Some(doing) = &node.doing {
-        painter.text(
-            top + vec2(0.0, 17.0 * scale),
-            Align2::CENTER_TOP,
-            clip(doing, 26),
-            FontId::proportional(11.0 * scale),
+        let doing = lines(
+            painter,
+            doing,
+            11.0 * scale,
             visuals.weak_text_color(),
+            1,
+            scale,
         );
+        painter.galley(below, doing, visuals.weak_text_color());
     }
+}
+
+/// Text centred on the point it is painted at, wrapped to a caption's width, its last row
+/// ending in an ellipsis when it runs over `rows`.
+fn lines(
+    painter: &egui::Painter,
+    text: &str,
+    size: f32,
+    tint: Color32,
+    rows: usize,
+    scale: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(
+        text.to_string(),
+        FontId::proportional(size),
+        tint,
+        2.0 * CAPTION_REACH * scale,
+    );
+    job.wrap.max_rows = rows;
+    job.halign = egui::Align::Center;
+    painter.layout_job(job)
 }
 
 fn tile(ui: &mut egui::Ui, node: &Node, held: Option<f64>, now: f64) {
@@ -703,15 +729,6 @@ fn ago(seconds: f64) -> String {
         60..3600 => format!("{}m", seconds / 60),
         _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
     }
-}
-
-fn clip(text: &str, most: usize) -> String {
-    if text.chars().count() <= most {
-        return text.to_string();
-    }
-    let mut kept: String = text.chars().take(most - 1).collect();
-    kept.push('…');
-    kept
 }
 
 /// The last part of a path: a repository's folder name.
