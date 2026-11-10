@@ -3,6 +3,7 @@ use claudo_protocol::{Quota, QuotaWindow, Standing};
 use serde::{Deserialize, Serialize};
 
 use crate::codex;
+use crate::pace::Pace;
 
 /// A plan's usage windows, from whichever tool reports them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -25,8 +26,8 @@ pub struct Meter {
 }
 
 impl Meter {
-    pub fn standing(&self, now: u64) -> Standing {
-        self.window.standing(self.length, now)
+    pub fn standing(&self, now: u64, pace: Pace) -> Standing {
+        pace.standing(self.window, self.length, now)
     }
 
     /// What the panel calls it: "5h", "7d", "Fable".

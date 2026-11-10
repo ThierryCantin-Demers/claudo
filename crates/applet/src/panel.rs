@@ -16,6 +16,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use crate::asks::{Asks, now};
+use crate::pace::Pace;
 use crate::presence;
 use crate::usage::{Problem, Source, Usage};
 use crate::warned::Warned;
@@ -33,6 +34,7 @@ pub struct Panel<S> {
     asking: bool,
     /// Nobody has used this computer for a while, so the timer asks nothing.
     away: bool,
+    pace: Pace,
     asks: Asks,
     warned: Warned,
     /// The installed app's icon, telling this applet from the other tool's.
@@ -50,6 +52,8 @@ pub enum Message {
     Present(bool),
     /// Redraws the time left between refreshes.
     Tick,
+    /// The allowance is meant for workdays alone.
+    Workdays(bool),
     Usage(Result<Usage, Problem>),
     Toggle(Rectangle),
     PopupClosed(Id),
@@ -79,6 +83,7 @@ impl<S: Source> Application for Panel<S> {
             error: None,
             asking: false,
             away: false,
+            pace: Pace::load(S::FILES),
             asks: Asks::shared(S::FILES, REFRESH.as_secs()),
             warned: Warned::shared(S::FILES),
             logo: logo(S::ICONS),
@@ -112,7 +117,18 @@ impl<S: Source> Application for Panel<S> {
                     return self.ask(false);
                 }
             }
-            Message::Tick => {}
+            // Another display's applet may have changed it.
+            Message::Tick => self.pace = Pace::load(S::FILES),
+            Message::Workdays(workdays) => {
+                self.pace = if workdays {
+                    Pace::Workdays
+                } else {
+                    Pace::EveryDay
+                };
+                if let Err(error) = self.pace.save(S::FILES) {
+                    eprintln!("claudo-applet: cannot save the pace: {error}");
+                }
+            }
             Message::Usage(answer) => {
                 self.asking = false;
                 match answer {
@@ -120,7 +136,7 @@ impl<S: Source> Application for Panel<S> {
                         let now = now();
                         self.usage_at = Some(usage.measured_at.unwrap_or(now));
                         self.error = None;
-                        for (label, out_in) in self.warned.fresh(&usage, now) {
+                        for (label, out_in) in self.warned.fresh(&usage, now, self.pace) {
                             notify(S::NAME, label, out_in);
                         }
                         self.usage = Some(usage);
@@ -192,7 +208,7 @@ impl<S: Source> Application for Panel<S> {
         }];
         let mut meters = 0;
         for meter in self.meters() {
-            let standing = meter.standing(now);
+            let standing = meter.standing(now, self.pace);
             if meters > 0 {
                 parts.push(label(applet.text("·")).class(dim()).into());
             }
@@ -310,7 +326,7 @@ impl<S: Source> Panel<S> {
             rows.push(widget::space::vertical().height(Length::Fixed(6.0)).into());
         }
         for meter in self.meters() {
-            let standing = meter.standing(now);
+            let standing = meter.standing(now, self.pace);
             let percent = widget::text(used(&standing));
             rows.push(
                 widget::Row::with_children(vec![
@@ -344,6 +360,18 @@ impl<S: Source> Panel<S> {
             }
             rows.push(widget::space::vertical().height(Length::Fixed(6.0)).into());
         }
+        rows.push(
+            widget::Row::with_children(vec![
+                widget::text::caption("Pace over workdays only")
+                    .width(Length::Fill)
+                    .into(),
+                widget::toggler(self.pace == Pace::Workdays)
+                    .on_toggle(Message::Workdays)
+                    .into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+        );
         let status = match (self.asking, &self.error, self.usage_at) {
             (true, ..) => "Updating…".to_string(),
             (false, Some(Problem::Failed(error)), _) => format!("Could not update: {error}"),

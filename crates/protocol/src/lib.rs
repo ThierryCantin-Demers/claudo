@@ -149,8 +149,36 @@ pub struct Standing {
     pub out_in: Option<u64>,
 }
 
+/// Which of a window's seconds its allowance is meant for: every one, or only some, such
+/// as workdays for someone who rarely works on weekends.
+pub trait Calendar {
+    /// How many of the seconds from `from` to `to` count.
+    fn counted(&self, from: u64, to: u64) -> u64;
+    /// When `seconds` more counted seconds will have passed after `from`.
+    fn after(&self, from: u64, seconds: u64) -> u64;
+}
+
+/// Every second counts.
+pub struct EveryDay;
+
+impl Calendar for EveryDay {
+    fn counted(&self, from: u64, to: u64) -> u64 {
+        to.saturating_sub(from)
+    }
+
+    fn after(&self, from: u64, seconds: u64) -> u64 {
+        from.saturating_add(seconds)
+    }
+}
+
 impl QuotaWindow {
     pub fn standing(self, length: u64, now: u64) -> Standing {
+        self.standing_by(length, now, &EveryDay)
+    }
+
+    /// Where it stands when its allowance is meant for the seconds `calendar` counts: the
+    /// even pace and the time it runs out in go by those alone.
+    pub fn standing_by(self, length: u64, now: u64, calendar: &impl Calendar) -> Standing {
         let Some(left) = self.resets_at.checked_sub(now).filter(|&left| left > 0) else {
             return Standing {
                 used: 0.0,
@@ -159,13 +187,26 @@ impl QuotaWindow {
                 out_in: None,
             };
         };
+        let start = self.resets_at.saturating_sub(length);
+        if calendar.counted(start, self.resets_at) == 0 {
+            return self.paced(left, length, now, &EveryDay);
+        }
+        self.paced(left, length, now, calendar)
+    }
+
+    fn paced(self, left: u64, length: u64, now: u64, calendar: &impl Calendar) -> Standing {
         let used = self.used.clamp(0.0, 1.0);
-        let elapsed = length.saturating_sub(left);
-        let even = elapsed as f32 / length as f32;
+        let start = self.resets_at.saturating_sub(length);
+        let total = calendar.counted(start, self.resets_at).max(1);
+        let elapsed = calendar.counted(start, now);
+        let even = elapsed as f32 / total as f32;
         // A turn or two in a window's first minutes says nothing yet of its pace.
         let judged = used >= 0.1 || even >= 0.1;
         let out_in = (judged && elapsed > 0 && used > 0.0 && used < 1.0)
-            .then(|| ((1.0 - used) / used * elapsed as f32) as u64)
+            .then(|| {
+                let more = ((1.0 - used) / used * elapsed as f32) as u64;
+                calendar.after(now, more).saturating_sub(now)
+            })
             .filter(|&out_in| out_in < left);
         Standing {
             used,

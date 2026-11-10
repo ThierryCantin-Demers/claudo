@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::pace::Pace;
 use crate::usage::Usage;
 
 /// For each window, by its key, the reset of the last one warned of, so a window warns once.
@@ -30,7 +31,7 @@ impl Warned {
 
     /// The windows that would run out before their reset and have not warned yet: each
     /// label with how long until it runs out at the pace so far.
-    pub fn fresh(&mut self, usage: &Usage, now: u64) -> Vec<(String, u64)> {
+    pub fn fresh(&mut self, usage: &Usage, now: u64, pace: Pace) -> Vec<(String, u64)> {
         // Held until the resets are written back. Without the file, this applet warns alone.
         let file = self.shared.as_deref().and_then(|path| locked(path).ok());
         if let Some(file) = &file {
@@ -40,7 +41,7 @@ impl Warned {
             .meters
             .iter()
             .filter_map(|meter| {
-                let out_in = meter.standing(now).out_in?;
+                let out_in = meter.standing(now, pace).out_in?;
                 let warned = self.resets.get(&meter.key());
                 if warned.is_some_and(|&reset| now < reset) {
                     return None;
@@ -125,17 +126,25 @@ mod tests {
         let now = 1_000_000;
         let reset = now + 4 * HOUR;
         assert_eq!(
-            warned.fresh(&session(0.5, reset), now),
+            warned.fresh(&session(0.5, reset), now, Pace::EveryDay),
             vec![("Session".to_string(), HOUR)]
         );
-        assert!(warned.fresh(&session(0.6, reset + 1), now + 60).is_empty());
+        assert!(
+            warned
+                .fresh(&session(0.6, reset + 1), now + 60, Pace::EveryDay)
+                .is_empty()
+        );
         let next = reset + 5 * HOUR;
         assert!(
-            warned.fresh(&session(0.4, next), reset).is_empty(),
+            warned
+                .fresh(&session(0.4, next), reset, Pace::EveryDay)
+                .is_empty(),
             "just started"
         );
         assert_eq!(
-            warned.fresh(&session(0.9, next), reset + HOUR).len(),
+            warned
+                .fresh(&session(0.9, next), reset + HOUR, Pace::EveryDay)
+                .len(),
             1,
             "the next window warns again"
         );
@@ -148,15 +157,30 @@ mod tests {
         let mut panels = [Warned::sharing(path.clone()), Warned::sharing(path.clone())];
         let now = 1_000_000;
         let reset = now + 4 * HOUR;
-        assert_eq!(panels[0].fresh(&session(0.5, reset), now).len(), 1);
-        assert!(panels[1].fresh(&session(0.5, reset + 1), now).is_empty());
-        let restarted = Warned::sharing(path.clone()).fresh(&session(0.6, reset), now + 60);
+        assert_eq!(
+            panels[0]
+                .fresh(&session(0.5, reset), now, Pace::EveryDay)
+                .len(),
+            1
+        );
+        assert!(
+            panels[1]
+                .fresh(&session(0.5, reset + 1), now, Pace::EveryDay)
+                .is_empty()
+        );
+        let restarted =
+            Warned::sharing(path.clone()).fresh(&session(0.6, reset), now + 60, Pace::EveryDay);
         assert!(restarted.is_empty(), "a restarted applet has warned too");
         let next = reset + 5 * HOUR;
-        assert_eq!(panels[1].fresh(&session(0.9, next), reset + HOUR).len(), 1);
+        assert_eq!(
+            panels[1]
+                .fresh(&session(0.9, next), reset + HOUR, Pace::EveryDay)
+                .len(),
+            1
+        );
         assert!(
             panels[0]
-                .fresh(&session(0.9, next), reset + HOUR)
+                .fresh(&session(0.9, next), reset + HOUR, Pace::EveryDay)
                 .is_empty()
         );
         let _ = std::fs::remove_file(&path);
