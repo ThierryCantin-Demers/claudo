@@ -10,6 +10,8 @@ use claudo_protocol::{
     PROTOCOL_VERSION, Profile, Review, ServerEvent, SessionInfo, Settings, SystemStatus, ToolCall,
 };
 use claudo_transport::{Transport, connect};
+
+mod room;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,6 +108,15 @@ struct ClaudoApp {
     md_cache: CommonMarkCache,
     /// The backend's protocol, when it is not this build's.
     other_build: Option<u32>,
+    page: Page,
+    room: room::Room,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    /// Every agent the daemon's collectors see.
+    Room,
+    Chat,
 }
 
 impl ClaudoApp {
@@ -138,6 +149,13 @@ impl ClaudoApp {
             working: Default::default(),
             md_cache: CommonMarkCache::default(),
             other_build: None,
+            // Only the daemon has collectors to fill the room.
+            page: if cfg!(target_arch = "wasm32") {
+                Page::Room
+            } else {
+                Page::Chat
+            },
+            room: room::Room::default(),
         }
     }
 
@@ -521,8 +539,9 @@ impl ClaudoApp {
 
                 ServerEvent::Quota(_)
                 | ServerEvent::QuotaUnavailable(_)
-                | ServerEvent::Room(_)
                 | ServerEvent::Connection { .. } => {}
+
+                ServerEvent::Room(event) => self.room.apply(event),
 
                 ServerEvent::Answered { request_id, .. } => {
                     self.approvals.retain(|(_, id, ..)| *id != request_id);
@@ -574,6 +593,18 @@ impl eframe::App for ClaudoApp {
                     ),
                 );
             });
+        }
+
+        egui::Panel::top("pages").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.page, Page::Room, "Room");
+                ui.selectable_value(&mut self.page, Page::Chat, "Chat");
+            });
+        });
+        // A machine running only Codex agents never has Claude ready.
+        if self.page == Page::Room {
+            egui::CentralPanel::default().show(ui, |ui| self.room.ui(ui));
+            return;
         }
 
         match &self.status {
