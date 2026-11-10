@@ -264,6 +264,19 @@ impl ClaudoApp {
         }
     }
 
+    /// A message this tab did not send starts or joins a turn.
+    fn joined(&mut self, conversation_id: String, text: String, attachments: Vec<Attachment>) {
+        if self.is_current(&conversation_id) {
+            self.assistant_idx = None;
+            self.streaming = true;
+            if !text.is_empty() {
+                self.items.push(Item::User(text));
+            }
+            self.items.extend(attachments.into_iter().map(Item::File));
+        }
+        self.working.insert(conversation_id);
+    }
+
     fn is_current(&self, conversation_id: &str) -> bool {
         self.current.as_deref() == Some(conversation_id)
     }
@@ -367,19 +380,12 @@ impl ClaudoApp {
                 ServerEvent::Typed {
                     conversation_id,
                     text,
-                }
-                | ServerEvent::Queued {
+                } => self.joined(conversation_id, text, Vec::new()),
+                ServerEvent::Queued {
                     conversation_id,
                     text,
-                    ..
-                } => {
-                    if self.is_current(&conversation_id) {
-                        self.assistant_idx = None;
-                        self.streaming = true;
-                        self.items.push(Item::User(text));
-                    }
-                    self.working.insert(conversation_id);
-                }
+                    attachments,
+                } => self.joined(conversation_id, text, attachments),
 
                 ServerEvent::Working { conversation_id } => {
                     if self.is_current(&conversation_id) {
