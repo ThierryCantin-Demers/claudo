@@ -15,6 +15,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use crate::asks::{Asks, now};
+use crate::presence;
 use crate::warned::Warned;
 
 /// Each ask starts a `claude` process for about three seconds of CPU.
@@ -31,6 +32,8 @@ pub struct Panel {
     quota_at: Option<u64>,
     error: Option<Problem>,
     asking: bool,
+    /// Nobody has used this computer for a while, so the timer asks nothing.
+    away: bool,
     asks: Asks,
     warned: Warned,
 }
@@ -71,6 +74,8 @@ pub enum Message {
     Refresh,
     /// Asks the CLI anyway.
     RefreshNow,
+    /// Whether anyone is at this computer.
+    Present(bool),
     /// Redraws the time left between refreshes.
     Tick,
     Usage(Result<Quota, Problem>),
@@ -101,6 +106,7 @@ impl Application for Panel {
             quota_at: None,
             error: None,
             asking: false,
+            away: false,
             asks: Asks::shared(REFRESH.as_secs()),
             warned: Warned::shared(),
         };
@@ -116,13 +122,22 @@ impl Application for Panel {
         Subscription::batch([
             cosmic::iced::time::every(REFRESH).map(|_| Message::Refresh),
             cosmic::iced::time::every(Duration::from_secs(30)).map(|_| Message::Tick),
+            Subscription::run(presence::watch).map(Message::Present),
         ])
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Refresh if self.away => {}
             Message::Refresh => return self.ask(false),
             Message::RefreshNow => return self.ask(true),
+            Message::Present(present) => {
+                let back = self.away && present;
+                self.away = !present;
+                if back {
+                    return self.ask(false);
+                }
+            }
             Message::Tick => {}
             Message::Usage(answer) => {
                 self.asking = false;

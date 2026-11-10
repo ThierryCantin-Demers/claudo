@@ -15,6 +15,8 @@ fn main() {
 
 #[cfg(feature = "cosmic")]
 mod panel;
+#[cfg(feature = "cosmic")]
+mod presence;
 
 #[cfg(feature = "cosmic")]
 fn main() -> cosmic::iced::Result {
