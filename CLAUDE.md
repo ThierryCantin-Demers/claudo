@@ -479,7 +479,13 @@ wrote it.
   each agent pane's `pane.agent_status_changed`, and subscribes again when the panes
   change. Agent names come only from `session.snapshot`, so every event reads it again,
   and with no replay cursor it is read every 15 seconds anyway. `pane.rename` emits
-  nothing. `examples/room_probe` prints what the collector sees.
+  nothing. `examples/room_probe` prints what the collectors see.
+- **Runs** (`core/src/runs.rs`): a folder per Codex review, exploration or other run under
+  `$CLAUDO_AGENT_RUNS` (default `$XDG_STATE_HOME/agent-runs`), whose `meta.json` names the
+  starting agent's session (`parent.session`), so the run hangs under `session:<id>`, with
+  its Codex sub-agents (`subagents[].path`) under it. Polled, and a `meta.json` is read again
+  only when its time changes. A run shows while it runs and for 30 minutes after; one marked
+  running but untouched for 12 hours died quietly and is dropped.
 
 ## Workflow
 

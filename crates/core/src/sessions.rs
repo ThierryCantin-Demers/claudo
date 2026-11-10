@@ -1205,7 +1205,11 @@ mod tests {
         let path = std::env::temp_dir().join(format!("claudo-resumed-{}.jsonl", Uuid::new_v4()));
         let subagents = path.with_extension("").join("subagents");
         fs::create_dir_all(&subagents).unwrap();
-        fs::write(subagents.join("agent-a1.meta.json"), r#"{"toolUseId":"agent"}"#).unwrap();
+        fs::write(
+            subagents.join("agent-a1.meta.json"),
+            r#"{"toolUseId":"agent"}"#,
+        )
+        .unwrap();
         fs::write(&path, transcript).unwrap();
         let (items, _) = parse_transcript(&path);
         let _ = fs::remove_file(&path);
