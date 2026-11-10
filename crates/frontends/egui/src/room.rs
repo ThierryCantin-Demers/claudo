@@ -2,7 +2,7 @@
 //! daemon's collectors see, one island per repository with what each agent started around it.
 
 use std::collections::BTreeMap;
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::PI;
 use std::time::Duration;
 
 use claudo_protocol::{Node, NodeId, NodeKind, NodeState, Provider, RoomEvent};
@@ -121,17 +121,21 @@ impl Room {
         if moving {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
         }
+        let screen = ui.available_height();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                ui.add_space(12.0);
-                self.summary(ui);
-                ui.add_space(12.0);
+                let top = ui.cursor().top();
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    self.summary(ui);
+                    ui.add_space(24.0);
+                    legend(ui);
+                });
+                ui.add_space(8.0);
                 self.tiles(ui, now);
-                ui.add_space(20.0);
-                legend(ui);
-                ui.add_space(4.0);
-                self.map(ui, now);
+                let left = screen - (ui.cursor().top() - top);
+                self.map(ui, left, now);
             });
     }
 
@@ -147,42 +151,33 @@ impl Room {
             .values()
             .filter(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
             .count();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{agents} agents"))
-                    .size(20.0)
-                    .strong(),
-            );
-            for (state, word) in [
-                (NodeState::Working, "working"),
-                (NodeState::Blocked, "need you"),
-                (NodeState::Failed, "failed"),
-            ] {
-                let n = count(state);
-                if n > 0 {
-                    ui.add_space(10.0);
-                    dot(ui, color(ui.visuals(), Some(state)));
-                    ui.label(RichText::new(format!("{n} {word}")).size(15.0));
-                }
+        ui.label(
+            RichText::new(format!("{agents} agents"))
+                .size(20.0)
+                .strong(),
+        );
+        for (state, word) in [
+            (NodeState::Working, "working"),
+            (NodeState::Blocked, "need you"),
+            (NodeState::Failed, "failed"),
+        ] {
+            let n = count(state);
+            if n > 0 {
+                ui.add_space(10.0);
+                dot(ui, color(ui.visuals(), Some(state)));
+                ui.label(RichText::new(format!("{n} {word}")).size(15.0));
             }
-        });
+        }
+        if self.waiting().next().is_none() {
+            ui.add_space(10.0);
+            dot(ui, color(ui.visuals(), Some(NodeState::Working)));
+            ui.label(RichText::new("nobody is waiting on you").size(15.0));
+        }
     }
 
     fn tiles(&self, ui: &mut egui::Ui, now: f64) {
         let mut waiting = self.waiting().peekable();
         if waiting.peek().is_none() {
-            let calm = color(ui.visuals(), Some(NodeState::Working));
-            egui::Frame::new()
-                .fill(calm.gamma_multiply(0.08))
-                .stroke(Stroke::new(1.0, calm.gamma_multiply(0.4)))
-                .corner_radius(12.0)
-                .inner_margin(14.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        dot(ui, calm);
-                        ui.label(RichText::new("Nobody is waiting on you").size(15.0));
-                    });
-                });
             return;
         }
         ui.horizontal_wrapped(|ui| {
@@ -191,26 +186,24 @@ impl Room {
                 tile(ui, node, self.held(&node.id, now), now);
             }
         });
+        ui.add_space(12.0);
     }
 
-    fn map(&self, ui: &mut egui::Ui, now: f64) {
+    /// `screen` is the height left on screen, which the map fits into while it stays readable.
+    fn map(&self, ui: &mut egui::Ui, screen: f32, now: f64) {
         let width = ui.available_width();
         let clusters = self.clusters();
-        let islands: Vec<Island> = clusters.iter().map(Island::of).collect();
-        let scale = fit(&islands, width);
-        let islands: Vec<Island> = islands
-            .into_iter()
-            .map(|island| island.scaled(scale))
-            .collect();
-        let (centers, height) = pack(&islands, width);
+        let scale = fit(&clusters, width, screen);
+        let map = Map::lay_out(&clusters, width / scale);
         let (response, painter) =
-            ui.allocate_painter(vec2(width, height.max(200.0)), Sense::hover());
+            ui.allocate_painter(vec2(width, map.height * scale), Sense::hover());
         let origin = response.rect.min;
         let ctx = ui.ctx().clone();
-        // Positions glide to where a change in the room moves them; a new width lays the map
-        // out again at once.
-        let glide = |key: &str, at: Pos2| {
-            let id = egui::Id::new(("room-at", key, width as u32));
+        // Positions glide to where a change in the room moves them; a new window size lays
+        // the map out again at once.
+        let glide = |key: &str, at: Vec2| {
+            let id = egui::Id::new(("room-at", key, width as u32, screen as u32));
+            let at = at * scale;
             origin
                 + vec2(
                     ctx.animate_value_with_time(id.with(0), at.x, 0.5),
@@ -220,14 +213,17 @@ impl Room {
         let visuals = ui.visuals().clone();
 
         let mut drawn: Vec<(&Node, Pos2, f32)> = Vec::new();
-        for (island, center) in islands.iter().zip(&centers) {
+        for island in &map.islands {
             let key = island.repo.unwrap_or("");
-            let middle = glide(&format!("island:{key}"), *center);
-            shore(&painter, &visuals, island, middle, scale);
+            let corner = glide(&format!("island:{key}"), island.top.to_vec2());
+            shore(&painter, &visuals, island, corner, scale);
             let at: BTreeMap<&str, Pos2> = island
                 .placed
                 .iter()
-                .map(|p| (p.node.id.as_str(), glide(&p.node.id, *center + p.at)))
+                .map(|p| {
+                    let here = glide(&p.node.id, island.top.to_vec2() + p.at);
+                    (p.node.id.as_str(), here)
+                })
                 .collect();
             for placed in &island.placed {
                 let Some(parent) = placed.parent.and_then(|parent| at.get(parent)) else {
@@ -274,20 +270,29 @@ impl Room {
 }
 
 const AGENT: f32 = 17.0;
-const CHILD: f32 = 7.0;
-const CHILD_DISTANCE: f32 = 54.0;
+const CHILD: f32 = 6.0;
 /// How far an agent's caption reaches to either side.
-const CAPTION_REACH: f32 = 92.0;
-/// The space between neighbours on an island's ring, so their captions never meet.
-const ROOT_GAP: f32 = 2.0 * CAPTION_REACH + 16.0;
-/// Room at the top of an island for its name.
-const SHORE: f32 = 34.0;
-const ISLAND_GAP: f32 = 24.0;
+const CAPTION_REACH: f32 = 88.0;
+/// Under an agent: its name on up to two rows and what it is doing.
+const CAPTION: f32 = 56.0;
+const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
+/// Above an agent that started nothing.
+const HEADROOM: f32 = 10.0;
+/// What an agent started sits on arcs above it, this many to an arc.
+const FAN: usize = 7;
+const FAN_NEAR: f32 = 34.0;
+const FAN_STEP: f32 = 18.0;
+/// An island's name above its agents, and the margin around them.
+const TITLE: f32 = 28.0;
+const PAD: f32 = 10.0;
+const ISLAND_GAP: f32 = 16.0;
+/// The smallest the map is drawn to fit the screen; below it names are too small to read.
+const MIN_SCALE: f32 = 0.7;
 
 #[derive(Debug)]
 struct Placed<'a> {
     node: &'a Node,
-    /// From the island's middle.
+    /// From the island's top left corner.
     at: Vec2,
     parent: Option<&'a str>,
     depth: usize,
@@ -296,66 +301,70 @@ struct Placed<'a> {
 #[derive(Debug)]
 struct Island<'a> {
     repo: Option<&'a str>,
-    radius: f32,
+    top: Pos2,
+    size: Vec2,
     placed: Vec<Placed<'a>>,
 }
 
-impl<'a> Island<'a> {
-    /// The agents on a ring, each fanning what it started outward, away from the middle.
-    fn of(cluster: &Cluster<'a>) -> Self {
-        let n = cluster.trees.len();
-        let ring = if n <= 1 {
-            0.0
-        } else {
-            ROOT_GAP / (2.0 * (PI / n as f32).sin())
-        };
-        let mut placed = Vec::new();
-        for (i, tree) in cluster.trees.iter().enumerate() {
-            let angle = -PI / 2.0 + i as f32 * TAU / n as f32;
-            let outward = (n > 1).then_some(angle);
-            place(
-                tree,
-                Vec2::angled(angle) * ring,
-                outward,
-                None,
-                0,
-                &mut placed,
-            );
-        }
-        let reach = placed
+struct Map<'a> {
+    islands: Vec<Island<'a>>,
+    height: f32,
+}
+
+impl<'a> Map<'a> {
+    fn lay_out(clusters: &[Cluster<'a>], width: f32) -> Self {
+        let mut islands: Vec<Island> = clusters
             .iter()
-            .map(|p| {
-                p.at.length()
-                    + if p.depth == 0 {
-                        CAPTION_REACH
-                    } else {
-                        CHILD * 2.0
-                    }
-            })
-            .fold(CAPTION_REACH, f32::max);
-        Island {
-            repo: cluster.repo,
-            radius: reach + SHORE,
-            placed,
-        }
+            .map(|cluster| Island::of(cluster, width))
+            .collect();
+        let height = pack(&mut islands, width);
+        Map { islands, height }
     }
 }
 
-impl Island<'_> {
-    fn scaled(mut self, scale: f32) -> Self {
-        self.radius *= scale;
-        for placed in &mut self.placed {
-            placed.at *= scale;
+impl<'a> Island<'a> {
+    /// The agents in a grid, as square as fits `width`, each with what it started above it.
+    fn of(cluster: &Cluster<'a>, width: f32) -> Self {
+        let n = cluster.trees.len().max(1);
+        let most = (((width - 2.0 * PAD - ISLAND_GAP) / CELL_WIDTH).floor() as usize).max(1);
+        let cols = n.min((n as f32).sqrt().ceil().max(3.0) as usize).min(most);
+        let rows = n.div_ceil(cols);
+        let fan = cluster
+            .trees
+            .iter()
+            .map(|tree| tree.children.len())
+            .max()
+            .unwrap_or(0);
+        let above = match fan {
+            0 => HEADROOM,
+            _ => FAN_NEAR + (fan.div_ceil(FAN) - 1) as f32 * FAN_STEP + CHILD * 2.0,
+        };
+        let cell = above + AGENT * 2.0 + CAPTION;
+        let mut placed = Vec::new();
+        for (i, tree) in cluster.trees.iter().enumerate() {
+            let at = vec2(
+                PAD + (i % cols) as f32 * CELL_WIDTH + CELL_WIDTH / 2.0,
+                TITLE + (i / cols) as f32 * cell + above + AGENT,
+            );
+            place(tree, at, None, None, 0, &mut placed);
         }
-        self
+        Island {
+            repo: cluster.repo,
+            top: Pos2::ZERO,
+            size: vec2(
+                2.0 * PAD + cols as f32 * CELL_WIDTH,
+                TITLE + rows as f32 * cell + PAD,
+            ),
+            placed,
+        }
     }
 }
 
 fn place<'a>(
     tree: &Tree<'a>,
     at: Vec2,
-    outward: Option<f32>,
     parent: Option<&'a str>,
+    outward: Option<f32>,
     depth: usize,
     placed: &mut Vec<Placed<'a>>,
 ) {
@@ -366,58 +375,62 @@ fn place<'a>(
         depth,
     });
     let k = tree.children.len();
-    if k == 0 {
-        return;
-    }
-    // A lone agent sits in the middle with its caption under it, so its fan opens upward.
-    let middle = outward.unwrap_or(-PI / 2.0);
-    let widest = if outward.is_none() {
-        1.6 * PI
-    } else {
-        0.9 * PI
-    };
-    let span = ((k - 1) as f32 * 0.5).min(widest);
     for (j, child) in tree.children.iter().enumerate() {
-        let angle = if k == 1 {
-            middle
-        } else {
-            middle - span / 2.0 + span * j as f32 / (k - 1) as f32
-        };
-        // Below an agent is its caption, so what points down goes past it.
-        let distance = if depth == 0 {
-            CHILD_DISTANCE + 34.0 * angle.sin().max(0.0)
-        } else {
-            CHILD_DISTANCE * 0.7
+        let (angle, distance) = match outward {
+            // An agent's caption is under it, so what it started fans out above.
+            None => {
+                let arc = j / FAN;
+                let on_arc = (k - arc * FAN).min(FAN);
+                let margin = 0.3;
+                let angle = if on_arc == 1 {
+                    -PI / 2.0
+                } else {
+                    -PI + margin + (PI - 2.0 * margin) * (j % FAN) as f32 / (on_arc - 1) as f32
+                };
+                (angle, FAN_NEAR + arc as f32 * FAN_STEP)
+            }
+            Some(angle) => (angle + (j as f32 - (k - 1) as f32 / 2.0) * 0.6, CHILD * 2.6),
         };
         let here = at + Vec2::angled(angle) * distance;
         place(
             child,
             here,
-            Some(angle),
             Some(&tree.node.id),
+            Some(angle),
             depth + 1,
             placed,
         );
     }
 }
 
-/// How much to shrink the map so its widest island fits across `width`: wrapping only moves
-/// whole islands, and the page does not scroll sideways.
-fn fit(islands: &[Island], width: f32) -> f32 {
-    let widest = islands
-        .iter()
-        .map(|island| island.radius * 2.0)
-        .fold(0.0, f32::max);
-    let room = (width - ISLAND_GAP).max(1.0);
-    if widest > room { room / widest } else { 1.0 }
+/// The largest scale, down to `MIN_SCALE`, at which the map laid out across the width it
+/// would then have fits `screen` in height.
+fn fit(clusters: &[Cluster], width: f32, screen: f32) -> f32 {
+    let height = |scale: f32| Map::lay_out(clusters, width / scale).height * scale;
+    if height(1.0) <= screen {
+        return 1.0;
+    }
+    if height(MIN_SCALE) > screen {
+        return MIN_SCALE;
+    }
+    let (mut low, mut high) = (MIN_SCALE, 1.0);
+    for _ in 0..12 {
+        let middle = (low + high) / 2.0;
+        if height(middle) <= screen {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    low
 }
 
-/// Islands in rows across `width`, each row centred: their middles, and the height it takes.
-fn pack(islands: &[Island], width: f32) -> (Vec<Pos2>, f32) {
+/// Places islands in rows across `width`, each row centred, and says the height it takes.
+fn pack(islands: &mut [Island], width: f32) -> f32 {
     let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
     let mut used = 0.0;
     for (i, island) in islands.iter().enumerate() {
-        let size = island.radius * 2.0 + ISLAND_GAP;
+        let size = island.size.x + ISLAND_GAP;
         let row = rows.last_mut().expect("rows starts with one");
         if !row.is_empty() && used + size > width {
             rows.push(vec![i]);
@@ -427,47 +440,46 @@ fn pack(islands: &[Island], width: f32) -> (Vec<Pos2>, f32) {
             used += size;
         }
     }
-    let mut centers = vec![Pos2::ZERO; islands.len()];
     let mut top = ISLAND_GAP / 2.0;
     for row in rows.iter().filter(|row| !row.is_empty()) {
-        let size = |i: usize| islands[i].radius * 2.0 + ISLAND_GAP;
-        let tall = row.iter().map(|&i| size(i)).fold(0.0, f32::max);
-        let mut left = ((width - row.iter().map(|&i| size(i)).sum::<f32>()) / 2.0).max(0.0);
+        let wide: f32 = row.iter().map(|&i| islands[i].size.x + ISLAND_GAP).sum();
+        let tall = row.iter().map(|&i| islands[i].size.y).fold(0.0, f32::max);
+        let mut left = ((width - wide) / 2.0).max(0.0) + ISLAND_GAP / 2.0;
         for &i in row {
-            centers[i] = pos2(left + size(i) / 2.0, top + tall / 2.0);
-            left += size(i);
+            islands[i].top = pos2(left, top);
+            left += islands[i].size.x + ISLAND_GAP;
         }
-        top += tall;
+        top += tall + ISLAND_GAP;
     }
-    (centers, top + ISLAND_GAP / 2.0)
+    top - ISLAND_GAP / 2.0
 }
 
 fn shore(
     painter: &egui::Painter,
     visuals: &egui::Visuals,
     island: &Island,
-    middle: Pos2,
+    corner: Pos2,
     scale: f32,
 ) {
+    let rect = egui::Rect::from_min_size(corner, island.size * scale);
+    let round = 16.0 * scale;
     let sea = hue(island.repo.unwrap_or(""), visuals.dark_mode);
-    for (grow, alpha) in [(16.0, 0.05), (8.0, 0.08)] {
-        painter.circle_filled(
-            middle,
-            island.radius + grow * scale,
-            sea.gamma_multiply(alpha),
-        );
+    for (grow, alpha) in [(8.0, 0.05), (4.0, 0.08)] {
+        let grow = grow * scale;
+        painter.rect_filled(rect.expand(grow), round + grow, sea.gamma_multiply(alpha));
     }
-    painter.circle_filled(middle, island.radius, visuals.extreme_bg_color);
-    painter.circle_filled(middle, island.radius, sea.gamma_multiply(0.12));
-    painter.circle_stroke(
-        middle,
-        island.radius,
+    painter.rect_filled(rect, round, visuals.extreme_bg_color);
+    painter.rect_filled(rect, round, sea.gamma_multiply(0.12));
+    painter.rect_stroke(
+        rect,
+        round,
         Stroke::new(1.5, sea.gamma_multiply(0.6)),
+        egui::StrokeKind::Inside,
     );
     let name = island.repo.map_or("elsewhere", short);
     painter.text(
-        middle - vec2(0.0, island.radius - 12.0 * scale),
-        Align2::CENTER_TOP,
+        corner + vec2(PAD + 4.0, 8.0) * scale,
+        Align2::LEFT_TOP,
         name,
         FontId::proportional(14.0 * scale),
         visuals.strong_text_color(),
@@ -654,21 +666,19 @@ fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
 }
 
 fn legend(ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        for shown in [
-            NodeState::Working,
-            NodeState::Blocked,
-            NodeState::Idle,
-            NodeState::Done,
-            NodeState::Failed,
-        ] {
-            dot(ui, color(ui.visuals(), Some(shown)));
-            ui.weak(state(Some(shown)));
-            ui.add_space(6.0);
-        }
-        ui.add_space(10.0);
-        ui.weak("round: Claude, square: Codex, small: what an agent started");
-    });
+    for shown in [
+        NodeState::Working,
+        NodeState::Blocked,
+        NodeState::Idle,
+        NodeState::Done,
+        NodeState::Failed,
+    ] {
+        dot(ui, color(ui.visuals(), Some(shown)));
+        ui.weak(state(Some(shown)));
+        ui.add_space(6.0);
+    }
+    ui.add_space(10.0);
+    ui.weak("round: Claude, square: Codex, small: what an agent started");
 }
 
 fn dot(ui: &mut egui::Ui, tint: Color32) {
@@ -811,12 +821,12 @@ mod tests {
     }
 
     #[test]
-    fn islands_hold_their_nodes_and_rows_fit_the_width() {
+    fn islands_hold_their_nodes_and_never_overlap() {
         let mut room = Room::default();
         let mut nodes = vec![node("lone", Some("/src/beta"), None)];
         for i in 0..5 {
             nodes.push(node(&format!("agent-{i}"), Some("/src/alpha"), None));
-            for j in 0..4 {
+            for j in 0..9 {
                 let parent = format!("agent-{i}");
                 nodes.push(node(
                     &format!("sub-{i}-{j}"),
@@ -826,46 +836,41 @@ mod tests {
             }
         }
         room.apply(RoomEvent::Snapshot(nodes));
-        let islands: Vec<Island> = room.clusters().iter().map(Island::of).collect();
-        for island in &islands {
+        let width = 900.0;
+        let map = Map::lay_out(&room.clusters(), width);
+        for island in &map.islands {
+            let rect = egui::Rect::from_min_size(Pos2::ZERO, island.size);
             for placed in &island.placed {
-                assert!(placed.at.length() + CHILD <= island.radius, "{placed:?}");
+                let reach = if placed.depth == 0 { AGENT } else { CHILD };
+                let node =
+                    egui::Rect::from_center_size(placed.at.to_pos2(), Vec2::splat(2.0 * reach));
+                assert!(rect.contains_rect(node), "{placed:?} outside {rect:?}");
             }
+            assert!(island.top.x >= 0.0 && island.top.x + island.size.x <= width);
         }
-        assert_eq!(
-            islands[1].placed[0].at,
-            Vec2::ZERO,
-            "a lone agent sits in the middle"
-        );
-        let width = islands[0].radius * 2.0 + ISLAND_GAP + 10.0;
-        let (centers, height) = pack(&islands, width);
-        assert!(
-            centers[1].y > centers[0].y,
-            "the second island wraps to a row of its own"
-        );
-        assert!(
-            height
-                >= islands
-                    .iter()
-                    .map(|island| island.radius * 2.0)
-                    .sum::<f32>()
-        );
+        let [alpha, beta] = &map.islands[..] else {
+            panic!("two islands");
+        };
+        let alpha = egui::Rect::from_min_size(alpha.top, alpha.size);
+        let beta = egui::Rect::from_min_size(beta.top, beta.size);
+        assert!(!alpha.intersects(beta));
+        assert!(map.height >= alpha.bottom().max(beta.bottom()));
     }
 
     #[test]
-    fn an_island_wider_than_the_page_shrinks_the_map_to_fit() {
+    fn the_map_shrinks_to_fit_the_screen_while_it_stays_readable() {
         let mut room = Room::default();
-        let nodes = (0..12)
-            .map(|i| node(&format!("agent-{i}"), Some("/src/alpha"), None))
+        let nodes = (0..20)
+            .map(|i| node(&format!("agent-{i}"), Some(&format!("/src/repo-{i}")), None))
             .collect();
         room.apply(RoomEvent::Snapshot(nodes));
-        let width = 700.0;
-        let islands: Vec<Island> = room.clusters().iter().map(Island::of).collect();
-        let scale = fit(&islands, width);
-        assert!(scale < 1.0);
-        let islands: Vec<Island> = islands.into_iter().map(|i| i.scaled(scale)).collect();
-        let (centers, _) = pack(&islands, width);
-        assert!(centers[0].x - islands[0].radius >= 0.0);
-        assert!(centers[0].x + islands[0].radius <= width);
+        let clusters = room.clusters();
+        let width = 1400.0;
+        let tall = Map::lay_out(&clusters, width).height;
+        assert_eq!(fit(&clusters, width, tall + 1.0), 1.0);
+        let scale = fit(&clusters, width, tall * 0.8);
+        assert!((MIN_SCALE..1.0).contains(&scale));
+        assert!(Map::lay_out(&clusters, width / scale).height * scale <= tall * 0.8);
+        assert_eq!(fit(&clusters, width, 10.0), MIN_SCALE);
     }
 }
