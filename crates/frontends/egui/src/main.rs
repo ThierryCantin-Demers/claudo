@@ -97,8 +97,12 @@ struct ClaudoApp {
     /// instead of sudden jumps.
     reveal: f32,
     error: Option<String>,
-    /// Calls waiting for the user's answer: request id, call, and what allowing always covers.
-    approvals: Vec<(String, ToolCall, String)>,
+    /// Calls waiting for the user's answer, in any conversation: the conversation, request
+    /// id, call, and what allowing always covers. A tab that just joined hears of them
+    /// before it opens their conversation.
+    approvals: Vec<(String, String, ToolCall, String)>,
+    /// Conversations whose turn runs, for the same reason.
+    working: std::collections::HashSet<String>,
     md_cache: CommonMarkCache,
 }
 
@@ -129,6 +133,7 @@ impl ClaudoApp {
             reveal: 0.0,
             error: None,
             approvals: Vec::new(),
+            working: Default::default(),
             md_cache: CommonMarkCache::default(),
         }
     }
@@ -178,6 +183,7 @@ impl ClaudoApp {
             return;
         }
         self.current = Some(id.clone());
+        self.streaming = self.working.contains(&id);
         self.sync_overrides();
         self.items.clear();
         self.assistant_idx = None;
@@ -224,6 +230,7 @@ impl ClaudoApp {
             .extend(attachments.iter().cloned().map(Item::File));
         self.assistant_idx = None;
         self.streaming = true;
+        self.working.insert(current.clone());
         let (model, effort, profile) = self.effective();
         self.transport.send(Command::SendMessage {
             conversation_id: current,
@@ -353,6 +360,7 @@ impl ClaudoApp {
                         self.streaming = true;
                         self.items.push(Item::Incoming { from, text });
                     }
+                    self.working.insert(conversation_id);
                 }
 
                 // Typed in another app, or sent from another tab: the turn shows here too.
@@ -370,12 +378,14 @@ impl ClaudoApp {
                         self.streaming = true;
                         self.items.push(Item::User(text));
                     }
+                    self.working.insert(conversation_id);
                 }
 
                 ServerEvent::Working { conversation_id } => {
                     if self.is_current(&conversation_id) {
                         self.streaming = true;
                     }
+                    self.working.insert(conversation_id);
                 }
 
                 ServerEvent::Notice {
@@ -473,9 +483,8 @@ impl ClaudoApp {
                     call,
                     scope,
                 } => {
-                    if self.is_current(&conversation_id) {
-                        self.approvals.push((request_id, call, scope));
-                    }
+                    self.approvals
+                        .push((conversation_id, request_id, call, scope));
                 }
 
                 ServerEvent::Completed {
@@ -484,8 +493,10 @@ impl ClaudoApp {
                     time,
                     ..
                 } => {
+                    self.approvals
+                        .retain(|(conversation, ..)| *conversation != conversation_id);
+                    self.working.remove(&conversation_id);
                     if self.is_current(&conversation_id) {
-                        self.approvals.clear();
                         self.streaming = false;
                         self.assistant_idx = None;
                         self.items.extend(time.map(Item::Ended));
@@ -502,18 +513,23 @@ impl ClaudoApp {
                 | ServerEvent::Connection { .. } => {}
 
                 ServerEvent::Answered { request_id, .. } => {
-                    self.approvals.retain(|(id, ..)| *id != request_id);
+                    self.approvals.retain(|(_, id, ..)| *id != request_id);
                 }
 
                 ServerEvent::Error {
                     conversation_id,
                     detail,
                 } => {
-                    if conversation_id.is_some() && conversation_id != self.current {
+                    let ended = conversation_id.or_else(|| self.current.clone());
+                    if let Some(ended) = &ended {
+                        self.approvals
+                            .retain(|(conversation, ..)| conversation != ended);
+                        self.working.remove(ended);
+                    }
+                    if ended != self.current {
                         continue;
                     }
                     self.error = Some(detail);
-                    self.approvals.clear();
                     self.streaming = false;
                 }
             }
@@ -929,7 +945,11 @@ impl ClaudoApp {
                 let streaming = self.streaming;
 
                 let mut answer = None;
-                for (request_id, call, scope) in &self.approvals {
+                let shown = self
+                    .approvals
+                    .iter()
+                    .filter(|(conversation, ..)| self.current.as_ref() == Some(conversation));
+                for (_, request_id, call, scope) in shown {
                     ui.horizontal(|ui| {
                         ui.strong("Claude wants to run:");
                         ui.monospace(&call.summary);
@@ -953,7 +973,7 @@ impl ClaudoApp {
                 if let (Some((request_id, decision)), Some(conversation_id)) =
                     (answer, self.current.clone())
                 {
-                    self.approvals.retain(|(id, ..)| *id != request_id);
+                    self.approvals.retain(|(_, id, ..)| *id != request_id);
                     self.transport.send(Command::AnswerApproval {
                         conversation_id,
                         request_id,
