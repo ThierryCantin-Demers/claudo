@@ -99,7 +99,7 @@ fn jobs(machines: &[DibsMachine]) -> Vec<Node> {
             };
             nodes.push(job(
                 name,
-                &holder.agent,
+                parent(&holder.agent, holder.subagent.as_deref()),
                 holder.pid,
                 holder.label.as_str(),
                 false,
@@ -110,7 +110,7 @@ fn jobs(machines: &[DibsMachine]) -> Vec<Node> {
         for waiter in &status.queue {
             nodes.push(job(
                 name,
-                &waiter.agent,
+                parent(&waiter.agent, waiter.subagent.as_deref()),
                 waiter.pid,
                 waiter.label.as_str(),
                 true,
@@ -122,9 +122,18 @@ fn jobs(machines: &[DibsMachine]) -> Vec<Node> {
     nodes
 }
 
+/// Under the subagent that started it, which the room falls back from to its agent once
+/// that subagent leaves.
+fn parent(agent: &str, subagent: Option<&str>) -> String {
+    match subagent.filter(|subagent| !subagent.is_empty()) {
+        Some(subagent) => format!("subagent:{subagent}|name:{agent}"),
+        None => format!("name:{agent}"),
+    }
+}
+
 fn job(
     machine: &str,
-    agent: &str,
+    parent: String,
     pid: u32,
     label: &str,
     queued: bool,
@@ -133,7 +142,7 @@ fn job(
 ) -> Node {
     Node {
         id: format!("dibs:{machine}:{pid}"),
-        parent: Some(format!("name:{agent}")),
+        parent: Some(parent),
         kind: Some(NodeKind::Run("dibs".to_string())),
         name: Some(match label {
             "" => "job".to_string(),
@@ -177,7 +186,7 @@ mod tests {
 
     #[test]
     fn each_machine_says_its_status_or_why_it_could_not() {
-        let waiter = r#"{"position":1,"mode":"bench","pid":42,"label":"widgets-bench","agent":"tuner","cmd":"cargo bench","arrived":0,"waiting":30}"#;
+        let waiter = r#"{"position":1,"mode":"bench","pid":42,"label":"widgets-bench","agent":"tuner","subagent":"a7","cmd":"cargo bench","arrived":0,"waiting":30}"#;
         let text = format!(
             "dibs changed since this session last ran it: 1111111 -> 2222222\nabc1234 A fix\nhost-a\n  {}\n\nhost-b\n  ssh: Could not resolve hostname host-b\n  dibs: cannot reach it\nhost-c\n  {}\n",
             status(
@@ -219,7 +228,7 @@ mod tests {
                 ),
                 (
                     "dibs:host-a:42",
-                    "name:tuner",
+                    "subagent:a7|name:tuner",
                     "widgets-bench",
                     "queued on host-a for 30s",
                     NodeState::Idle

@@ -534,7 +534,8 @@ wrote it.
   shows this one's agents, since dibs says the same from both. Each job hangs under the
   agent its holder or waiter names. dibs knows agents by herdr name, so a job's parent is
   `name:<agent>`, which the room resolves to the agent of that name, dropping jobs of
-  agents it does not show (other people's).
+  agents it does not show (other people's). A job a Claude subagent started carries its `subagent`, so
+  its parent is `subagent:<id>|name:<agent>`.
 - **Transcripts** (`core/src/transcripts.rs`): a note collector giving each `session:<id>`
   its `context`, the last main request's tokens (`cli::request_context`), and `answered`,
   when the person last wrote to it (`cli::from_person`: `origin.kind` `human` on a user
