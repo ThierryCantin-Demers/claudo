@@ -135,9 +135,10 @@ fn merged(sources: &[&Source], passed_on: bool) -> BTreeMap<NodeId, Node> {
     }
     // A collector that knows more than one place for a node gives them as `a|b`, the most
     // precise first, such as the subagent that started a run and then its agent: it goes
-    // under the first the room shows, or the last when it shows none.
+    // under the first the room shows, or the last when it shows none. Passed on, the room
+    // that shows it chooses.
     let shown: HashSet<NodeId> = nodes.keys().cloned().collect();
-    for node in nodes.values_mut() {
+    for node in nodes.values_mut().filter(|_| !passed_on) {
         let Some(parent) = node.parent.as_deref().filter(|parent| parent.contains('|')) else {
             continue;
         };
@@ -466,6 +467,27 @@ mod tests {
         assert_eq!(
             shown["run:subagent-left"].parent.as_deref(),
             Some("session:s1")
+        );
+    }
+
+    #[test]
+    fn another_computer_hears_every_place_a_node_names() {
+        let jobs = Source {
+            name: "dibs",
+            from: Gives::Nodes,
+            nodes: vec![
+                node("name:builder"),
+                Node {
+                    parent: Some("subagent:a1|name:builder".into()),
+                    ..node("dibs:host-a:1")
+                },
+            ],
+        };
+        let passed = merged(&[&jobs], true);
+        assert_eq!(
+            passed["dibs:host-a:1"].parent.as_deref(),
+            Some("subagent:a1|name:builder"),
+            "the room there may show the subagent this one does not"
         );
     }
 

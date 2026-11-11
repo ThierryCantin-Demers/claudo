@@ -2088,9 +2088,11 @@ fn xml_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     Some(&text[start..end])
 }
 
-/// Whether a tool result is the one a call moved to the background gets.
+/// Whether a tool result is the one a call moved to the background gets: started there, or
+/// moved there by the CLI after running a while.
 pub(crate) fn backgrounded(result: &str) -> bool {
     result.starts_with("Command running in background with ID:")
+        || result.starts_with("Command was moved to the background (ID:")
 }
 
 const TASK_OUTPUT_BYTES: u64 = 64 * 1024;

@@ -96,7 +96,9 @@ impl Waiting {
         };
         self.offset += end as u64 + 1;
         for line in String::from_utf8_lossy(&bytes[..end]).lines() {
-            if line.contains("Command running in background") {
+            if line.contains("Command running in background")
+                || line.contains("Command was moved to the background")
+            {
                 let Ok(line) = serde_json::from_str(line) else {
                     continue;
                 };
@@ -816,6 +818,8 @@ mod tests {
             result("c-again", "It answered.", "2020-01-01T00:00:00Z"),
             call("c-batch"),
             result("c-batch", "It started the batch.", later),
+            call("c-moved"),
+            result("c-moved", "It went on while its long command ran.", later),
             call("c-told"),
             result(
                 "c-told",
@@ -833,6 +837,7 @@ mod tests {
             ("again", "c-again"),
             ("batch", "c-batch"),
             ("told", "c-told"),
+            ("moved", "c-moved"),
         ] {
             let own = match agent {
                 "batch" => format!(
@@ -852,6 +857,14 @@ mod tests {
                     ),
                     serde_json::json!({"type": "user", "timestamp": later, "message": {"content":
                         "[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>\n<task-id>b-told</task-id>\n<tool-use-id>b-told</tool-use-id>\n<status>completed</status>\n</task-notification>"}}),
+                ),
+                "moved" => format!(
+                    "{}\n",
+                    result(
+                        "b-moved",
+                        "Command was moved to the background (ID: b-moved) after running for 180s.",
+                        later
+                    )
                 ),
                 _ => "{}\n".to_string(),
             };
@@ -880,6 +893,7 @@ mod tests {
                 ("subagent:again", "Look again"),
                 ("subagent:back", "Look back"),
                 ("subagent:batch", "Look batch"),
+                ("subagent:moved", "Look moved"),
             ],
             "front answered and quiet was notified; again moved on after it answered, and \
              batch waits on a command it left running"
