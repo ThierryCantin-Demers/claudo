@@ -502,7 +502,10 @@ wrote it.
   its Codex sub-agents (`subagents[].path`) under it. Polled, and a `meta.json` is read again
   only when its time changes. A run shows while it runs or waits on its agent, and a failed
   one for 30 minutes; one that ended well leaves at once, since under its agent it reads as
-  still going. `codex-review` holds an flock on the run's `.lock` while it runs, so one
+  still going, except a review with a `digest.md`, which stays 12 hours as the node's
+  `digest` and which the page leaves off the map and shows in its agent's details. A
+  review's `doing` says when a deep round ran quick and where the Codex week stands
+  (`round_depth`, `budget`). `codex-review` holds an flock on the run's `.lock` while it runs, so one
   marked running whose lock `/proc/locks` does not list was killed and is dropped; a run
   that keeps no lock is dropped once untouched for 12 hours.
 - **Board** (`core/src/board.rs`): `$BOARD_DIR/sessions/<session>.jsonl`, one note per line,

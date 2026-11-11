@@ -221,6 +221,7 @@ fn nodes(snapshot: &Value, machine: &str, repos: &mut Repos) -> Vec<Node> {
                 answered: None,
                 provider: None,
                 prs: Vec::new(),
+                digest: None,
             })
         })
         .collect()

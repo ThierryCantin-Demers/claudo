@@ -22,6 +22,9 @@ const LINGER: Duration = Duration::from_secs(30 * 60);
 /// without saying so.
 const STALE: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// How long a finished review stays for its digest to be read.
+const KEPT: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// Reads the runs in `$CLAUDO_AGENT_RUNS`, or else `agent-runs` in the XDG state directory,
 /// into `feed` for as long as the process runs.
 pub fn spawn(feed: Feed) {
@@ -47,10 +50,12 @@ fn root() -> Option<PathBuf> {
     Some(state.join("agent-runs"))
 }
 
-/// Each run's `meta.json` as last read, with when it was written.
+/// Each run's `meta.json` as last read, with when it was written, and the same for each
+/// finished review's `digest.md`.
 #[derive(Default)]
 struct Runs {
     read: HashMap<PathBuf, (SystemTime, Option<Value>)>,
+    digests: HashMap<PathBuf, (SystemTime, String)>,
 }
 
 impl Runs {
@@ -60,6 +65,7 @@ impl Runs {
             return Vec::new();
         };
         let mut read = HashMap::new();
+        let mut digests = HashMap::new();
         let mut nodes = Vec::new();
         let locked = locked_inodes();
         for folder in folders.flatten() {
@@ -76,6 +82,10 @@ impl Runs {
             };
             let quiet = now.duration_since(written).unwrap_or_default();
             if let Some(meta) = &meta {
+                let digest = match status(meta) {
+                    "done" => self.digest(&folder.path().join("digest.md"), &mut digests),
+                    _ => None,
+                };
                 let shown = match status(meta) {
                     "running" => match held(&folder.path(), &locked) {
                         Some(held) => held,
@@ -83,17 +93,36 @@ impl Runs {
                     },
                     "waiting-parent" => quiet < STALE,
                     "failed" => quiet < LINGER,
+                    "done" => digest.is_some() && quiet < KEPT,
                     _ => false,
                 };
                 if shown {
                     let name = folder.file_name();
-                    nodes.extend(run(&name.to_string_lossy(), meta));
+                    nodes.extend(run(&name.to_string_lossy(), meta, digest));
                 }
             }
             read.insert(path, (written, meta));
         }
         self.read = read;
+        self.digests = digests;
         nodes
+    }
+
+    /// The digest at `path`, read again only once it changed, kept in `digests`.
+    fn digest(
+        &mut self,
+        path: &Path,
+        digests: &mut HashMap<PathBuf, (SystemTime, String)>,
+    ) -> Option<String> {
+        let written = std::fs::metadata(path)
+            .and_then(|file| file.modified())
+            .ok()?;
+        let text = match self.digests.remove(path) {
+            Some((at, text)) if at == written => text,
+            _ => std::fs::read_to_string(path).ok()?,
+        };
+        digests.insert(path.to_path_buf(), (written, text.clone()));
+        Some(text)
     }
 }
 
@@ -127,7 +156,7 @@ fn status(meta: &Value) -> &str {
 }
 
 /// The run, then each Codex sub-agent it fanned out to under it.
-fn run(folder: &str, meta: &Value) -> Vec<Node> {
+fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
     let text = |pointer: &str| {
         meta.pointer(pointer)
             .and_then(Value::as_str)
@@ -149,6 +178,10 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
         (Some(round), Some(most)) => Some(format!("round {round} of {most}")),
         _ => None,
     };
+    let rounds = [rounds, pace(meta)]
+        .into_iter()
+        .flatten()
+        .reduce(|rounds, pace| format!("{rounds}, {pace}"));
     let doing = match status {
         "waiting-parent" => Some(match &rounds {
             Some(rounds) => format!("{rounds}, waiting on its agent"),
@@ -181,6 +214,7 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
         answered: None,
         provider: provider.clone(),
         prs: Vec::new(),
+        digest,
     }];
     let subagents = meta.get("subagents").and_then(Value::as_array);
     for (i, subagent) in subagents.into_iter().flatten().enumerate() {
@@ -203,15 +237,32 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
             answered: None,
             provider: provider.clone(),
             prs: Vec::new(),
+            digest: None,
         });
     }
     nodes
+}
+
+/// How a review stands against the Codex week: a deep round run quick because the week was
+/// past its pace, and the share of the week used against the share allowed so far.
+fn pace(meta: &Value) -> Option<String> {
+    let percent = |pointer: &str| meta.pointer(pointer).and_then(Value::as_f64);
+    let budget = percent("/budget/used")
+        .zip(percent("/budget/allowed"))
+        .map(|(used, allowed)| format!("Codex week at {used:.0}% of {allowed:.0}%"));
+    let quick = meta.get("round_depth").and_then(Value::as_str) == Some("quick");
+    match (quick, budget) {
+        (true, Some(budget)) => Some(format!("ran quick, {budget}")),
+        (true, None) => Some("ran quick, past the Codex week's pace".to_string()),
+        (false, budget) => budget,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn folder(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("claudo-runs-{}-{name}", std::process::id()));
@@ -296,6 +347,51 @@ mod tests {
         assert!(
             runs.scan(&root, later + STALE).is_empty(),
             "a run that died quietly"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_finished_review_stays_while_it_has_a_digest() {
+        let root = folder("digest");
+        write(&root, "read", review("done"));
+        write(&root, "unread", review("done"));
+        std::fs::write(root.join("read/digest.md"), "# Review of alpha, main\n").unwrap();
+        let mut runs = Runs::default();
+        let nodes = runs.scan(&root, SystemTime::now());
+        let ids: Vec<_> = nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["run:read", "run:read/0", "run:read/1"]);
+        assert_eq!(nodes[0].state, Some(NodeState::Done));
+        assert_eq!(
+            nodes[0].digest.as_deref(),
+            Some("# Review of alpha, main\n")
+        );
+        assert!(runs.scan(&root, SystemTime::now() + KEPT).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_review_says_how_it_stands_against_the_codex_week() {
+        let root = folder("pace");
+        let mut quick = review("running");
+        quick["round_depth"] = json!("quick");
+        quick["budget"] = json!({"used": 34.4, "allowed": 40});
+        write(&root, "quick", quick);
+        let mut deep = review("waiting-parent");
+        deep["budget"] = json!({"used": 12, "allowed": 40});
+        write(&root, "deep", deep);
+        let doing: BTreeMap<_, _> = Runs::default()
+            .scan(&root, SystemTime::now())
+            .into_iter()
+            .filter_map(|node| Some((node.id, node.doing?)))
+            .collect();
+        assert_eq!(
+            doing["run:quick"],
+            "round 2 of 3, ran quick, Codex week at 34% of 40%"
+        );
+        assert_eq!(
+            doing["run:deep"],
+            "round 2 of 3, Codex week at 12% of 40%, waiting on its agent"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -564,6 +564,9 @@ pub struct Node {
     /// The open pull requests it opened.
     #[serde(default)]
     pub prs: Vec<PullRequest>,
+    /// A finished review's digest, as markdown.
+    #[serde(default)]
+    pub digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,6 +609,7 @@ impl Node {
         if self.prs.is_empty() {
             self.prs = other.prs;
         }
+        self.digest = self.digest.take().or(other.digest);
     }
 }
 

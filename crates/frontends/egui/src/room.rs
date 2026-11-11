@@ -8,6 +8,7 @@ use std::time::Duration;
 use claudo_protocol::{Action, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent};
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, pos2, vec2};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 #[derive(Default)]
 pub struct Room {
@@ -21,6 +22,9 @@ pub struct Room {
     /// The last action that failed, and why.
     failed: Option<(NodeId, String)>,
     sent: Vec<Command>,
+    /// The node whose details are open beside the map.
+    selected: Option<NodeId>,
+    markdown: CommonMarkCache,
 }
 
 /// A repository's agents, each with what it started.
@@ -93,7 +97,7 @@ impl Room {
     fn clusters(&self) -> Vec<Cluster<'_>> {
         let mut children: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         let mut roots: BTreeMap<Option<&str>, Vec<&Node>> = BTreeMap::new();
-        for node in self.nodes.values() {
+        for node in self.nodes.values().filter(|node| !finished(node)) {
             match node.parent.as_deref() {
                 Some(parent) if self.nodes.contains_key(parent) => {
                     children.entry(parent).or_default().push(node)
@@ -132,6 +136,17 @@ impl Room {
         if moving {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
         }
+        self.selected = self
+            .selected
+            .take()
+            .filter(|id| self.nodes.contains_key(id));
+        if let Some(id) = self.selected.clone() {
+            egui::Panel::right("room-details")
+                .default_size(440.0)
+                .size_range(280.0..=900.0)
+                .resizable(true)
+                .show(ui, |ui| self.details(ui, &id, now));
+        }
         let screen = ui.available_height();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
@@ -150,8 +165,16 @@ impl Room {
                 ui.add_space(8.0);
                 self.tiles(ui, width, now);
                 let left = screen - (ui.cursor().top() - top);
-                if let Some(focus) = self.map(ui, width, left, now) {
-                    self.sent.push(focus);
+                match self.map(ui, width, left, now) {
+                    Some(Picked::Select(id)) => {
+                        self.selected = (self.selected.as_ref() != Some(&id)).then_some(id);
+                    }
+                    Some(Picked::Focus(node)) => self.sent.push(Command::Act {
+                        node,
+                        action: Action::Focus,
+                        request: 0,
+                    }),
+                    None => {}
                 }
             });
     }
@@ -235,13 +258,101 @@ impl Room {
         }
     }
 
+    /// The selected node: what the hover says, a box to answer an agent, its digest when it
+    /// is a finished review, and the runs an agent started with theirs.
+    fn details(&mut self, ui: &mut egui::Ui, id: &str, now: f64) {
+        let Some(node) = self.nodes.get(id).cloned() else {
+            return;
+        };
+        let mut runs: Vec<Node> = self
+            .nodes
+            .values()
+            .filter(|run| run.parent.as_deref() == Some(id))
+            .filter(|run| matches!(run.kind, Some(NodeKind::Run(_))))
+            .cloned()
+            .collect();
+        // Run folders begin with when they started.
+        runs.sort_by(|a, b| b.id.cmp(&a.id));
+        let agent = self
+            .nodes
+            .get(node.parent.as_deref().unwrap_or_default())
+            .filter(|parent| matches!(parent.kind, Some(NodeKind::Agent(_))))
+            .map(|parent| (parent.id.clone(), parent.name.clone()));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Close").clicked() {
+                    self.selected = None;
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    dot(ui, color(ui.visuals(), node.state));
+                    ui.label(RichText::new(kind(&node)).size(15.0).weak());
+                });
+            });
+        });
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                about(ui, &node, self.held(id, now));
+                if let Some((parent, name)) = agent {
+                    let name = name.unwrap_or_else(|| "its agent".to_string());
+                    if ui.link(format!("Started by {name}")).clicked() {
+                        self.selected = Some(parent);
+                    }
+                }
+                for pr in open_prs(&node) {
+                    ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
+                        .on_hover_text(&pr.about);
+                }
+                if matches!(node.kind, Some(NodeKind::Agent(_))) {
+                    ui.add_space(6.0);
+                    let draft = self.drafts.entry(node.id.clone()).or_default();
+                    if let Some(action) =
+                        answer(ui, "details", &node, draft, ui.available_width() - 60.0)
+                    {
+                        self.sent.push(Command::Act {
+                            node: node.id.clone(),
+                            action,
+                            request: 0,
+                        });
+                    }
+                }
+                if let Some(digest) = &node.digest {
+                    ui.separator();
+                    CommonMarkViewer::new().show(ui, &mut self.markdown, digest);
+                }
+                for run in &runs {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        dot(ui, color(ui.visuals(), run.state));
+                        let name = run.name.as_deref().unwrap_or("unnamed");
+                        ui.label(RichText::new(name).strong());
+                        ui.weak(kind(run));
+                    });
+                    if let Some(doing) = &run.doing {
+                        ui.weak(doing);
+                    }
+                    if let Some(digest) = &run.digest {
+                        egui::CollapsingHeader::new("Digest")
+                            .id_salt(("digest", &run.id))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                CommonMarkViewer::new().show(ui, &mut self.markdown, digest);
+                            });
+                    }
+                }
+            });
+    }
+
     fn tiles(&mut self, ui: &mut egui::Ui, width: f32, now: f64) {
         let waiting: Vec<(Node, Option<f64>)> = self
             .waiting()
             .map(|node| (node.clone(), self.held(&node.id, now)))
             .collect();
-        self.drafts
-            .retain(|id, _| waiting.iter().any(|(node, _)| node.id == *id));
+        let selected = self.selected.clone();
+        self.drafts.retain(|id, _| {
+            selected.as_ref() == Some(id) || waiting.iter().any(|(node, _)| node.id == *id)
+        });
         let outer = TILE_WIDTH + 2.0 * TILE_MARGIN + TILE_GAP;
         let across = (((width + TILE_GAP) / outer).floor() as usize).max(1);
         for row in waiting.chunks(across) {
@@ -263,8 +374,9 @@ impl Room {
     }
 
     /// `screen` is the height left on screen, which the map fits into while it stays readable.
-    /// Clicking an agent focuses its terminal.
-    fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Command> {
+    /// Clicking a node opens its details, and double-clicking an agent brings its terminal
+    /// forward.
+    fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Picked> {
         let clusters = self.clusters();
         let scale = fit(&clusters, width, screen);
         let map = Map::lay_out(&clusters, width / scale);
@@ -316,6 +428,10 @@ impl Room {
                 let here = at[placed.node.id.as_str()];
                 let radius = scale * if placed.depth == 0 { AGENT } else { CHILD };
                 body(&painter, &visuals, placed.node, here, radius, now, scale);
+                if self.selected.as_ref() == Some(&placed.node.id) {
+                    let ring = Stroke::new(2.5, visuals.selection.stroke.color);
+                    painter.circle_stroke(here, radius + 6.0 * scale, ring);
+                }
                 if placed.depth == 0 {
                     let children = island
                         .placed
@@ -343,23 +459,36 @@ impl Room {
             Stroke::new(1.5, visuals.strong_text_color()),
         );
         let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
-        if agent {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let clicked = response.clicked();
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let picked = if agent && response.double_clicked() {
+            Some(Picked::Focus(node.id.clone()))
+        } else if response.clicked() {
+            Some(Picked::Select(node.id.clone()))
+        } else {
+            None
+        };
         let held = self.held(&node.id, now);
         response.on_hover_ui_at_pointer(|ui| {
             about(ui, node, held);
-            if agent {
-                ui.weak("Click to bring its terminal forward");
-            }
+            ui.weak(match agent {
+                true => "Click for details, double-click to bring its terminal forward",
+                false => "Click for details",
+            });
         });
-        (agent && clicked).then(|| Command::Act {
-            node: node.id.clone(),
-            action: Action::Focus,
-            request: 0,
-        })
+        picked
     }
+}
+
+enum Picked {
+    Select(NodeId),
+    Focus(NodeId),
+}
+
+/// A run that ended well, or what it fanned out to. The map leaves it out, since under its
+/// agent it reads as still going; a finished review stays for its digest.
+fn finished(node: &Node) -> bool {
+    matches!(node.kind, Some(NodeKind::Run(_) | NodeKind::Subagent))
+        && node.state == Some(NodeState::Done)
 }
 
 const TILE_WIDTH: f32 = 250.0;
@@ -867,26 +996,39 @@ fn tile(
                         .on_hover_text(&pr.about);
                 }
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let answer = ui.add(
-                        egui::TextEdit::singleline(draft)
-                            .id(egui::Id::new(("answer", &node.id)))
-                            .hint_text("Answer")
-                            .desired_width(TILE_WIDTH - 60.0),
-                    );
-                    let entered = answer.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    let send = ui.button("Send").clicked();
-                    if (entered || send) && !draft.trim().is_empty() {
-                        let text = std::mem::take(draft).trim().to_string();
-                        action = Some(Action::Prompt(text));
-                    }
-                });
-                if ui.link("Bring its terminal forward").clicked() {
-                    action = Some(Action::Focus);
-                }
+                action = answer(ui, "tile", node, draft, TILE_WIDTH - 60.0);
             });
         });
+    action
+}
+
+/// A box to write to the agent in, and a link to its terminal. `place` keeps the tile's box
+/// and the details' apart when both show one agent.
+fn answer(
+    ui: &mut egui::Ui,
+    place: &str,
+    node: &Node,
+    draft: &mut String,
+    width: f32,
+) -> Option<Action> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let answer = ui.add(
+            egui::TextEdit::singleline(draft)
+                .id(egui::Id::new(("answer", place, &node.id)))
+                .hint_text("Answer")
+                .desired_width(width),
+        );
+        let entered = answer.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let send = ui.button("Send").clicked();
+        if (entered || send) && !draft.trim().is_empty() {
+            let text = std::mem::take(draft).trim().to_string();
+            action = Some(Action::Prompt(text));
+        }
+    });
+    if ui.link("Bring its terminal forward").clicked() {
+        action = Some(Action::Focus);
+    }
     action
 }
 
@@ -931,6 +1073,8 @@ fn legend(ui: &mut egui::Ui) {
     }
     ui.add_space(10.0);
     ui.weak("round: Claude, square: Codex, diamond: dibs job, small: what an agent started");
+    ui.add_space(10.0);
+    ui.weak("click one for details");
 }
 
 fn dot(ui: &mut egui::Ui, tint: Color32) {
@@ -1043,6 +1187,29 @@ mod tests {
             2,
             "a node whose parent left stays shown"
         );
+    }
+
+    #[test]
+    fn a_finished_review_leaves_the_map_but_not_the_room() {
+        let mut room = Room::default();
+        let run = |id: &str, state| Node {
+            kind: Some(NodeKind::Run("review".to_string())),
+            state: Some(state),
+            ..node(id, Some("/src/alpha"), Some("a"))
+        };
+        room.apply(RoomEvent::Snapshot(vec![
+            node("a", Some("/src/alpha"), None),
+            run("done", NodeState::Done),
+            run("going", NodeState::Working),
+        ]));
+        let clusters = room.clusters();
+        let shown: Vec<_> = clusters[0].trees[0]
+            .children
+            .iter()
+            .map(|child| child.node.id.as_str())
+            .collect();
+        assert_eq!(shown, ["going"]);
+        assert!(room.nodes.contains_key("done"));
     }
 
     #[test]
