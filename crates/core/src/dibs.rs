@@ -1,5 +1,5 @@
-//! The jobs agents run on dibs machines, from `dibs --status --json`: each machine's name on
-//! a line of its own, then its status as one indented JSON line, whose `holders` and `queue`
+//! The jobs agents run on dibs machines, from `dibs --status --json --all`: each machine's
+//! name on a line of its own, then its status as one JSON line, whose `holders` and `queue`
 //! name the agent that asked. A job hangs under that agent, which the room finds by name.
 //! All of dibs's shapes stay in this file.
 
@@ -26,7 +26,9 @@ pub fn spawn(feed: Feed) {
 
 fn status() -> Option<String> {
     let output = Command::new("dibs")
-        .args(["--status", "--json"])
+        // Without `--all`, `DIBS_ON` or running on a machine itself narrows it to one machine,
+        // printed with no name above it.
+        .args(["--status", "--json", "--all"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -35,14 +37,19 @@ fn status() -> Option<String> {
 }
 
 fn jobs(text: &str) -> Vec<Node> {
-    let mut machine = "";
+    let mut machine = "this machine";
     let mut nodes = Vec::new();
-    for line in text.lines() {
-        if !line.starts_with(char::is_whitespace) && !line.trim().is_empty() {
-            machine = line.trim();
+    for raw in text.lines() {
+        let line = raw.trim();
+        // A machine's name stands at the start of its line, and what it said is indented
+        // under it, its status included unless it is the only machine.
+        if !line.starts_with('{') {
+            if !raw.starts_with(char::is_whitespace) && !line.is_empty() {
+                machine = line;
+            }
             continue;
         }
-        let Ok(status) = serde_json::from_str::<Value>(line.trim()) else {
+        let Ok(status) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         for (list, queued) in [("holders", false), ("queue", true)] {
@@ -147,6 +154,17 @@ mod tests {
                     NodeState::Idle
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn one_machine_alone_is_read_too() {
+        let text = r#"{"state":"shared","holders":[{"mode":"bench","pid":7,"label":"widgets-bench","agent":"tuner","elapsed":5}],"queue":[]}"#;
+        let nodes = jobs(text);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0].doing.as_deref(),
+            Some("measuring on this machine for 5s")
         );
     }
 }

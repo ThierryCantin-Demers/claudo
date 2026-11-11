@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Node, NodeId, NodeState, RoomEvent, ServerEvent};
+use claudo_protocol::{Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clients::{ClientId, Clients};
@@ -88,6 +88,7 @@ fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
     // agent here has the name of is someone else's.
     let names: HashMap<String, NodeId> = nodes
         .values()
+        .filter(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
         .filter_map(|node| Some((node.name.clone()?, node.id.clone())))
         .collect();
     nodes.retain(|_, node| {
@@ -282,7 +283,13 @@ mod tests {
         let room = Arc::new(Mutex::new(Room::default()));
         Feed::new(room.clone(), "herdr").replace(vec![Node {
             name: Some("builder".into()),
+            kind: Some(NodeKind::Agent(claudo_protocol::Provider::Claude)),
             ..node("session:s1")
+        }]);
+        Feed::new(room.clone(), "runs").replace(vec![Node {
+            name: Some("builder".into()),
+            kind: Some(NodeKind::Run("review".into())),
+            ..node("run:r1")
         }]);
         Feed::new(room.clone(), "dibs").replace(vec![
             Node {

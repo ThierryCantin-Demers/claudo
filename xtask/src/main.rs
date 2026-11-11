@@ -324,7 +324,9 @@ fn daemon_token() -> Result<String, String> {
 }
 
 fn uninstall() -> Result<(), String> {
-    cargo(&["uninstall", COSMIC_BIN])?;
+    if cargo_bin_dir()?.join(COSMIC_BIN).exists() {
+        cargo(&["uninstall", COSMIC_BIN])?;
+    }
     if cargo_bin_dir()?.join(APPLET_BIN).exists() {
         cargo(&["uninstall", APPLET_BIN])?;
     }
