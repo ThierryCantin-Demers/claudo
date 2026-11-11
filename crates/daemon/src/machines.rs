@@ -20,12 +20,15 @@ const BRIDGE: &str = r#"sh -c 'exec "${CARGO_HOME:-$HOME/.cargo}/bin/claudo-daem
 #[derive(Default)]
 pub struct Machines(Vec<Machine>);
 
+type Asked = (UnboundedSender<ServerEvent>, u64);
+
 struct Machine {
     commands: Commands,
     /// The nodes its room shows now.
     shows: Arc<Mutex<HashSet<NodeId>>>,
-    /// Who asked for each action relayed, by its `request`, to hear if it fails.
-    asked: Arc<Mutex<HashMap<u64, UnboundedSender<ServerEvent>>>>,
+    /// Who asked for each action relayed, and the `request` they gave it, by the one it
+    /// was relayed with, to hear if it fails.
+    asked: Arc<Mutex<HashMap<u64, Asked>>>,
     next: AtomicU64,
 }
 
@@ -42,7 +45,12 @@ impl Machines {
 
     /// Sends an action on another computer's node to it, saying whether one has the node.
     pub fn act(&self, command: &Command, from: &UnboundedSender<ServerEvent>) -> bool {
-        let Command::Act { node, action, .. } = command else {
+        let Command::Act {
+            node,
+            action,
+            request: theirs,
+        } = command
+        else {
             return false;
         };
         let Some(machine) = self
@@ -56,8 +64,8 @@ impl Machines {
         // tab closes.
         let request = machine.next.fetch_add(1, Ordering::Relaxed) + 1;
         let mut asked = machine.asked.lock().unwrap();
-        asked.retain(|_, asker| !asker.is_closed());
-        asked.insert(request, from.clone());
+        asked.retain(|_, (asker, _)| !asker.is_closed());
+        asked.insert(request, (from.clone(), *theirs));
         drop(asked);
         machine.commands.send(Command::Act {
             node: node.clone(),
@@ -87,7 +95,7 @@ impl Machine {
             ssh
         });
         let shows: Arc<Mutex<HashSet<NodeId>>> = Arc::default();
-        let asked: Arc<Mutex<HashMap<u64, UnboundedSender<ServerEvent>>>> = Arc::default();
+        let asked: Arc<Mutex<HashMap<u64, Asked>>> = Arc::default();
         let (shown, answer) = (shows.clone(), asked.clone());
         std::thread::spawn(move || {
             let mut nodes: BTreeMap<NodeId, Node> = BTreeMap::new();
@@ -110,11 +118,11 @@ impl Machine {
                         detail,
                         request,
                     }) => {
-                        if let Some(asker) = answer.lock().unwrap().remove(&request) {
+                        if let Some((asker, theirs)) = answer.lock().unwrap().remove(&request) {
                             let failed = RoomEvent::Failed {
                                 node,
                                 detail,
-                                request: 0,
+                                request: theirs,
                             };
                             let _ = asker.send(ServerEvent::Room(failed));
                         }
