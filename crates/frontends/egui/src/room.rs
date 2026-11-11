@@ -145,6 +145,7 @@ impl Room {
                     ui.add_space(24.0);
                     legend(ui);
                 });
+                self.pull_requests(ui);
                 self.failure(ui);
                 ui.add_space(8.0);
                 self.tiles(ui, width, now);
@@ -153,6 +154,29 @@ impl Room {
                     self.sent.push(focus);
                 }
             });
+    }
+
+    /// Every open pull request an agent here has, with the agent's name.
+    fn pull_requests(&self, ui: &mut egui::Ui) {
+        let mut open: Vec<(&Node, Shown)> = self
+            .nodes
+            .values()
+            .flat_map(|node| open_prs(node).into_iter().map(move |pr| (node, pr)))
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        open.sort_by(|a, b| a.1.about.cmp(&b.1.about));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Open PRs:");
+            for (node, pr) in open {
+                ui.add_space(8.0);
+                let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
+                ui.hyperlink_to(repo, pr.link).on_hover_text(&pr.about);
+                ui.weak(node.name.as_deref().unwrap_or("unnamed"));
+            }
+        });
     }
 
     fn failure(&mut self, ui: &mut egui::Ui) {
@@ -293,7 +317,13 @@ impl Room {
                 let radius = scale * if placed.depth == 0 { AGENT } else { CHILD };
                 body(&painter, &visuals, placed.node, here, radius, now, scale);
                 if placed.depth == 0 {
-                    caption(&painter, &visuals, placed.node, here, scale);
+                    let children = island
+                        .placed
+                        .iter()
+                        .filter(|child| child.parent == Some(placed.node.id.as_str()))
+                        .map(|child| child.node);
+                    let started = started(children);
+                    caption(&painter, &visuals, placed.node, &started, here, scale);
                 }
                 drawn.push((placed.node, here, radius));
             }
@@ -605,10 +635,22 @@ fn body(
     }
     let rim = Stroke::new(2.0, visuals.extreme_bg_color);
     let fill = tint.gamma_multiply(0.9);
-    if node.kind == Some(NodeKind::Agent(Provider::Codex)) {
+    let codex = matches!(node.kind, Some(NodeKind::Agent(Provider::Codex)))
+        || node.provider == Some(Provider::Codex);
+    if codex {
         let square = egui::Rect::from_center_size(at, Vec2::splat(radius * 1.8));
         painter.rect_filled(square, radius * 0.4, fill);
         painter.rect_stroke(square, radius * 0.4, rim, egui::StrokeKind::Outside);
+    } else if dibs_job(node) {
+        let reach = radius * 1.25;
+        let corners = [
+            vec2(0.0, -reach),
+            vec2(reach, 0.0),
+            vec2(0.0, reach),
+            vec2(-reach, 0.0),
+        ];
+        let diamond = corners.map(|corner| at + corner).to_vec();
+        painter.add(egui::Shape::convex_polygon(diamond, fill, rim));
     } else {
         painter.circle_filled(at, radius, fill);
         painter.circle_stroke(at, radius, rim);
@@ -629,7 +671,14 @@ fn body(
     }
 }
 
-fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Pos2, scale: f32) {
+fn caption(
+    painter: &egui::Painter,
+    visuals: &egui::Visuals,
+    node: &Node,
+    started: &str,
+    at: Pos2,
+    scale: f32,
+) {
     let top = at + vec2(0.0, (AGENT + 6.0) * scale);
     let name = node.name.as_deref().unwrap_or("unnamed");
     let name = lines(
@@ -653,7 +702,13 @@ fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Po
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
-    let badges = badges(node);
+    let mut badges = badges(node);
+    if !started.is_empty() {
+        if !badges.is_empty() {
+            badges.push_str("  ·  ");
+        }
+        badges.push_str(started);
+    }
     if !badges.is_empty() {
         let tint = visuals.text_color();
         let badges = lines(painter, &badges, 10.0 * scale, tint, 1, scale);
@@ -661,22 +716,79 @@ fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Po
     }
 }
 
-/// What an agent carries: its context, and the pull request it waits on.
+/// What an agent carries: its context, and its open pull requests.
 fn badges(node: &Node) -> String {
     let context = node
         .context
         .map(|tokens| format!("{} context", thousands(tokens)));
-    let pr = pr(node).map(|(number, _)| format!("PR #{number}"));
-    [context, pr]
+    let prs = open_prs(node);
+    let prs = (!prs.is_empty()).then(|| {
+        let numbers: Vec<_> = prs.iter().map(|pr| format!("#{}", pr.number)).collect();
+        format!("PR {}", numbers.join(" "))
+    });
+    [context, prs]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join("  ·  ")
 }
 
-fn pr(node: &Node) -> Option<(&str, &str)> {
-    let link = node.note.as_ref()?.pr.as_deref()?;
-    Some((link.rsplit('/').next()?, link))
+/// What an agent started, counted by kind: "2 Codex reviews  ·  1 dibs job".
+fn started<'a>(children: impl Iterator<Item = &'a Node>) -> String {
+    let mut counted: BTreeMap<String, usize> = BTreeMap::new();
+    for child in children {
+        *counted.entry(kind(child)).or_default() += 1;
+    }
+    counted
+        .into_iter()
+        .map(|(kind, count)| match count {
+            1 => format!("1 {kind}"),
+            _ => format!("{count} {kind}s"),
+        })
+        .collect::<Vec<_>>()
+        .join("  ·  ")
+}
+
+/// A pull request as the page shows it.
+struct Shown<'a> {
+    number: &'a str,
+    /// Its repository, number, whether it is a draft, and title.
+    about: String,
+    link: &'a str,
+}
+
+fn number(link: &str) -> &str {
+    link.rsplit('/').next().unwrap_or_default()
+}
+
+/// The open pull requests an agent opened, and the one its board note waits on.
+fn open_prs(node: &Node) -> Vec<Shown<'_>> {
+    let mut shown: Vec<Shown> = node
+        .prs
+        .iter()
+        .map(|pr| {
+            let draft = if pr.draft { " (draft)" } else { "" };
+            Shown {
+                number: number(&pr.url),
+                about: format!("{}#{}{draft}: {}", short(&pr.repo), pr.number, pr.title),
+                link: &pr.url,
+            }
+        })
+        .collect();
+    if let Some(link) = node.note.as_ref().and_then(|note| note.pr.as_deref())
+        && !shown.iter().any(|pr| pr.link == link)
+    {
+        shown.push(Shown {
+            number: number(link),
+            about: link.trim_start_matches("https://github.com/").to_string(),
+            link,
+        });
+    }
+    shown
+}
+
+fn dibs_job(node: &Node) -> bool {
+    matches!(&node.kind, Some(NodeKind::Run(kind)) if kind == "dibs")
 }
 
 fn thousands(tokens: u64) -> String {
@@ -735,7 +847,7 @@ fn tile(
                             .strong(),
                     );
                 });
-                let mut place = kind(node.kind.as_ref());
+                let mut place = kind(node);
                 if let Some(repo) = &node.repo {
                     place.push_str(&format!(" in {}", short(repo)));
                 }
@@ -750,8 +862,9 @@ fn tile(
                 if let Some(held) = held {
                     ui.label(RichText::new(format!("waiting {}", ago(held))).color(warn));
                 }
-                if let Some((number, link)) = pr(node) {
-                    ui.hyperlink_to(format!("PR #{number}"), link);
+                for pr in open_prs(node) {
+                    ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
+                        .on_hover_text(&pr.about);
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -779,11 +892,7 @@ fn tile(
 
 fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
     ui.label(RichText::new(node.name.as_deref().unwrap_or("unnamed")).strong());
-    let mut line = format!(
-        "{} {}",
-        kind(node.kind.as_ref()),
-        state(node.state).to_lowercase()
-    );
+    let mut line = format!("{} {}", kind(node), state(node.state).to_lowercase());
     if let Some(held) = held {
         line.push_str(&format!(" for {}", ago(held)));
     }
@@ -796,6 +905,9 @@ fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
     }
     if let Some(tokens) = node.context {
         ui.label(format!("{} tokens in context", thousands(tokens)));
+    }
+    for pr in open_prs(node) {
+        ui.label(format!("PR {}", pr.about));
     }
     if let Some(repo) = &node.repo {
         ui.label(RichText::new(repo).weak().monospace());
@@ -818,7 +930,7 @@ fn legend(ui: &mut egui::Ui) {
         ui.add_space(6.0);
     }
     ui.add_space(10.0);
-    ui.weak("round: Claude, square: Codex, small: what an agent started");
+    ui.weak("round: Claude, square: Codex, diamond: dibs job, small: what an agent started");
 }
 
 fn dot(ui: &mut egui::Ui, tint: Color32) {
@@ -826,14 +938,25 @@ fn dot(ui: &mut egui::Ui, tint: Color32) {
     ui.painter().circle_filled(rect.center(), 5.0, tint);
 }
 
-fn kind(kind: Option<&NodeKind>) -> String {
-    match kind {
-        Some(NodeKind::Agent(Provider::Claude)) => "Claude".to_string(),
-        Some(NodeKind::Agent(Provider::Codex)) => "Codex".to_string(),
-        Some(NodeKind::Agent(Provider::Other(name))) => name.clone(),
-        Some(NodeKind::Run(kind)) => kind.clone(),
-        Some(NodeKind::Subagent) => "subagent".to_string(),
-        None => String::new(),
+/// What a node is, as a person says it: "Claude", "Codex review", "dibs job".
+fn kind(node: &Node) -> String {
+    let by = node.provider.as_ref().map(provider);
+    match (&node.kind, by) {
+        (Some(NodeKind::Agent(agent)), _) => provider(agent),
+        (Some(NodeKind::Run(_)), _) if dibs_job(node) => "dibs job".to_string(),
+        (Some(NodeKind::Run(kind)), Some(by)) => format!("{by} {kind}"),
+        (Some(NodeKind::Run(kind)), None) => kind.clone(),
+        (Some(NodeKind::Subagent), Some(by)) => format!("{by} subagent"),
+        (Some(NodeKind::Subagent), None) => "subagent".to_string(),
+        (None, _) => String::new(),
+    }
+}
+
+fn provider(provider: &Provider) -> String {
+    match provider {
+        Provider::Claude => "Claude".to_string(),
+        Provider::Codex => "Codex".to_string(),
+        Provider::Other(name) => name.clone(),
     }
 }
 
@@ -1012,5 +1135,28 @@ mod tests {
         assert!((MIN_SCALE..1.0).contains(&scale));
         assert!(Map::lay_out(&clusters, width / scale).height * scale <= tall * 0.8);
         assert_eq!(fit(&clusters, width, 10.0), MIN_SCALE);
+    }
+
+    #[test]
+    fn what_an_agent_started_says_who_runs_it() {
+        let review = Node {
+            kind: Some(NodeKind::Run("review".into())),
+            provider: Some(Provider::Codex),
+            ..node("r", None, None)
+        };
+        let reviewer = Node {
+            kind: Some(NodeKind::Subagent),
+            provider: Some(Provider::Codex),
+            ..node("s", None, None)
+        };
+        let job = Node {
+            kind: Some(NodeKind::Run("dibs".into())),
+            ..node("j", None, None)
+        };
+        assert_eq!(kind(&review), "Codex review");
+        assert_eq!(kind(&reviewer), "Codex subagent");
+        assert_eq!(kind(&job), "dibs job");
+        let started = started([&review, &review, &job].into_iter());
+        assert_eq!(started, "2 Codex reviews  ·  1 dibs job");
     }
 }
