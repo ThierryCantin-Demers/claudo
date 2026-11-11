@@ -2,7 +2,8 @@
 //! changes; the room merges them by id, the fields of the collector that joined first
 //! first, and tells every client only what changed. A collector of notes only adds to the
 //! nodes others give: a note outlives the agent it is about. A parent named `name:<agent>`
-//! is the agent of that name.
+//! is the agent of that name. Other computers' daemons hear only what this computer's own
+//! collectors see, never what came from another, so two that watch each other echo nothing.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,9 @@ pub struct Room {
     sources: Vec<Source>,
     shown: BTreeMap<NodeId, Node>,
     clients: Clients,
+    /// What this computer's own collectors see, and the other computers' daemons hearing it.
+    local: BTreeMap<NodeId, Node>,
+    machines: Clients,
 }
 
 impl Room {
@@ -28,44 +32,74 @@ impl Room {
             .to(client, ServerEvent::Room(RoomEvent::Snapshot(nodes)));
     }
 
-    pub fn disconnect(&mut self, client: ClientId) {
-        self.clients.remove(client);
+    /// Another computer's daemon, which hears only what this computer's collectors see.
+    pub fn connect_machine(&mut self, client: ClientId, events: UnboundedSender<ServerEvent>) {
+        self.machines.add(client, events);
+        let nodes = self.local.values().cloned().collect();
+        self.machines
+            .to(client, ServerEvent::Room(RoomEvent::Snapshot(nodes)));
     }
 
-    fn replace(&mut self, name: &'static str, adds: bool, nodes: Vec<Node>) {
+    pub fn disconnect(&mut self, client: ClientId) {
+        self.clients.remove(client);
+        self.machines.remove(client);
+    }
+
+    fn replace(&mut self, name: &'static str, from: Gives, nodes: Vec<Node>) {
         match self.sources.iter_mut().find(|source| source.name == name) {
             Some(source) => source.nodes = nodes,
-            None => self.sources.push(Source { name, adds, nodes }),
+            None => self.sources.push(Source { name, from, nodes }),
         }
-        let next = merged(&self.sources);
-        for id in self.shown.keys().filter(|id| !next.contains_key(*id)) {
-            self.clients
-                .send(ServerEvent::Room(RoomEvent::Removed(id.clone())));
-        }
-        for (id, node) in &next {
-            if self.shown.get(id) != Some(node) {
-                self.clients
-                    .send(ServerEvent::Room(RoomEvent::Upserted(Box::new(
-                        node.clone(),
-                    ))));
-            }
-        }
+        let every: Vec<&Source> = self.sources.iter().collect();
+        let next = merged(&every);
+        tell(&self.clients, &self.shown, &next);
         self.shown = next;
+        let own: Vec<&Source> = every
+            .into_iter()
+            .filter(|source| source.from != Gives::Machine)
+            .collect();
+        let local = merged(&own);
+        tell(&self.machines, &self.local, &local);
+        self.local = local;
+    }
+}
+
+/// Sends `clients` what changed from `before` to `after`.
+fn tell(clients: &Clients, before: &BTreeMap<NodeId, Node>, after: &BTreeMap<NodeId, Node>) {
+    for id in before.keys().filter(|id| !after.contains_key(*id)) {
+        clients.send(ServerEvent::Room(RoomEvent::Removed(id.clone())));
+    }
+    for (id, node) in after {
+        if before.get(id) != Some(node) {
+            clients.send(ServerEvent::Room(RoomEvent::Upserted(Box::new(
+                node.clone(),
+            ))));
+        }
     }
 }
 
 struct Source {
     name: &'static str,
-    /// Whether its nodes join the room, rather than only add to the ones others give.
-    adds: bool,
+    from: Gives,
     nodes: Vec<Node>,
 }
 
-fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
+/// What a collector gives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gives {
+    /// Nodes of its own.
+    Nodes,
+    /// Only what it adds to the nodes others give.
+    Notes,
+    /// Another computer's room.
+    Machine,
+}
+
+fn merged(sources: &[&Source]) -> BTreeMap<NodeId, Node> {
     let mut nodes: BTreeMap<NodeId, Node> = BTreeMap::new();
     for node in sources
         .iter()
-        .filter(|source| source.adds)
+        .filter(|source| source.from != Gives::Notes)
         .flat_map(|source| &source.nodes)
     {
         match nodes.get_mut(&node.id) {
@@ -77,7 +111,7 @@ fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
     }
     for node in sources
         .iter()
-        .filter(|source| !source.adds)
+        .filter(|source| source.from == Gives::Notes)
         .flat_map(|source| &source.nodes)
     {
         if let Some(known) = nodes.get_mut(&node.id) {
@@ -119,7 +153,7 @@ fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
 pub struct Feed {
     room: Arc<Mutex<Room>>,
     source: &'static str,
-    adds: bool,
+    from: Gives,
 }
 
 impl Feed {
@@ -127,7 +161,7 @@ impl Feed {
         Self {
             room,
             source,
-            adds: true,
+            from: Gives::Nodes,
         }
     }
 
@@ -136,7 +170,16 @@ impl Feed {
         Self {
             room,
             source,
-            adds: false,
+            from: Gives::Notes,
+        }
+    }
+
+    /// Another computer's room, which this one shows but never passes on.
+    pub fn machine(room: Arc<Mutex<Room>>, source: &'static str) -> Self {
+        Self {
+            room,
+            source,
+            from: Gives::Machine,
         }
     }
 
@@ -145,7 +188,7 @@ impl Feed {
         self.room
             .lock()
             .unwrap()
-            .replace(self.source, self.adds, nodes);
+            .replace(self.source, self.from, nodes);
     }
 }
 
@@ -315,5 +358,21 @@ mod tests {
             Some("session:s1"),
             "a job of a review the agent started"
         );
+    }
+
+    #[test]
+    fn another_computer_hears_only_what_this_ones_collectors_see() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        let (machine, mut machine_events) = unbounded_channel();
+        room.lock().unwrap().connect_machine(9, machine);
+        let (page, mut page_events) = unbounded_channel();
+        room.lock().unwrap().connect(1, page);
+        Feed::new(room.clone(), "herdr").replace(vec![node("here")]);
+        Feed::machine(room.clone(), "remote:host-b").replace(vec![node("there")]);
+        assert_eq!(
+            heard(&mut page_events),
+            ["snapshot 0", "upserted here", "upserted there"]
+        );
+        assert_eq!(heard(&mut machine_events), ["snapshot 0", "upserted here"]);
     }
 }

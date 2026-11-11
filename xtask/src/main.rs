@@ -43,7 +43,12 @@ enum Task {
     InstallApplet,
     /// Install the daemon as a systemd user service, serving the control room and the web
     /// page at a link that survives restarts.
-    InstallDaemon,
+    InstallDaemon {
+        /// Also show the agents of the daemon on this computer, as ssh names it, which
+        /// needs `install-daemon` there too. Repeat for more.
+        #[arg(long, value_name = "HOST")]
+        with: Vec<String>,
+    },
     /// Remove what `install`, `install-applet` and `install-daemon` put in place.
     Uninstall,
     /// Run the COSMIC app.
@@ -105,7 +110,7 @@ impl Task {
             Task::Egui => &[Need::Claude],
             Task::Daemon => &[Need::WebBundle, Need::Claude],
             Task::Web => &[Need::WasmTarget, Need::WasmBindgen],
-            Task::InstallDaemon => &[Need::WasmTarget, Need::WasmBindgen, Need::Claude],
+            Task::InstallDaemon { .. } => &[Need::WasmTarget, Need::WasmBindgen, Need::Claude],
             Task::Lint | Task::Test { .. } => &[Need::PkgConfig, Need::Xkbcommon],
             Task::Probe { name: Some(_) } => &[Need::Claude],
             Task::Setup | Task::Uninstall | Task::Probe { name: None } => &[],
@@ -119,7 +124,7 @@ fn run(task: Task) -> Result<(), String> {
         Task::Setup => need::setup(),
         Task::Install { on } => install(on.as_deref()),
         Task::InstallApplet => install_applet(),
-        Task::InstallDaemon => install_daemon(),
+        Task::InstallDaemon { with } => install_daemon(&with),
         Task::Uninstall => uninstall(),
         Task::Cosmic { hot: true, .. } => hot(),
         Task::Cosmic { release, .. } => {
@@ -246,7 +251,13 @@ fn install_applet() -> Result<(), String> {
     Ok(())
 }
 
-fn install_daemon() -> Result<(), String> {
+fn install_daemon(others: &[String]) -> Result<(), String> {
+    if let Some(host) = others
+        .iter()
+        .find(|host| host.is_empty() || host.contains([',', ' ', '/']))
+    {
+        return Err(format!("{host:?} is not a host ssh can reach"));
+    }
     web()?;
     let web = installed_web()?;
     if web.exists() {
@@ -266,23 +277,34 @@ fn install_daemon() -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", unit.parent().unwrap().display()))?;
     // A user service starts with systemd's PATH, which lacks where `claude` usually is.
     let path = env::var("PATH").unwrap_or_default();
+    let mut environment = vec![
+        format!("PATH={path}"),
+        format!("CLAUDO_PORT={DAEMON_PORT}"),
+        format!("CLAUDO_STATIC_DIR={}", web.display()),
+    ];
+    if !others.is_empty() {
+        environment.push(format!("CLAUDO_MACHINES={}", others.join(",")));
+        // ssh from the service reaches the other computers with the keys of this session's agent.
+        if let Ok(agent) = env::var("SSH_AUTH_SOCK") {
+            environment.push(format!("SSH_AUTH_SOCK={agent}"));
+        }
+    }
+    let environment: String = environment
+        .iter()
+        .map(|variable| format!("Environment={}\n", unit_word(variable)))
+        .collect();
     let service = format!(
         "[Unit]\n\
          Description=claudo's control room and web page\n\
          \n\
          [Service]\n\
          ExecStart={bin}\n\
-         Environment={path}\n\
-         Environment={port}\n\
-         Environment={web}\n\
+         {environment}\
          Restart=on-failure\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         bin = unit_word(&bin.display().to_string()),
-        path = unit_word(&format!("PATH={path}")),
-        port = unit_word(&format!("CLAUDO_PORT={DAEMON_PORT}")),
-        web = unit_word(&format!("CLAUDO_STATIC_DIR={}", web.display())),
     );
     fs::write(&unit, service).map_err(|e| format!("cannot write {}: {e}", unit.display()))?;
     systemctl(&["daemon-reload"])?;

@@ -6,7 +6,7 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command as Process, ExitCode, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -92,7 +92,12 @@ fn client(id: ClientId, stream: UnixStream, inputs: Sender<Input>) {
 /// Joins stdin and stdout to the backend this computer's claudo serves. Says on stderr
 /// when none does.
 pub fn bridge() -> ExitCode {
-    let Ok(stream) = UnixStream::connect(socket()) else {
+    bridge_at(&socket())
+}
+
+/// Joins stdin and stdout to the socket at `path`. Says on stderr when nothing serves it.
+pub fn bridge_at(path: &Path) -> ExitCode {
+    let Ok(stream) = UnixStream::connect(path) else {
         let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
         eprintln!("claudo is not running on {}", host.trim());
         return ExitCode::FAILURE;

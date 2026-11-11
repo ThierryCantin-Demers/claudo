@@ -150,7 +150,7 @@ use inproc::Input;
 #[cfg(not(target_arch = "wasm32"))]
 pub use inproc::{Commands, Events, InProc, Recorded, spawn_backend};
 #[cfg(not(target_arch = "wasm32"))]
-pub use remote::{bridge, connect_remote, connect_with, socket};
+pub use remote::{bridge, bridge_at, connect_remote, connect_with, socket};
 
 /// Connect a frontend to its backend. Native bundles the backend in-process.
 #[cfg(not(target_arch = "wasm32"))]

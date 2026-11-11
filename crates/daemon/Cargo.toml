@@ -9,6 +9,7 @@ name = "claudo-daemon"
 path = "src/main.rs"
 
 [dependencies]
+claudo-transport.workspace = true
 axum = { version = "0.8.9", features = ["ws"] }
 claudo-core.workspace = true
 claudo-protocol.workspace = true

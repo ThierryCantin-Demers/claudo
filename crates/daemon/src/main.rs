@@ -2,6 +2,10 @@
 //! `Backend` the native app uses in-process, plus static serving of the web
 //! client bundle. Every WS connection is a client of one shared backend.
 //!
+//! Other computers' daemons, named in `CLAUDO_MACHINES` as ssh names them, show their
+//! agents beside this one's: each serves its room on a socket only its user can open, and
+//! `claudo-daemon --bridge`, run over ssh, joins that socket to ssh's stdin and stdout.
+//!
 //! Auth: a token, made on the first start and kept in claudo's config so the page's
 //! link survives restarts, must be presented as `?token=…` on the WS upgrade. The
 //! token is part of the URL we print, so the served page can read it from its own
@@ -13,6 +17,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::Router;
@@ -27,14 +32,30 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::unbounded_channel;
 use tower_http::services::ServeDir;
 
+use crate::machines::Machines;
+
+mod machines;
+
 #[derive(Clone)]
 struct AppState {
     token: Arc<String>,
     hub: Hub,
+    machines: Arc<Machines>,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--bridge") {
+        return claudo_transport::bridge_at(&machine_socket());
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("start tokio");
+    runtime.block_on(serve());
+    ExitCode::SUCCESS
+}
+
+async fn serve() {
     let port: u16 = std::env::var("CLAUDO_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -48,9 +69,18 @@ async fn main() {
     claudo_core::board::spawn(hub.notes("board"));
     claudo_core::dibs::spawn(hub.feed("dibs"));
     claudo_core::transcripts::spawn(hub.notes("transcripts"));
+    hub.serve(&machine_socket());
+    let others = std::env::var("CLAUDO_MACHINES").unwrap_or_default();
+    let others = others
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_string);
+    let machines = Arc::new(Machines::spawn(others, &hub));
     let state = AppState {
         token: Arc::new(token.clone()),
         hub,
+        machines,
     };
 
     let app = Router::new()
@@ -69,6 +99,14 @@ async fn main() {
     println!("  serving bundle from: {}", static_dir.display());
 
     axum::serve(listener, app).await.expect("serve");
+}
+
+/// Where this computer's daemon serves its room to other computers' daemons.
+fn machine_socket() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("claudo-daemon.sock")
 }
 
 /// The token in claudo's config, made there on the first start.
@@ -132,12 +170,13 @@ async fn ws_handler(
     if params.get("token").map(String::as_str) != Some(state.token.as_str()) {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    ws.on_upgrade(move |socket| handle_socket(socket, state.hub))
+    ws.on_upgrade(move |socket| handle_socket(socket, state.hub, state.machines))
 }
 
-async fn handle_socket(socket: WebSocket, hub: Hub) {
+async fn handle_socket(socket: WebSocket, hub: Hub, machines: Arc<Machines>) {
     let (mut sink, mut stream) = socket.split();
     let (events_tx, mut events_rx) = unbounded_channel::<ServerEvent>();
+    let asker = events_tx.clone();
     let client = hub.connect(events_tx);
 
     // Forward backend events to the socket.
@@ -156,7 +195,9 @@ async fn handle_socket(socket: WebSocket, hub: Hub) {
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             Message::Text(text) => {
-                if let Ok(cmd) = serde_json::from_str::<Command>(&text) {
+                if let Ok(cmd) = serde_json::from_str::<Command>(&text)
+                    && !machines.act(&cmd, &asker)
+                {
                     client.send(cmd);
                 }
             }

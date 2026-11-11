@@ -54,6 +54,9 @@ To keep it running as a systemd user service instead, which prints the same link
 cargo xtask install-daemon
 ```
 
+`--with <host>` also shows the agents of the daemon on another computer, as ssh names it,
+installed there the same way. The link is ssh, so nothing new listens on the network.
+
 ## Features
 
 - Conversations in a sidebar, read from Claude Code's own transcripts, so they are shared with the CLI.

@@ -469,6 +469,16 @@ wrote it.
   `CLAUDO_STATIC_DIR`, else `crates/frontends/egui/dist` when run from the repo, else the
   bundle `install-daemon` copies to `$XDG_DATA_HOME/claudo/web`. The unit keeps the PATH of
   the shell that installed it, since systemd's lacks where `claude` usually is.
+- **Several computers** (`daemon/src/machines.rs`). Each daemon serves its room on
+  `$XDG_RUNTIME_DIR/claudo-daemon.sock` (`Hub::serve`, mode 0600), and
+  `claudo-daemon --bridge` joins that socket to stdin and stdout. A daemon reaches each
+  computer in `CLAUDO_MACHINES` (ssh names, comma separated; `install-daemon --with`) by
+  running the bridge over ssh, through the transport's reconnecting `connect_with`, and
+  shows its room as a `Feed::machine`. Another computer hears only what this one's own
+  collectors give (`Room::connect_machine`), never what came from a third, so two daemons
+  that watch each other echo nothing: dibs jobs, which both see, would otherwise outlive
+  their end. An `Act` on a node another computer shows goes to that computer's daemon, and
+  its `Failed` back to the tab that asked.
 - **One hub per daemon** (`core/src/hub.rs`). Every WebSocket is a client of one headless
   `Backend`, on the thread that owns it, as the transport's clients are; a backend per
   socket ran every agent and collector once per tab. `examples/hub_probe` checks it.
