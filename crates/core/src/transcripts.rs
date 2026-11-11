@@ -28,7 +28,8 @@ const TAIL: u64 = 1 << 20;
 const GITHUB_POLL: Duration = Duration::from_secs(3 * 60);
 
 /// A subagent whose transcript has not changed for this long, with no end read, died with
-/// the agent that ran it.
+/// the agent that ran it. One waiting on a command in the background, which writes nothing
+/// meanwhile, is given until `RECENT`.
 const SUBAGENT_STALE: Duration = Duration::from_secs(60 * 60);
 
 /// Reads the transcripts into `feed`, a collector of notes, and the subagents running now
@@ -60,10 +61,61 @@ pub fn spawn(feed: Feed, subagents: Feed) {
     });
 }
 
-/// Each recent transcript as last read, with when it was written.
+/// Each recent transcript as last read, with when it was written, and the same for each
+/// recent subagent's.
 #[derive(Default)]
 struct Transcripts {
     read: HashMap<PathBuf, Known>,
+    subagents: HashMap<PathBuf, Waiting>,
+}
+
+/// The commands a subagent left running in the background, read from the start of its
+/// transcript on. Its turn can end while one runs, and it goes on once it ends.
+#[derive(Default)]
+struct Waiting {
+    offset: u64,
+    calls: HashSet<String>,
+}
+
+impl Waiting {
+    fn read_on(&mut self, path: &Path) {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return;
+        };
+        let length = file.metadata().map_or(0, |meta| meta.len());
+        if length < self.offset {
+            *self = Waiting::default();
+        }
+        let mut bytes = Vec::new();
+        if file.seek(SeekFrom::Start(self.offset)).is_err() || file.read_to_end(&mut bytes).is_err()
+        {
+            return;
+        }
+        let Some(end) = bytes.iter().rposition(|&byte| byte == b'\n') else {
+            return;
+        };
+        self.offset += end as u64 + 1;
+        for line in String::from_utf8_lossy(&bytes[..end]).lines() {
+            if line.contains("Command running in background") {
+                let Ok(line) = serde_json::from_str(line) else {
+                    continue;
+                };
+                for (id, output) in crate::engine::cli::call_results(&line) {
+                    if crate::engine::cli::backgrounded(&output) {
+                        self.calls.insert(id);
+                    }
+                }
+            }
+            if line.contains("<task-notification>") {
+                let Ok(line) = serde_json::from_str(line) else {
+                    continue;
+                };
+                for id in crate::engine::cli::notified_end(&line) {
+                    self.calls.remove(&id);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -236,10 +288,20 @@ impl Transcripts {
         }
         self.read = read;
         let mut running = Vec::new();
+        let mut waiting = HashMap::new();
         for (session, (_, _, _, path)) in &sessions {
             let ended = &self.read[path].opened.ended;
-            running.extend(subagents(&path.with_extension(""), session, ended, now));
+            let folder = path.with_extension("");
+            running.extend(subagents(
+                &mut self.subagents,
+                &folder,
+                session,
+                ended,
+                &mut waiting,
+                now,
+            ));
         }
+        self.subagents = waiting;
         let notes = sessions
             .into_iter()
             .filter(|(_, (_, tail, prs, _))| {
@@ -259,12 +321,15 @@ impl Transcripts {
 
 /// The subagents of a session that run now, from `<session>/subagents`: each one's
 /// `agent-<id>.jsonl`, and beside it the `.meta.json` naming its Agent call. One runs from
-/// its call until the transcript says it ended, and again once its own transcript moves on
-/// after that, as when it is sent a message.
+/// its call until the transcript says it ended, and again once its own transcript moves
+/// on after that, as when it is sent a message, or while a command it started in the
+/// background still runs.
 fn subagents(
+    read: &mut HashMap<PathBuf, Waiting>,
     folder: &Path,
     session: &str,
     ended: &HashMap<String, u64>,
+    waiting: &mut HashMap<PathBuf, Waiting>,
     now: SystemTime,
 ) -> Vec<Node> {
     let Ok(entries) = std::fs::read_dir(folder.join("subagents")) else {
@@ -283,7 +348,15 @@ fn subagents(
         let Ok(written) = entry.metadata().and_then(|meta| meta.modified()) else {
             continue;
         };
-        if now.duration_since(written).unwrap_or_default() > SUBAGENT_STALE {
+        let quiet = now.duration_since(written).unwrap_or_default();
+        if quiet > RECENT {
+            continue;
+        }
+        let mut calls = read.remove(&path).unwrap_or_default();
+        calls.read_on(&path);
+        let background = !calls.calls.is_empty();
+        waiting.insert(path.clone(), calls);
+        if quiet > SUBAGENT_STALE && !background {
             continue;
         }
         let meta: Value = std::fs::read(path.with_extension("meta.json"))
@@ -300,15 +373,20 @@ fn subagents(
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
         // An end is timed to the second, and the subagent's last line comes just before it.
-        if end.is_some_and(|end| written <= end + 1) {
+        let turn_over = end.is_some_and(|end| written <= end + 1);
+        if turn_over && !background {
             continue;
         }
+        let doing = match turn_over {
+            true => Some("waiting on a command in the background".to_string()),
+            false => field("agentType").map(str::to_string),
+        };
         nodes.push(Node {
             id: format!("subagent:{agent}"),
             parent: Some(format!("session:{session}")),
             kind: Some(NodeKind::Subagent),
             name: field("description").map(str::to_string),
-            doing: field("agentType").map(str::to_string),
+            doing,
             state: Some(NodeState::Working),
             provider: Some(Provider::Claude),
             ..Node::default()
@@ -736,6 +814,14 @@ mod tests {
             notification,
             call("c-again"),
             result("c-again", "It answered.", "2020-01-01T00:00:00Z"),
+            call("c-batch"),
+            result("c-batch", "It started the batch.", later),
+            call("c-told"),
+            result(
+                "c-told",
+                "Its command ended, and it was told after a preamble.",
+                later,
+            ),
         ]
         .join("\n")
             + "\n";
@@ -745,8 +831,31 @@ mod tests {
             ("back", "c-back"),
             ("quiet", "c-quiet"),
             ("again", "c-again"),
+            ("batch", "c-batch"),
+            ("told", "c-told"),
         ] {
-            std::fs::write(folder.join(format!("agent-{agent}.jsonl")), "{}\n").unwrap();
+            let own = match agent {
+                "batch" => format!(
+                    "{}\n",
+                    result(
+                        "b-run",
+                        "Command running in background with ID: b-run.",
+                        later
+                    )
+                ),
+                "told" => format!(
+                    "{}\n{}\n",
+                    result(
+                        "b-told",
+                        "Command running in background with ID: b-told.",
+                        later
+                    ),
+                    serde_json::json!({"type": "user", "timestamp": later, "message": {"content":
+                        "[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>\n<task-id>b-told</task-id>\n<tool-use-id>b-told</tool-use-id>\n<status>completed</status>\n</task-notification>"}}),
+                ),
+                _ => "{}\n".to_string(),
+            };
+            std::fs::write(folder.join(format!("agent-{agent}.jsonl")), own).unwrap();
             let meta = serde_json::json!({
                 "agentType": "general-purpose",
                 "description": format!("Look {agent}"),
@@ -770,8 +879,10 @@ mod tests {
             [
                 ("subagent:again", "Look again"),
                 ("subagent:back", "Look back"),
+                ("subagent:batch", "Look batch"),
             ],
-            "front answered and quiet was notified; again moved on after it answered"
+            "front answered and quiet was notified; again moved on after it answered, and \
+             batch waits on a command it left running"
         );
         assert!(
             running

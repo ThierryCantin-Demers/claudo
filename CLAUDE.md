@@ -544,7 +544,10 @@ wrote it.
   nodes): one from `<session>/subagents/agent-<id>.meta.json` whose transcript changed in the
   last hour, until its Agent call's result (one in the background answers "Async agent
   launched" at once) or a `<task-notification>` naming its call or task id, and again once
-  its own transcript moves on after that end, as when it is sent a message.
+  its own transcript moves on after that end, as when it is sent a message, or while a
+  command it left running in the background has not ended in its own transcript (its turn
+  ends without waiting for one). A notification can follow a preamble of the harness's own,
+  so `cli::notified_end` looks for the block anywhere in the message.
 - **Machines** (beside the agents on the page's Room tab, as tiles the person drags into a
   split or tabs, `egui_tiles`, laid out as eframe keeps it): the dibs collector also sends every
   machine's status, and why one could not answer, as `ServerEvent::Dibs`, which the page draws

@@ -2051,15 +2051,28 @@ pub(crate) fn agent_calls(v: &Value) -> Vec<String> {
 }
 
 /// The call and the task a transcript line says ended in the background: the CLI's
-/// `<task-notification>` prompt, as a user line or a message queued into a turn.
+/// `<task-notification>` prompt, as a user line or a message queued into a turn, which may
+/// come after a preamble of the harness's own.
 pub(crate) fn notified_end(v: &Value) -> Vec<String> {
-    let text = v
-        .pointer("/message/content")
-        .and_then(Value::as_str)
-        .or_else(|| v.pointer("/attachment/prompt").and_then(Value::as_str))
-        .map(str::trim_start)
-        .filter(|text| text.starts_with("<task-notification>"));
-    let Some(text) = text else {
+    let text = match v.pointer("/message/content") {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Array(blocks)) => Some(
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => v
+            .pointer("/attachment/prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let Some(text) = text
+        .as_deref()
+        .and_then(|text| Some(&text[text.find("<task-notification>")?..]))
+    else {
         return Vec::new();
     };
     ["tool-use-id", "task-id"]
