@@ -451,8 +451,29 @@ fn web() -> Result<(), String> {
         format!("{WEB_OUT}/index.html"),
     )
     .map_err(|e| format!("cannot copy index.html: {e}"))?;
+    compress_web();
     println!("web bundle in {WEB_OUT}; serve it with: cargo xtask daemon");
     Ok(())
+}
+
+/// Brotli and gzip copies of the bundle beside it, which the daemon serves to a browser that
+/// takes them: the bundle is tens of megabytes, and a tunnel over Wi-Fi is slow. A compressor
+/// that is missing only costs the copy, and an old copy is removed first so none is stale.
+fn compress_web() {
+    for file in ["claudo_bg.wasm", "claudo.js"] {
+        let path = format!("{WEB_OUT}/{file}");
+        for (tool, args, out) in [
+            ("brotli", &["-q", "9", "-k", "-f"][..], format!("{path}.br")),
+            ("gzip", &["-9", "-k", "-f"][..], format!("{path}.gz")),
+        ] {
+            let _ = fs::remove_file(&out);
+            let done = Command::new(tool).args(args).arg(&path).status();
+            if !done.is_ok_and(|status| status.success()) {
+                let _ = fs::remove_file(&out);
+                eprintln!("{tool} did not compress {file}; it is served as it is");
+            }
+        }
+    }
 }
 
 /// Plain `cargo` from PATH rather than `$CARGO`, so a wrapper there still sees the build.

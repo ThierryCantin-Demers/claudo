@@ -88,7 +88,11 @@ async fn serve() {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .fallback_service(ServeDir::new(&static_dir))
+        .fallback_service(
+            ServeDir::new(&static_dir)
+                .precompressed_br()
+                .precompressed_gzip(),
+        )
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
