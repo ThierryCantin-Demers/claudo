@@ -24,9 +24,9 @@ pub struct Room {
     sent: Vec<Command>,
     /// The node whose details are open beside the map.
     selected: Option<NodeId>,
-    /// What the last click on the map picked. A double-click acts on it, since opening its
-    /// details on the first click moves it from under the pointer.
-    clicked: Option<NodeId>,
+    /// What the last click on the map picked, and when. A double-click right after acts on
+    /// it wherever it lands, since the details the first click opened move the map.
+    clicked: Option<(NodeId, f64)>,
     markdown: CommonMarkCache,
 }
 
@@ -157,6 +157,11 @@ impl Room {
                 .resizable(true)
                 .show(ui, |ui| self.details(ui, &id, now));
         }
+        let double = ui.input(|input| {
+            input
+                .pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
         let screen = ui.available_height();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
@@ -175,25 +180,30 @@ impl Room {
                 ui.add_space(8.0);
                 self.tiles(ui, width, now);
                 let left = screen - (ui.cursor().top() - top);
-                match self.map(ui, width, left, now) {
-                    Some(Picked::Select(id)) => {
-                        self.clicked = Some(id.clone());
-                        self.selected = (self.selected.as_ref() != Some(&id)).then_some(id);
-                    }
-                    Some(Picked::Again) => {
-                        let agent = self.clicked.clone().filter(|id| {
-                            let node = self.nodes.get(id);
-                            node.is_some_and(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
+                let picked = self.map(ui, width, left, now);
+                if double {
+                    let agent = self.clicked.take().filter(|(id, at)| {
+                        let node = self.nodes.get(id);
+                        now - at < DOUBLE_CLICK
+                            && node
+                                .is_some_and(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
+                    });
+                    if let Some((node, _)) = agent {
+                        self.sent.push(Command::Act {
+                            node,
+                            action: Action::Focus,
+                            request: 0,
                         });
-                        if let Some(node) = agent {
-                            self.sent.push(Command::Act {
-                                node,
-                                action: Action::Focus,
-                                request: 0,
-                            });
-                        }
                     }
-                    None => {}
+                } else {
+                    match picked {
+                        Some(Picked::Node(id)) => {
+                            self.clicked = Some((id.clone(), now));
+                            self.selected = (self.selected.as_ref() != Some(&id)).then_some(id);
+                        }
+                        Some(Picked::Nothing) => self.clicked = None,
+                        None => {}
+                    }
                 }
             });
     }
@@ -464,7 +474,6 @@ impl Room {
             }
         }
 
-        let again = response.double_clicked().then_some(Picked::Again);
         let pointer = response.hover_pos();
         let hovered = pointer.and_then(|pointer| {
             drawn
@@ -473,7 +482,7 @@ impl Room {
                 .min_by(|a, b| a.1.distance(pointer).total_cmp(&b.1.distance(pointer)))
         });
         let Some(&(node, at, radius)) = hovered else {
-            return again;
+            return response.clicked().then_some(Picked::Nothing);
         };
         painter.circle_stroke(
             at,
@@ -482,13 +491,7 @@ impl Room {
         );
         let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let picked = if again.is_some() {
-            again
-        } else if response.clicked() {
-            Some(Picked::Select(node.id.clone()))
-        } else {
-            None
-        };
+        let picked = response.clicked().then(|| Picked::Node(node.id.clone()));
         let held = self.held(&node.id, now);
         response.on_hover_ui_at_pointer(|ui| {
             about(ui, node, held);
@@ -501,11 +504,15 @@ impl Room {
     }
 }
 
+/// What a click on the map landed on.
 enum Picked {
-    Select(NodeId),
-    /// A double-click, on what the click before it picked.
-    Again,
+    Node(NodeId),
+    Nothing,
 }
+
+/// How soon after a click on an agent a double-click brings its terminal forward, in seconds:
+/// longer than egui's own double-click delay.
+const DOUBLE_CLICK: f64 = 0.6;
 
 /// A run that ended well, or what it fanned out to. The map leaves it out under its agent,
 /// where it reads as still going; a finished review stays for its digest, which its agent's
