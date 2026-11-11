@@ -89,6 +89,7 @@ impl<S: Source> Application for Panel<S> {
             logo: logo(S::ICONS),
             source: PhantomData,
         };
+        crate::pace::note_activity(now());
         let ask = panel.ask(false);
         (panel, ask)
     }
@@ -114,11 +115,18 @@ impl<S: Source> Application for Panel<S> {
                 let back = self.away && present;
                 self.away = !present;
                 if back {
+                    crate::pace::note_activity(now());
                     return self.ask(false);
                 }
             }
             // Another display's applet may have changed it.
-            Message::Tick => self.pace = Pace::load(S::FILES),
+            Message::Tick => {
+                self.pace = Pace::load(S::FILES);
+                // A computer woken from sleep before it went idle says nothing of it.
+                if !self.away {
+                    crate::pace::note_activity(now());
+                }
+            }
             Message::Workdays(workdays) => {
                 self.pace = if workdays {
                     Pace::Workdays

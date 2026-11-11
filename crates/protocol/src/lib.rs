@@ -155,16 +155,12 @@ pub struct Standing {
 pub trait Calendar {
     /// How many of the seconds from `from` to `to` count.
     fn counted(&self, from: u64, to: u64) -> u64;
-    /// When `seconds` more counted seconds will have passed after `from`.
+    /// When `seconds` more counted seconds will have been allowed after `from`.
     fn after(&self, from: u64, seconds: u64) -> u64;
     /// How many counted seconds from `from` are meant to be spent by `now`: each as it
-    /// passes, unless the calendar gives a day's whole share when the day begins.
+    /// passes, unless the calendar spends a day's share over part of the day.
     fn allowed(&self, from: u64, now: u64) -> u64 {
         self.counted(from, now)
-    }
-    /// When what is allowed by `now` runs out: `now`, or the end of its day.
-    fn allowed_until(&self, now: u64) -> u64 {
-        now
     }
 }
 
@@ -215,8 +211,7 @@ impl QuotaWindow {
         let out_in = (judged && allowed > 0 && used > 0.0 && used < 1.0)
             .then(|| {
                 let more = ((1.0 - used) / used * allowed as f32) as u64;
-                let from = calendar.allowed_until(now);
-                calendar.after(from, more).saturating_sub(now)
+                calendar.after(now, more).saturating_sub(now)
             })
             .filter(|&out_in| out_in < left);
         Standing {

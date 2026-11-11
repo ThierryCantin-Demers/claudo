@@ -1,5 +1,5 @@
-//! How a window's allowance is meant to be spent: evenly over every day, or over workdays
-//! alone, for someone who rarely works on weekends.
+//! How a window's allowance is meant to be spent: evenly over every day, or over the
+//! working hours of workdays alone, for someone who rarely works on weekends.
 
 use std::io;
 use std::path::PathBuf;
@@ -42,11 +42,63 @@ impl Pace {
         match self {
             // A window shorter than a day has no weekend to leave out.
             Pace::Workdays if length >= 86_400 => {
-                window.standing_by(length, now, &Workdays(TimeZone::system()))
+                let workdays = Workdays {
+                    zone: TimeZone::system(),
+                    started: day_started(),
+                };
+                window.standing_by(length, now, &workdays)
             }
             _ => window.standing(length, now),
         }
     }
+}
+
+/// Notes `now` as when the day's work started, unless the day has a start already. Before
+/// 4am it is still the night of the day before.
+#[cfg_attr(not(feature = "cosmic"), allow(dead_code))]
+pub fn note_activity(now: u64) {
+    if !begins_day(day_started(), now, &TimeZone::system()) {
+        return;
+    }
+    let path = started_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&path, now.to_string()) {
+        eprintln!("claudo-applet: cannot note the day's start: {error}");
+    }
+}
+
+fn begins_day(noted: Option<u64>, now: u64, zone: &TimeZone) -> bool {
+    let local = |at: u64| {
+        Timestamp::from_second(at as i64)
+            .ok()
+            .map(|at| at.to_zoned(zone.clone()))
+    };
+    let Some(now) = local(now) else {
+        return false;
+    };
+    now.hour() >= 4
+        && noted
+            .and_then(local)
+            .is_none_or(|noted| noted.date() != now.date())
+}
+
+/// When today's work started, shared by every applet.
+fn day_started() -> Option<u64> {
+    std::fs::read_to_string(started_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn started_path() -> PathBuf {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir);
+    state.join("claudo").join("day-started")
 }
 
 fn path(files: &str) -> PathBuf {
@@ -57,19 +109,43 @@ fn path(files: &str) -> PathBuf {
     config.join("claudo").join(format!("{files}-pace"))
 }
 
-/// Monday to Friday, by the days of a time zone. A workday's share is there from its start:
-/// spending it in a few working hours is on pace, though the day has hours left.
-struct Workdays(TimeZone);
+/// Monday to Friday, by the days of a time zone. A workday's share is spent over the
+/// `WORKDAY` from when work started that day, or, for a day with no start noted, from the
+/// time of day it started on the day `started` is in.
+struct Workdays {
+    zone: TimeZone,
+    started: Option<u64>,
+}
+
+const WORKDAY: u64 = 8 * 3600;
+
+/// When work starts, from midnight, before any day's start is noted.
+const USUAL_START: u64 = 9 * 3600;
 
 /// Days enough for any window, should a time zone go wrong.
 const MOST_DAYS: usize = 400;
 
 impl Workdays {
+    /// When work starts on the day from `start` to `end`.
+    fn work_starts(&self, start: u64, end: u64) -> u64 {
+        let Some(started) = self.started else {
+            return start + USUAL_START;
+        };
+        if (start..end).contains(&started) {
+            return started;
+        }
+        let into = self
+            .days(started)
+            .next()
+            .map_or(USUAL_START, |(day, _, _)| started - day);
+        start + into
+    }
+
     /// Each day from the one `from` falls in on: its start and end, and whether it counts.
     fn days(&self, from: u64) -> impl Iterator<Item = (u64, u64, bool)> {
         let first = Timestamp::from_second(from as i64)
             .ok()
-            .and_then(|at| at.to_zoned(self.0.clone()).start_of_day().ok());
+            .and_then(|at| at.to_zoned(self.zone.clone()).start_of_day().ok());
         std::iter::successors(first, next_day)
             .filter_map(|day| {
                 let end = next_day(&day)?;
@@ -97,33 +173,35 @@ impl Calendar for Workdays {
             .sum()
     }
 
-    /// Every workday begun by `now`, whole, the one the window starts in included.
+    /// Each workday's share as much as its work by `now` has spent, the day the window
+    /// starts in whole.
     fn allowed(&self, from: u64, now: u64) -> u64 {
         self.days(from)
             .take_while(|&(start, _, _)| start <= now)
             .filter(|&(_, _, work)| work)
-            .map(|(start, end, _)| end - start)
+            .map(|(start, end, _)| {
+                let worked = now
+                    .saturating_sub(self.work_starts(start, end))
+                    .min(WORKDAY);
+                (end - start) * worked / WORKDAY
+            })
             .sum()
-    }
-
-    fn allowed_until(&self, now: u64) -> u64 {
-        match self.days(now).next() {
-            Some((_, end, true)) => end,
-            _ => now,
-        }
     }
 
     fn after(&self, from: u64, seconds: u64) -> u64 {
         let mut left = seconds;
         for (start, end, work) in self.days(from) {
-            if !work {
+            let begin = self.work_starts(start, end);
+            if !work || begin + WORKDAY <= from {
                 continue;
             }
-            let begin = start.max(from);
-            if left <= end - begin {
-                return begin + left;
+            let at = begin.max(from);
+            let share = end - start;
+            let given = (begin + WORKDAY - at) * share / WORKDAY;
+            if left <= given {
+                return at + left * WORKDAY / share;
             }
-            left -= end - begin;
+            left -= given;
         }
         from.saturating_add(seconds)
     }
@@ -134,43 +212,54 @@ mod tests {
     use super::*;
 
     const DAY: u64 = 86_400;
+    const HOUR: u64 = 3600;
 
     fn at(time: &str) -> u64 {
         time.parse::<Timestamp>().unwrap().as_second() as u64
     }
 
+    fn utc(started: Option<&str>) -> Workdays {
+        Workdays {
+            zone: TimeZone::UTC,
+            started: started.map(at),
+        }
+    }
+
+    fn near(value: Option<f32>, expected: f32) -> bool {
+        value.is_some_and(|value| (value - expected).abs() < 1e-4)
+    }
+
     #[test]
-    fn weekends_do_not_count() {
-        let utc = Workdays(TimeZone::UTC);
+    fn a_workdays_share_is_spent_over_its_work_hours() {
+        let calendar = utc(None);
         let saturday = at("2026-11-07T00:00:00Z");
-        assert_eq!(utc.counted(saturday, saturday + 7 * DAY), 5 * DAY);
-        assert_eq!(utc.counted(saturday, saturday + 2 * DAY), 0);
+        assert_eq!(calendar.counted(saturday, saturday + 7 * DAY), 5 * DAY);
+        assert_eq!(calendar.counted(saturday, saturday + 2 * DAY), 0);
         let friday_noon = at("2026-11-13T12:00:00Z");
         assert_eq!(
-            utc.after(friday_noon, DAY),
+            calendar.after(friday_noon, DAY),
             at("2026-11-16T12:00:00Z"),
-            "half of Friday, then half of Monday"
+            "Friday's last five hours of work, then Monday's first three"
         );
     }
 
     #[test]
-    fn a_week_spent_on_workdays_is_paced_by_them() {
+    fn a_week_spent_on_workdays_is_paced_by_their_work_hours() {
         let saturday = at("2026-11-07T00:00:00Z");
         let window = QuotaWindow {
             used: 0.25,
             resets_at: saturday + 7 * DAY,
         };
         let monday_noon = at("2026-11-09T12:00:00Z");
-        let workdays = window.standing_by(7 * DAY, monday_noon, &Workdays(TimeZone::UTC));
-        assert_eq!(
-            workdays.even,
-            Some(0.2),
-            "Monday's whole share, one workday of five"
+        let workdays = window.standing_by(7 * DAY, monday_noon, &utc(None));
+        assert!(
+            near(workdays.even, 0.075),
+            "three hours of Monday's eight, of five days"
         );
         assert_eq!(
             workdays.out_in,
-            Some(DAY / 2 + 3 * DAY),
-            "a quarter on Monday: the rest by the end of Thursday"
+            Some(25 * HOUR),
+            "a quarter by noon on Monday: the rest by 1pm on Tuesday"
         );
         let every_day = window.standing(7 * DAY, monday_noon);
         assert!(every_day.even.unwrap() > 0.35);
@@ -178,22 +267,46 @@ mod tests {
     }
 
     #[test]
-    fn a_window_begun_this_afternoon_allows_todays_whole_share() {
+    fn work_starts_when_the_day_did_and_the_other_days_at_that_time() {
         let tuesday_afternoon = at("2026-11-10T13:00:00Z");
         let window = QuotaWindow {
             used: 0.17,
             resets_at: tuesday_afternoon + 7 * DAY,
         };
-        let evening = at("2026-11-10T20:00:00Z");
-        let workdays = window.standing_by(7 * DAY, evening, &Workdays(TimeZone::UTC));
-        assert_eq!(workdays.even, Some(0.2));
-        assert_eq!(workdays.out_in, None, "a day's share a day lasts the week");
-        let next_monday = at("2026-11-16T09:00:00Z");
-        let late = QuotaWindow {
+        let started = Some("2026-11-10T10:30:00Z");
+        let noon = window.standing_by(7 * DAY, at("2026-11-10T14:30:00Z"), &utc(started));
+        assert!(
+            near(noon.even, 0.1),
+            "half of Tuesday's share, four hours in"
+        );
+        let evening = window.standing_by(7 * DAY, at("2026-11-10T20:00:00Z"), &utc(started));
+        assert!(
+            near(evening.even, 0.2),
+            "the whole day's share eight hours in"
+        );
+        assert_eq!(evening.out_in, None, "a day's share a day lasts the week");
+        let next_monday = QuotaWindow {
             used: 0.5,
             ..window
         }
-        .standing_by(7 * DAY, next_monday, &Workdays(TimeZone::UTC));
-        assert_eq!(late.even, Some(1.0), "Tuesday to Monday: all five shares");
+        .standing_by(7 * DAY, at("2026-11-16T12:30:00Z"), &utc(started));
+        assert!(
+            near(next_monday.even, 0.85),
+            "four days, and two of Monday's eight hours from 10:30"
+        );
+    }
+
+    #[test]
+    fn a_day_begins_at_the_first_activity_after_four() {
+        let zone = TimeZone::UTC;
+        let today = at("2026-11-10T09:00:00Z");
+        assert!(begins_day(None, today, &zone));
+        assert!(begins_day(Some(at("2026-11-09T09:00:00Z")), today, &zone));
+        assert!(!begins_day(Some(at("2026-11-10T08:00:00Z")), today, &zone));
+        let night = at("2026-11-11T01:30:00Z");
+        assert!(
+            !begins_day(Some(at("2026-11-10T09:00:00Z")), night, &zone),
+            "still Tuesday's night"
+        );
     }
 }

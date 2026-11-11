@@ -1151,6 +1151,7 @@ dependencies = [
  "axum",
  "claudo-core",
  "claudo-protocol",
+ "claudo-transport",
  "futures-util",
  "serde_json",
  "tokio",
