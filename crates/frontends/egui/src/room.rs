@@ -458,7 +458,27 @@ impl Room {
             for placed in island.placed.iter().rev() {
                 let here = at[placed.node.id.as_str()];
                 let radius = scale * if placed.depth == 0 { AGENT } else { CHILD };
-                body(&painter, &visuals, placed.node, here, radius, now, scale);
+                match placed.depth {
+                    0 => body(&painter, &visuals, placed.node, here, radius, now, scale),
+                    _ => {
+                        let siblings = island
+                            .placed
+                            .iter()
+                            .filter(|other| other.parent == placed.parent)
+                            .count();
+                        let label = placed.depth == 1 && siblings <= LABELLED;
+                        started_body(
+                            &painter,
+                            &visuals,
+                            placed.node,
+                            here,
+                            radius,
+                            now,
+                            scale,
+                            label,
+                        );
+                    }
+                }
                 if self.selected.as_ref() == Some(&placed.node.id) {
                     let ring = Stroke::new(2.5, visuals.selection.stroke.color);
                     painter.circle_stroke(here, radius + 6.0 * scale, ring);
@@ -529,11 +549,14 @@ const TILE_MARGIN: f32 = 14.0;
 const TILE_GAP: f32 = 12.0;
 
 const AGENT: f32 = 17.0;
-const CHILD: f32 = 6.0;
+const CHILD: f32 = 7.5;
 /// How far an agent's caption reaches to either side.
 const CAPTION_REACH: f32 = 88.0;
-/// Under an agent: its name on up to two rows, what it is doing, and its badges.
-const CAPTION: f32 = 70.0;
+/// Under an agent: its name on up to two rows, what it is doing, its badges, and what it
+/// started.
+const CAPTION: f32 = 84.0;
+/// An agent that started at most this many has each one named on the map.
+const LABELLED: usize = 3;
 const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
 /// Above an agent that started nothing.
 const HEADROOM: f32 = 10.0;
@@ -754,7 +777,8 @@ fn edge(
     now: f64,
     scale: f32,
 ) {
-    let tint = color(visuals, node.state);
+    let _ = visuals;
+    let tint = made_by(node);
     let bend = (to - from).rot90().normalized() * 10.0 * scale;
     let curve = QuadraticBezierShape::from_points_stroke(
         [from, from + (to - from) / 2.0 + bend, to],
@@ -837,7 +861,7 @@ fn caption(
     painter: &egui::Painter,
     visuals: &egui::Visuals,
     node: &Node,
-    started: &str,
+    started: &[(String, Color32)],
     at: Pos2,
     scale: f32,
 ) {
@@ -864,17 +888,34 @@ fn caption(
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
-    let mut badges = badges(node);
-    if !started.is_empty() {
-        if !badges.is_empty() {
-            badges.push_str("  ·  ");
-        }
-        badges.push_str(started);
-    }
+    let badges = badges(node);
     if !badges.is_empty() {
         let tint = visuals.text_color();
         let badges = lines(painter, &badges, 10.0 * scale, tint, 1, scale);
         painter.galley(below + vec2(0.0, 15.0 * scale), badges, tint);
+    }
+    if !started.is_empty() {
+        let mut job = egui::text::LayoutJob::default();
+        for (i, (text, tint)) in started.iter().enumerate() {
+            if i > 0 {
+                let format = egui::TextFormat::simple(
+                    FontId::proportional(10.5 * scale),
+                    visuals.weak_text_color(),
+                );
+                job.append("  ·  ", 0.0, format);
+            }
+            let format = egui::TextFormat::simple(FontId::proportional(10.5 * scale), *tint);
+            job.append(text, 0.0, format);
+        }
+        job.wrap.max_width = 2.0 * CAPTION_REACH * scale;
+        job.wrap.max_rows = 1;
+        job.halign = egui::Align::Center;
+        let started = painter.layout_job(job);
+        painter.galley(
+            below + vec2(0.0, 29.0 * scale),
+            started,
+            visuals.text_color(),
+        );
     }
 }
 
@@ -895,20 +936,110 @@ fn badges(node: &Node) -> String {
         .join("  ·  ")
 }
 
-/// What an agent started, counted by kind: "2 Codex reviews  ·  1 dibs job".
-fn started<'a>(children: impl Iterator<Item = &'a Node>) -> String {
-    let mut counted: BTreeMap<String, usize> = BTreeMap::new();
+/// What an agent started, counted by kind and by whether it runs, each in its kind's
+/// colour: "1 subagent running", "2 Codex reviews waiting".
+fn started<'a>(children: impl Iterator<Item = &'a Node>) -> Vec<(String, Color32)> {
+    let mut counted: BTreeMap<(String, &str), (usize, Color32)> = BTreeMap::new();
     for child in children {
-        *counted.entry(kind(child)).or_default() += 1;
+        let what = match &child.kind {
+            Some(NodeKind::Subagent) if child.provider != Some(Provider::Codex) => {
+                "subagent".to_string()
+            }
+            _ => kind(child),
+        };
+        let how = match child.state {
+            Some(NodeState::Working) => "running",
+            Some(NodeState::Failed) => "failed",
+            Some(NodeState::Done) => "done",
+            _ => "waiting",
+        };
+        counted.entry((what, how)).or_insert((0, made_by(child))).0 += 1;
     }
     counted
         .into_iter()
-        .map(|(kind, count)| match count {
-            1 => format!("1 {kind}"),
-            _ => format!("{count} {kind}s"),
+        .map(|((what, how), (count, tint))| match count {
+            1 => (format!("1 {what} {how}"), tint),
+            _ => (format!("{count} {what}s {how}"), tint),
         })
-        .collect::<Vec<_>>()
-        .join("  ·  ")
+        .collect()
+}
+
+/// The colour of what an agent started, by what runs it: a Claude subagent, a Codex run or
+/// reviewer, a dibs job.
+fn made_by(node: &Node) -> Color32 {
+    if dibs_job(node) {
+        Color32::from_rgb(175, 125, 245)
+    } else if node.provider == Some(Provider::Codex) {
+        Color32::from_rgb(70, 150, 245)
+    } else {
+        Color32::from_rgb(225, 125, 85)
+    }
+}
+
+/// Something an agent started: its kind's shape and colour, filled with a turning arc
+/// around it while it runs, an outline while it waits, and outlined red once it failed.
+#[allow(clippy::too_many_arguments)]
+fn started_body(
+    painter: &egui::Painter,
+    visuals: &egui::Visuals,
+    node: &Node,
+    at: Pos2,
+    radius: f32,
+    now: f64,
+    scale: f32,
+    label: bool,
+) {
+    let tint = made_by(node);
+    let running = node.state == Some(NodeState::Working);
+    let (fill, rim) = match node.state {
+        Some(NodeState::Working) => (tint, Stroke::new(1.5, visuals.extreme_bg_color)),
+        Some(NodeState::Failed) => (
+            visuals.extreme_bg_color,
+            Stroke::new(2.0, visuals.error_fg_color),
+        ),
+        _ => (visuals.extreme_bg_color, Stroke::new(2.0, tint)),
+    };
+    if dibs_job(node) {
+        let reach = radius * 1.3;
+        let corners = [
+            vec2(0.0, -reach),
+            vec2(reach, 0.0),
+            vec2(0.0, reach),
+            vec2(-reach, 0.0),
+        ];
+        let diamond = corners.map(|corner| at + corner).to_vec();
+        painter.add(egui::Shape::convex_polygon(diamond, fill, rim));
+    } else if node.provider == Some(Provider::Codex) {
+        let square = egui::Rect::from_center_size(at, Vec2::splat(radius * 1.8));
+        painter.rect_filled(square, radius * 0.35, fill);
+        painter.rect_stroke(square, radius * 0.35, rim, egui::StrokeKind::Outside);
+    } else {
+        painter.circle_filled(at, radius, fill);
+        painter.circle_stroke(at, radius, rim);
+    }
+    if running {
+        let turn = (now * 1.6 + phase(&node.id)) as f32 * 2.0 * PI;
+        let reach = radius + 4.0 * scale;
+        let arc: Vec<Pos2> = (0..=16)
+            .map(|i| turn + i as f32 / 16.0 * PI * 1.2)
+            .map(|angle| at + Vec2::angled(angle) * reach)
+            .collect();
+        painter.add(egui::Shape::line(arc, Stroke::new(2.0 * scale, tint)));
+    }
+    if label {
+        let word = match &node.kind {
+            _ if dibs_job(node) => "dibs",
+            Some(NodeKind::Run(kind)) => kind.as_str(),
+            _ => "subagent",
+        };
+        painter.text(
+            at - vec2(0.0, radius + 6.0 * scale),
+            Align2::CENTER_BOTTOM,
+            word,
+            FontId::proportional(9.5 * scale),
+            tint,
+        );
+    }
 }
 
 /// A pull request as the page shows it.
@@ -1105,7 +1236,28 @@ fn legend(ui: &mut egui::Ui) {
         ui.add_space(6.0);
     }
     ui.add_space(10.0);
-    ui.weak("round: Claude, square: Codex, diamond: dibs job, small: what an agent started");
+    ui.weak("round: Claude, square: Codex, diamond: dibs job.");
+    ui.add_space(6.0);
+    for (word, tint) in [
+        ("Claude subagent", made_by(&Node::default())),
+        (
+            "Codex run",
+            made_by(&Node {
+                provider: Some(Provider::Codex),
+                ..Node::default()
+            }),
+        ),
+        (
+            "dibs job",
+            made_by(&Node {
+                kind: Some(NodeKind::Run("dibs".to_string())),
+                ..Node::default()
+            }),
+        ),
+    ] {
+        ui.label(RichText::new(word).color(tint));
+    }
+    ui.weak("around an agent: filled and turning while it runs, hollow while it waits.");
     ui.add_space(10.0);
     ui.weak("click one for details");
 }
@@ -1367,7 +1519,31 @@ mod tests {
         assert_eq!(kind(&review), "Codex review");
         assert_eq!(kind(&reviewer), "Codex subagent");
         assert_eq!(kind(&job), "dibs job");
-        let started = started([&review, &review, &job].into_iter());
-        assert_eq!(started, "2 Codex reviews  ·  1 dibs job");
+        let waiting = Node {
+            state: Some(NodeState::Idle),
+            ..review.clone()
+        };
+        let running = Node {
+            state: Some(NodeState::Working),
+            ..job.clone()
+        };
+        let subagent = Node {
+            kind: Some(NodeKind::Subagent),
+            provider: Some(Provider::Claude),
+            state: Some(NodeState::Working),
+            ..node("c", None, None)
+        };
+        let started: Vec<String> = started([&waiting, &waiting, &running, &subagent].into_iter())
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(
+            started,
+            [
+                "2 Codex reviews waiting",
+                "1 dibs job running",
+                "1 subagent running"
+            ]
+        );
     }
 }
