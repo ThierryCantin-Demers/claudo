@@ -137,6 +137,7 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
         state: Some(state),
         repo: text("/repo").map(str::to_string),
         machine: machine.clone(),
+        note: None,
     }];
     let subagents = meta.get("subagents").and_then(Value::as_array);
     for (i, subagent) in subagents.into_iter().flatten().enumerate() {
@@ -154,6 +155,7 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
             state: Some(state),
             repo: None,
             machine: machine.clone(),
+            note: None,
         });
     }
     nodes

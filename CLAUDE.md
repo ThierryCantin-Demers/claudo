@@ -486,6 +486,11 @@ wrote it.
   its Codex sub-agents (`subagents[].path`) under it. Polled, and a `meta.json` is read again
   only when its time changes. A run shows while it runs and for 30 minutes after; one marked
   running but untouched for 12 hours died quietly and is dropped.
+- **Board** (`core/src/board.rs`): `$BOARD_DIR/sessions/<session>.jsonl`, one note per line,
+  the last standing, as the `note` of `session:<id>`. It joins as a collector of notes
+  (`Hub::notes`), which only adds to nodes others give, since a note outlives its agent. A
+  note in state `waiting` asks a person for something, so the room shows its agent `Blocked`
+  until herdr says it works again: herdr calls an agent that ended its turn done.
 
 ## Workflow
 

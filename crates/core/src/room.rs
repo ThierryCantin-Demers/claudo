@@ -1,11 +1,12 @@
 //! The control room's graph. Each collector replaces its own nodes whenever what it watches
 //! changes; the room merges them by id, the fields of the collector that joined first
-//! first, and tells every client only what changed.
+//! first, and tells every client only what changed. A collector of notes only adds to the
+//! nodes others give: a note outlives the agent it is about.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Node, NodeId, RoomEvent, ServerEvent};
+use claudo_protocol::{Node, NodeId, NodeState, RoomEvent, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clients::{ClientId, Clients};
@@ -13,7 +14,7 @@ use crate::clients::{ClientId, Clients};
 #[derive(Default)]
 pub struct Room {
     /// Each collector's nodes, in the order collectors joined.
-    sources: Vec<(&'static str, Vec<Node>)>,
+    sources: Vec<Source>,
     shown: BTreeMap<NodeId, Node>,
     clients: Clients,
 }
@@ -30,10 +31,10 @@ impl Room {
         self.clients.remove(client);
     }
 
-    fn replace(&mut self, source: &'static str, nodes: Vec<Node>) {
-        match self.sources.iter_mut().find(|(name, _)| *name == source) {
-            Some((_, known)) => *known = nodes,
-            None => self.sources.push((source, nodes)),
+    fn replace(&mut self, name: &'static str, adds: bool, nodes: Vec<Node>) {
+        match self.sources.iter_mut().find(|source| source.name == name) {
+            Some(source) => source.nodes = nodes,
+            None => self.sources.push(Source { name, adds, nodes }),
         }
         let next = merged(&self.sources);
         for id in self.shown.keys().filter(|id| !next.contains_key(*id)) {
@@ -50,14 +51,41 @@ impl Room {
     }
 }
 
-fn merged(sources: &[(&'static str, Vec<Node>)]) -> BTreeMap<NodeId, Node> {
+struct Source {
+    name: &'static str,
+    /// Whether its nodes join the room, rather than only add to the ones others give.
+    adds: bool,
+    nodes: Vec<Node>,
+}
+
+fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
     let mut nodes: BTreeMap<NodeId, Node> = BTreeMap::new();
-    for node in sources.iter().flat_map(|(_, nodes)| nodes) {
+    for node in sources
+        .iter()
+        .filter(|source| source.adds)
+        .flat_map(|source| &source.nodes)
+    {
         match nodes.get_mut(&node.id) {
             Some(known) => known.fill(node.clone()),
             None => {
                 nodes.insert(node.id.clone(), node.clone());
             }
+        }
+    }
+    for node in sources
+        .iter()
+        .filter(|source| !source.adds)
+        .flat_map(|source| &source.nodes)
+    {
+        if let Some(known) = nodes.get_mut(&node.id) {
+            known.fill(node.clone());
+        }
+    }
+    // herdr calls an agent that ended its turn done, though its note may ask for an answer.
+    for node in nodes.values_mut() {
+        let asks = node.note.as_ref().is_some_and(|note| note.waiting);
+        if asks && node.state != Some(NodeState::Working) {
+            node.state = Some(NodeState::Blocked);
         }
     }
     nodes
@@ -68,23 +96,40 @@ fn merged(sources: &[(&'static str, Vec<Node>)]) -> BTreeMap<NodeId, Node> {
 pub struct Feed {
     room: Arc<Mutex<Room>>,
     source: &'static str,
+    adds: bool,
 }
 
 impl Feed {
     pub fn new(room: Arc<Mutex<Room>>, source: &'static str) -> Self {
-        Self { room, source }
+        Self {
+            room,
+            source,
+            adds: true,
+        }
+    }
+
+    /// A collector whose nodes only add to the ones other collectors give.
+    pub fn notes(room: Arc<Mutex<Room>>, source: &'static str) -> Self {
+        Self {
+            room,
+            source,
+            adds: false,
+        }
     }
 
     /// Everything this collector sees now, in place of what it saw before.
     pub fn replace(&self, nodes: Vec<Node>) {
-        self.room.lock().unwrap().replace(self.source, nodes);
+        self.room
+            .lock()
+            .unwrap()
+            .replace(self.source, self.adds, nodes);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claudo_protocol::NodeState;
+    use claudo_protocol::Note;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     fn node(id: &str) -> Node {
@@ -157,5 +202,57 @@ mod tests {
             Some(NodeState::Blocked),
             "the first collector's wins"
         );
+    }
+
+    fn noted(id: &str, waiting: bool) -> Node {
+        Node {
+            note: Some(Note {
+                waiting,
+                text: "which signature?".into(),
+            }),
+            ..node(id)
+        }
+    }
+
+    #[test]
+    fn notes_join_only_the_nodes_others_give() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        let board = Feed::notes(room.clone(), "board");
+        board.replace(vec![noted("a", false), noted("gone", false)]);
+        Feed::new(room.clone(), "herdr").replace(vec![node("a")]);
+        let shown = &room.lock().unwrap().shown;
+        assert_eq!(shown.keys().collect::<Vec<_>>(), ["a"]);
+        assert!(
+            shown["a"].note.is_some(),
+            "a note from before its agent joined"
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_note_asks_for_an_answer_waits_until_it_works_again() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        Feed::new(room.clone(), "herdr").replace(vec![
+            Node {
+                state: Some(NodeState::Done),
+                ..node("asks")
+            },
+            Node {
+                state: Some(NodeState::Working),
+                ..node("answered")
+            },
+            Node {
+                state: Some(NodeState::Done),
+                ..node("finished")
+            },
+        ]);
+        Feed::notes(room.clone(), "board").replace(vec![
+            noted("asks", true),
+            noted("answered", true),
+            noted("finished", false),
+        ]);
+        let shown = &room.lock().unwrap().shown;
+        assert_eq!(shown["asks"].state, Some(NodeState::Blocked));
+        assert_eq!(shown["answered"].state, Some(NodeState::Working));
+        assert_eq!(shown["finished"].state, Some(NodeState::Done));
     }
 }

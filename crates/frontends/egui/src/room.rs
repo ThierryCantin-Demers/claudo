@@ -126,6 +126,8 @@ impl Room {
             .auto_shrink(false)
             .show(ui, |ui| {
                 let top = ui.cursor().top();
+                // Measured before anything is drawn: what is drawn wider widens the page after.
+                let width = ui.available_width();
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
                     self.summary(ui);
@@ -133,9 +135,9 @@ impl Room {
                     legend(ui);
                 });
                 ui.add_space(8.0);
-                self.tiles(ui, now);
+                self.tiles(ui, width, now);
                 let left = screen - (ui.cursor().top() - top);
-                self.map(ui, left, now);
+                self.map(ui, width, left, now);
             });
     }
 
@@ -175,23 +177,23 @@ impl Room {
         }
     }
 
-    fn tiles(&self, ui: &mut egui::Ui, now: f64) {
-        let mut waiting = self.waiting().peekable();
-        if waiting.peek().is_none() {
-            return;
+    fn tiles(&self, ui: &mut egui::Ui, width: f32, now: f64) {
+        let waiting: Vec<&Node> = self.waiting().collect();
+        let outer = TILE_WIDTH + 2.0 * TILE_MARGIN + TILE_GAP;
+        let across = (((width + TILE_GAP) / outer).floor() as usize).max(1);
+        for row in waiting.chunks(across) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = TILE_GAP;
+                for node in row {
+                    tile(ui, node, self.held(&node.id, now), now);
+                }
+            });
+            ui.add_space(TILE_GAP);
         }
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
-            for node in waiting {
-                tile(ui, node, self.held(&node.id, now), now);
-            }
-        });
-        ui.add_space(12.0);
     }
 
     /// `screen` is the height left on screen, which the map fits into while it stays readable.
-    fn map(&self, ui: &mut egui::Ui, screen: f32, now: f64) {
-        let width = ui.available_width();
+    fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) {
         let clusters = self.clusters();
         let scale = fit(&clusters, width, screen);
         let map = Map::lay_out(&clusters, width / scale);
@@ -268,6 +270,10 @@ impl Room {
         }
     }
 }
+
+const TILE_WIDTH: f32 = 250.0;
+const TILE_MARGIN: f32 = 14.0;
+const TILE_GAP: f32 = 12.0;
 
 const AGENT: f32 = 17.0;
 const CHILD: f32 = 6.0;
@@ -616,9 +622,9 @@ fn tile(ui: &mut egui::Ui, node: &Node, held: Option<f64>, now: f64) {
         .fill(warn.gamma_multiply(0.08 + 0.04 * breath))
         .stroke(Stroke::new(1.5, warn.gamma_multiply(0.6 + 0.4 * breath)))
         .corner_radius(12.0)
-        .inner_margin(14.0)
+        .inner_margin(TILE_MARGIN)
         .show(ui, |ui| {
-            ui.set_width(250.0);
+            ui.set_width(TILE_WIDTH);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     dot(ui, warn);
@@ -633,8 +639,12 @@ fn tile(ui: &mut egui::Ui, node: &Node, held: Option<f64>, now: f64) {
                     place.push_str(&format!(" in {}", short(repo)));
                 }
                 ui.label(RichText::new(place).weak());
-                if let Some(doing) = &node.doing {
-                    ui.add(egui::Label::new(doing.as_str()).wrap());
+                let note = node.note.as_ref().map(|note| note.text.as_str());
+                let reason = note
+                    .filter(|text| !text.is_empty())
+                    .or(node.doing.as_deref());
+                if let Some(reason) = reason {
+                    ui.add(egui::Label::new(reason).wrap());
                 }
                 if let Some(held) = held {
                     ui.label(RichText::new(format!("waiting {}", ago(held))).color(warn));
@@ -656,6 +666,9 @@ fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
     ui.label(line);
     if let Some(doing) = &node.doing {
         ui.label(RichText::new(doing).weak());
+    }
+    if let Some(note) = node.note.as_ref().filter(|note| !note.text.is_empty()) {
+        ui.label(format!("noted: {}", note.text));
     }
     if let Some(repo) = &node.repo {
         ui.label(RichText::new(repo).weak().monospace());

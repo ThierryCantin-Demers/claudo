@@ -544,6 +544,16 @@ pub struct Node {
     /// The hostname it runs on.
     #[serde(default)]
     pub machine: Option<String>,
+    /// What its agent last noted about itself on the board.
+    #[serde(default)]
+    pub note: Option<Note>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    /// It needs a person: an answer, a decision, a review.
+    pub waiting: bool,
+    pub text: String,
 }
 
 impl Node {
@@ -556,6 +566,7 @@ impl Node {
         self.state = self.state.take().or(other.state);
         self.repo = self.repo.take().or(other.repo);
         self.machine = self.machine.take().or(other.machine);
+        self.note = self.note.take().or(other.note);
     }
 }
 

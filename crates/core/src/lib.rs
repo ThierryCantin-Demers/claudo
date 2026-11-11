@@ -2,6 +2,7 @@
 //! startup detection; the engine (M1) and session store (M2) attach here.
 
 pub mod backend;
+pub mod board;
 pub mod clients;
 pub mod debug;
 pub mod engine;

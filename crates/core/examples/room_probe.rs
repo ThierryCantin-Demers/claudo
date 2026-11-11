@@ -1,6 +1,6 @@
-//! Prints the control room as the herdr and runs collectors fill it: the nodes it starts
+//! Prints the control room as the herdr, runs and board collectors fill it: the nodes it starts
 //! with, then each change for as many seconds as the first argument says (30 by default).
-//! Reads herdr's socket and the `agent-runs` folders; runs no turn.
+//! Reads herdr's socket, the `agent-runs` folders and the board; runs no turn.
 //!   cargo run -p claudo-core --example room_probe -- 60
 
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,7 @@ fn main() {
     let room = Arc::new(Mutex::new(Room::default()));
     claudo_core::herdr::spawn(Feed::new(room.clone(), "herdr"));
     claudo_core::runs::spawn(Feed::new(room.clone(), "runs"));
+    claudo_core::board::spawn(Feed::notes(room.clone(), "board"));
     let (events, mut heard) = unbounded_channel();
     room.lock().unwrap().connect(1, events);
     std::thread::spawn(move || {

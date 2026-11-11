@@ -44,6 +44,7 @@ async fn main() {
     let hub = Hub::spawn();
     claudo_core::herdr::spawn(hub.feed("herdr"));
     claudo_core::runs::spawn(hub.feed("runs"));
+    claudo_core::board::spawn(hub.notes("board"));
     let state = AppState {
         token: Arc::new(token.clone()),
         hub,

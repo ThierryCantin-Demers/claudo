@@ -171,6 +171,7 @@ fn nodes(snapshot: &Value, machine: &str, repos: &mut Repos) -> Vec<Node> {
                 repo: text("cwd").and_then(|cwd| repos.root(cwd)),
                 machine: Some(machine.to_string()),
                 parent: None,
+                note: None,
             })
         })
         .collect()

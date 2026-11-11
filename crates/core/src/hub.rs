@@ -56,6 +56,11 @@ impl Hub {
         Feed::new(self.room.clone(), source)
     }
 
+    /// What the collector named `source` adds to the nodes the others give.
+    pub fn notes(&self, source: &'static str) -> Feed {
+        Feed::notes(self.room.clone(), source)
+    }
+
     /// A new client, which hears at once what runs, and leaves when dropped.
     pub fn connect(&self, events: UnboundedSender<ServerEvent>) -> Client {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
