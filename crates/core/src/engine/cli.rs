@@ -2037,6 +2037,38 @@ pub(crate) fn task_notification(text: &str) -> Option<TaskEnd> {
     })
 }
 
+/// The Agent calls a transcript line makes, by id.
+pub(crate) fn agent_calls(v: &Value) -> Vec<String> {
+    blocks_of(v, "tool_use")
+        .filter(|block| {
+            matches!(
+                block.get("name").and_then(Value::as_str),
+                Some("Agent" | "Task")
+            )
+        })
+        .filter_map(|block| Some(block.get("id")?.as_str()?.to_string()))
+        .collect()
+}
+
+/// The call and the task a transcript line says ended in the background: the CLI's
+/// `<task-notification>` prompt, as a user line or a message queued into a turn.
+pub(crate) fn notified_end(v: &Value) -> Vec<String> {
+    let text = v
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/attachment/prompt").and_then(Value::as_str))
+        .map(str::trim_start)
+        .filter(|text| text.starts_with("<task-notification>"));
+    let Some(text) = text else {
+        return Vec::new();
+    };
+    ["tool-use-id", "task-id"]
+        .into_iter()
+        .filter_map(|tag| xml_tag(text, tag))
+        .map(str::to_string)
+        .collect()
+}
+
 fn xml_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let start = text.find(&format!("<{name}>"))? + name.len() + 2;
     let end = start + text[start..].find(&format!("</{name}>"))?;

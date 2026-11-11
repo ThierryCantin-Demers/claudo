@@ -21,7 +21,10 @@ fn main() {
     claudo_core::runs::spawn(Feed::new(room.clone(), "runs"));
     claudo_core::board::spawn(Feed::notes(room.clone(), "board"));
     claudo_core::dibs::spawn(Feed::new(room.clone(), "dibs"));
-    claudo_core::transcripts::spawn(Feed::notes(room.clone(), "transcripts"));
+    claudo_core::transcripts::spawn(
+        Feed::notes(room.clone(), "transcripts"),
+        Feed::new(room.clone(), "subagents"),
+    );
     let (events, mut heard) = unbounded_channel();
     room.lock().unwrap().connect(1, events);
     std::thread::spawn(move || {

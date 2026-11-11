@@ -539,7 +539,12 @@ wrote it.
   once from each transcript's start and then from where the last read stopped, kept to the
   ones `gh search prs --author @me --state open` lists (`core/src/github.rs`, every 3
   minutes). A run's node carries its `provider` from its `meta.json`, and so do its
-  sub-agents.
+  sub-agents. The same collector feeds the room each Claude subagent running now
+  (`subagent:<id>` under `session:<id>`, a regular feed, since a note collector only adds to
+  nodes): one from `<session>/subagents/agent-<id>.meta.json` whose transcript changed in the
+  last hour, until its Agent call's result (one in the background answers "Async agent
+  launched" at once) or a `<task-notification>` naming its call or task id, and again once
+  its own transcript moves on after that end, as when it is sent a message.
 - **Machines** (beside the agents on the page's Room tab, as tiles the person drags into a
   split or tabs, `egui_tiles`, laid out as eframe keeps it): the dibs collector also sends every
   machine's status, and why one could not answer, as `ServerEvent::Dibs`, which the page draws

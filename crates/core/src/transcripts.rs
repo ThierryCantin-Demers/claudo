@@ -1,6 +1,7 @@
 //! How full each Claude agent's context is, from its transcript's last request of the main
 //! agent, when the person last wrote to it, and which of the pull requests it opened are
 //! still open. A note on `session:<id>`, so only an agent another collector shows gets one.
+//! Also the subagents each one runs now, as nodes of their own under it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -8,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use claudo_protocol::{Node, PullRequest};
+use claudo_protocol::{Node, NodeKind, NodeState, Provider, PullRequest};
+use serde_json::Value;
 
 use crate::room::Feed;
 
@@ -25,8 +27,13 @@ const TAIL: u64 = 1 << 20;
 /// How often GitHub is asked which pull requests are still open.
 const GITHUB_POLL: Duration = Duration::from_secs(3 * 60);
 
-/// Reads the transcripts into `feed`, a collector of notes, for as long as the process runs.
-pub fn spawn(feed: Feed) {
+/// A subagent whose transcript has not changed for this long, with no end read, died with
+/// the agent that ran it.
+const SUBAGENT_STALE: Duration = Duration::from_secs(60 * 60);
+
+/// Reads the transcripts into `feed`, a collector of notes, and the subagents running now
+/// into `subagents`, for as long as the process runs.
+pub fn spawn(feed: Feed, subagents: Feed) {
     let Some(projects) = crate::sessions::claude_projects_dir() else {
         return;
     };
@@ -45,7 +52,9 @@ pub fn spawn(feed: Feed) {
         let mut transcripts = Transcripts::default();
         loop {
             let open = open.lock().unwrap().clone();
-            feed.replace(transcripts.scan(&projects, SystemTime::now(), &open));
+            let (notes, running) = transcripts.scan(&projects, SystemTime::now(), &open);
+            feed.replace(notes);
+            subagents.replace(running);
             std::thread::sleep(POLL);
         }
     });
@@ -64,7 +73,8 @@ struct Known {
     opened: Opened,
 }
 
-/// The pull requests a session opened, read from the start of its transcript on.
+/// The pull requests a session opened, and when its subagents ended, read from the start
+/// of its transcript on.
 #[derive(Default)]
 struct Opened {
     /// How far the transcript has been read, to the end of its last whole line.
@@ -72,6 +82,10 @@ struct Opened {
     /// `gh pr create` calls whose result has not been read yet.
     calls: HashSet<String>,
     links: BTreeSet<String>,
+    /// Agent calls whose subagent has not ended yet.
+    agents: HashSet<String>,
+    /// When each subagent ended, in Unix seconds, by its Agent call and by its task id.
+    ended: HashMap<String, u64>,
 }
 
 impl Opened {
@@ -104,6 +118,36 @@ impl Opened {
                     }
                 }
             }
+            if line.contains(r#""name":"Agent""#) || line.contains(r#""name":"Task""#) {
+                let Ok(line) = serde_json::from_str(line) else {
+                    continue;
+                };
+                self.agents.extend(crate::engine::cli::agent_calls(&line));
+            }
+            if line.contains("<task-notification>") {
+                let Ok(line) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let at = seconds(&line);
+                for id in crate::engine::cli::notified_end(&line) {
+                    self.agents.remove(&id);
+                    self.ended.extend(at.map(|at| (id, at)));
+                }
+            }
+            let answers_agent = || self.agents.iter().any(|id| line.contains(id.as_str()));
+            if line.contains("tool_result") && answers_agent() {
+                let Ok(line) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let at = seconds(&line);
+                for (id, output) in crate::engine::cli::call_results(&line) {
+                    // One in the background answers at once, and ends with a notification.
+                    if self.agents.contains(&id) && !output.starts_with("Async agent launched") {
+                        self.agents.remove(&id);
+                        self.ended.extend(at.map(|at| (id, at)));
+                    }
+                }
+            }
             if !self.calls.is_empty() && line.contains("/pull/") {
                 let Ok(line) = serde_json::from_str(line) else {
                     continue;
@@ -131,10 +175,11 @@ impl Transcripts {
         projects: &Path,
         now: SystemTime,
         open: &HashMap<String, PullRequest>,
-    ) -> Vec<Node> {
+    ) -> (Vec<Node>, Vec<Node>) {
         let mut read = HashMap::new();
         // A session that moved leaves a copy behind; the newest is the live one.
-        let mut sessions: HashMap<String, (SystemTime, Tail, Vec<PullRequest>)> = HashMap::new();
+        let mut sessions: HashMap<String, (SystemTime, Tail, Vec<PullRequest>, PathBuf)> =
+            HashMap::new();
         let files = std::fs::read_dir(projects)
             .into_iter()
             .flatten()
@@ -184,26 +229,102 @@ impl Transcripts {
             };
             let newest = sessions
                 .get(&session)
-                .is_none_or(|(at, _, _)| *at < written);
+                .is_none_or(|(at, _, _, _)| *at < written);
             if newest {
-                sessions.insert(session, (written, tail, prs));
+                sessions.insert(session, (written, tail, prs, path));
             }
         }
         self.read = read;
-        sessions
+        let mut running = Vec::new();
+        for (session, (_, _, _, path)) in &sessions {
+            let ended = &self.read[path].opened.ended;
+            running.extend(subagents(&path.with_extension(""), session, ended, now));
+        }
+        let notes = sessions
             .into_iter()
-            .filter(|(_, (_, tail, prs))| {
+            .filter(|(_, (_, tail, prs, _))| {
                 tail.context.is_some() || tail.answered.is_some() || !prs.is_empty()
             })
-            .map(|(session, (_, tail, prs))| Node {
+            .map(|(session, (_, tail, prs, _))| Node {
                 id: format!("session:{session}"),
                 context: tail.context,
                 answered: tail.answered,
                 prs,
                 ..Node::default()
             })
-            .collect()
+            .collect();
+        (notes, running)
     }
+}
+
+/// The subagents of a session that run now, from `<session>/subagents`: each one's
+/// `agent-<id>.jsonl`, and beside it the `.meta.json` naming its Agent call. One runs from
+/// its call until the transcript says it ended, and again once its own transcript moves on
+/// after that, as when it is sent a message.
+fn subagents(
+    folder: &Path,
+    session: &str,
+    ended: &HashMap<String, u64>,
+    now: SystemTime,
+) -> Vec<Node> {
+    let Ok(entries) = std::fs::read_dir(folder.join("subagents")) else {
+        return Vec::new();
+    };
+    let mut nodes = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(agent) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("agent-")?.strip_suffix(".jsonl"))
+        else {
+            continue;
+        };
+        let Ok(written) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if now.duration_since(written).unwrap_or_default() > SUBAGENT_STALE {
+            continue;
+        }
+        let meta: Value = std::fs::read(path.with_extension("meta.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let field = |key: &str| meta.get(key).and_then(Value::as_str);
+        let end = [Some(agent), field("toolUseId")]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| ended.get(id))
+            .max();
+        let written = written
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        // An end is timed to the second, and the subagent's last line comes just before it.
+        if end.is_some_and(|end| written <= end + 1) {
+            continue;
+        }
+        nodes.push(Node {
+            id: format!("subagent:{agent}"),
+            parent: Some(format!("session:{session}")),
+            kind: Some(NodeKind::Subagent),
+            name: field("description").map(str::to_string),
+            doing: field("agentType").map(str::to_string),
+            state: Some(NodeState::Working),
+            provider: Some(Provider::Claude),
+            ..Node::default()
+        });
+    }
+    nodes
+}
+
+/// A transcript line's time, in Unix seconds.
+fn seconds(line: &Value) -> Option<u64> {
+    let at = line
+        .get("timestamp")?
+        .as_str()?
+        .parse::<jiff::Timestamp>()
+        .ok()?;
+    u64::try_from(at.as_second()).ok()
 }
 
 /// The pull requests a `gh pr create` printed, leaving out the one it refused to open again
@@ -388,14 +509,7 @@ fn read_tail(path: &Path) -> Tail {
             .rev()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .find(crate::engine::cli::from_person)
-            .and_then(|line| {
-                let at = line
-                    .get("timestamp")?
-                    .as_str()?
-                    .parse::<jiff::Timestamp>()
-                    .ok()?;
-                u64::try_from(at.as_second()).ok()
-            }),
+            .and_then(|line| seconds(&line)),
     })
 }
 
@@ -444,7 +558,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"first"}}"#,
         )
         .unwrap();
-        let nodes = Transcripts::default().scan(&projects, SystemTime::now(), &HashMap::new());
+        let (nodes, _) = Transcripts::default().scan(&projects, SystemTime::now(), &HashMap::new());
         let shown: Vec<_> = nodes
             .iter()
             .map(|node| (node.id.as_str(), node.context))
@@ -458,6 +572,7 @@ mod tests {
         assert!(
             Transcripts::default()
                 .scan(&projects, later, &HashMap::new())
+                .0
                 .is_empty()
         );
         std::fs::remove_dir_all(projects).unwrap();
@@ -473,7 +588,10 @@ mod tests {
         std::fs::write(&path, format!("{request}\n")).unwrap();
         let mut transcripts = Transcripts::default();
         assert_eq!(
-            transcripts.scan(&projects, SystemTime::now(), &HashMap::new())[0].context,
+            transcripts
+                .scan(&projects, SystemTime::now(), &HashMap::new())
+                .0[0]
+                .context,
             Some(1007)
         );
         let result = format!(
@@ -483,7 +601,7 @@ mod tests {
         std::fs::write(&path, format!("{request}\n{result}\n")).unwrap();
         let later = SystemTime::now() + Duration::from_secs(1);
         assert_eq!(
-            transcripts.scan(&projects, later, &HashMap::new())[0].context,
+            transcripts.scan(&projects, later, &HashMap::new()).0[0].context,
             Some(1007)
         );
         std::fs::remove_dir_all(projects).unwrap();
@@ -502,7 +620,7 @@ mod tests {
         ]
         .join("\n");
         std::fs::write(projects.join("-src-alpha/s1.jsonl"), transcript).unwrap();
-        let nodes = Transcripts::default().scan(&projects, SystemTime::now(), &HashMap::new());
+        let (nodes, _) = Transcripts::default().scan(&projects, SystemTime::now(), &HashMap::new());
         let at = "2026-11-11T10:05:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(nodes[0].answered, Some(at.as_second() as u64));
         std::fs::remove_dir_all(projects).unwrap();
@@ -570,12 +688,95 @@ mod tests {
         .into_iter()
         .map(|pr| (pr.url.clone(), pr))
         .collect();
-        let nodes = Transcripts::default().scan(&projects, SystemTime::now(), &open);
+        let (nodes, _) = Transcripts::default().scan(&projects, SystemTime::now(), &open);
         let shown: Vec<_> = nodes[0].prs.iter().map(|pr| pr.number).collect();
         assert_eq!(
             shown,
             [42, 43, 44],
             "7 it only looked at or found already open, 9 it opened but is merged"
+        );
+        std::fs::remove_dir_all(projects).unwrap();
+    }
+
+    #[test]
+    fn a_subagent_shows_from_its_call_until_its_end() {
+        let projects =
+            std::env::temp_dir().join(format!("claudo-subagents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&projects);
+        let folder = projects.join("-src-alpha/s1/subagents");
+        std::fs::create_dir_all(&folder).unwrap();
+        let call = |id: &str| {
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": id, "name": "Agent", "input": {"prompt": "look"}}
+            ]}})
+            .to_string()
+        };
+        let result = |id: &str, output: &str, at: &str| {
+            serde_json::json!({"type": "user", "timestamp": at, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": id, "content": output}
+            ]}})
+            .to_string()
+        };
+        // Its end is timed after the files below are written, so it counts as the last word.
+        let later = "2099-01-01T00:00:00Z";
+        let notification = serde_json::json!({
+            "type": "user",
+            "timestamp": later,
+            "origin": {"kind": "task-notification"},
+            "message": {"content": "<task-notification>\n<task-id>quiet</task-id>\n<tool-use-id>c-quiet</tool-use-id>\n<status>completed</status>\n</task-notification>"},
+        })
+        .to_string();
+        let transcript = [
+            call("c-front"),
+            result("c-front", "It found three callers.", later),
+            call("c-back"),
+            result("c-back", "Async agent launched successfully.", later),
+            call("c-quiet"),
+            result("c-quiet", "Async agent launched successfully.", later),
+            notification,
+            call("c-again"),
+            result("c-again", "It answered.", "2020-01-01T00:00:00Z"),
+        ]
+        .join("\n")
+            + "\n";
+        std::fs::write(projects.join("-src-alpha/s1.jsonl"), transcript).unwrap();
+        for (agent, call) in [
+            ("front", "c-front"),
+            ("back", "c-back"),
+            ("quiet", "c-quiet"),
+            ("again", "c-again"),
+        ] {
+            std::fs::write(folder.join(format!("agent-{agent}.jsonl")), "{}\n").unwrap();
+            let meta = serde_json::json!({
+                "agentType": "general-purpose",
+                "description": format!("Look {agent}"),
+                "toolUseId": call,
+            });
+            std::fs::write(
+                folder.join(format!("agent-{agent}.meta.json")),
+                meta.to_string(),
+            )
+            .unwrap();
+        }
+        let (_, running) =
+            Transcripts::default().scan(&projects, SystemTime::now(), &HashMap::new());
+        let mut shown: Vec<_> = running
+            .iter()
+            .map(|node| (node.id.as_str(), node.name.as_deref().unwrap()))
+            .collect();
+        shown.sort();
+        assert_eq!(
+            shown,
+            [
+                ("subagent:again", "Look again"),
+                ("subagent:back", "Look back"),
+            ],
+            "front answered and quiet was notified; again moved on after it answered"
+        );
+        assert!(
+            running
+                .iter()
+                .all(|node| node.parent.as_deref() == Some("session:s1"))
         );
         std::fs::remove_dir_all(projects).unwrap();
     }

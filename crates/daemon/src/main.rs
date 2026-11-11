@@ -71,7 +71,7 @@ async fn serve() {
     if std::env::var("CLAUDO_DIBS").as_deref() != Ok("off") {
         claudo_core::dibs::spawn(hub.feed("dibs"));
     }
-    claudo_core::transcripts::spawn(hub.notes("transcripts"));
+    claudo_core::transcripts::spawn(hub.notes("transcripts"), hub.feed("subagents"));
     hub.serve(&machine_socket());
     let others = std::env::var("CLAUDO_MACHINES").unwrap_or_default();
     let others = others
