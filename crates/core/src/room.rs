@@ -159,13 +159,14 @@ fn merged(sources: &[&Source], passed_on: bool) -> BTreeMap<NodeId, Node> {
         }
     });
     // herdr calls an agent that ended its turn done, though its note may ask for an answer:
-    // until the person writes to it, when the note has gone stale unless written again.
+    // until the person writes to it, when the note has gone stale unless written again. Both
+    // times are whole seconds, so a message in the note's own second may have come first.
     for node in nodes.values_mut() {
         let asks = node.note.as_ref().is_some_and(|note| {
             let answered = node
                 .answered
                 .zip(note.at)
-                .is_some_and(|(answered, at)| answered >= at);
+                .is_some_and(|(answered, at)| answered > at);
             note.waiting && !answered
         });
         if asks && node.state != Some(NodeState::Working) {
@@ -439,16 +440,19 @@ mod tests {
         Feed::new(room.clone(), "herdr").replace(vec![
             done("unanswered", Some(50)),
             done("answered", Some(150)),
+            done("same-second", Some(100)),
             done("never", None),
         ]);
         Feed::notes(room.clone(), "board").replace(vec![
             noted("unanswered", true),
             noted("answered", true),
+            noted("same-second", true),
             noted("never", true),
         ]);
         let shown = &room.lock().unwrap().shown;
         assert_eq!(shown["unanswered"].state, Some(NodeState::Blocked));
         assert_eq!(shown["answered"].state, Some(NodeState::Done));
         assert_eq!(shown["never"].state, Some(NodeState::Blocked));
+        assert_eq!(shown["same-second"].state, Some(NodeState::Blocked));
     }
 }

@@ -217,7 +217,7 @@ fn runs_pr_create(command: &str) -> bool {
     };
     command.match_indices("gh pr create").any(|(at, found)| {
         let after = command[at + found.len()..].chars().next();
-        if after.is_some_and(|c| !c.is_whitespace()) {
+        if after.is_some_and(|c| !c.is_whitespace() && !";&|)`".contains(c)) {
             return false;
         }
         // A line break ends a command, so only spaces are trimmed.
@@ -234,37 +234,63 @@ fn runs_pr_create(command: &str) -> bool {
     })
 }
 
-/// The command with what its quotes and here-documents hold blanked out, since that is
-/// text it passes on rather than commands it runs.
+/// The command with its comments and what its quotes and here-documents hold blanked out,
+/// since that is text it passes on rather than commands it runs.
 fn unquoted(command: &str) -> String {
     let mut code = String::with_capacity(command.len());
-    let mut chars = command.chars().peekable();
+    commands(&mut command.chars().peekable(), None, &mut code);
+    code
+}
+
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Copies what runs into `code` up to `end`, the close of a substitution, outside quotes.
+fn commands(chars: &mut Chars, end: Option<char>, code: &mut String) {
     let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut depth = 0usize;
+    let mut word_start = true;
     while let Some(c) = chars.next() {
+        if Some(c) == end && depth == 0 {
+            code.push(c);
+            return;
+        }
         match c {
+            '(' => {
+                depth += 1;
+                code.push(c);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                code.push(c);
+            }
             '\\' => {
                 code.push('_');
                 if chars.next().is_some() {
                     code.push('_');
                 }
             }
-            '\'' | '"' => {
+            '\'' => {
                 code.push('_');
-                let mut escaped = false;
                 for inside in chars.by_ref() {
                     code.push('_');
-                    match inside {
-                        '\\' if c == '"' && !escaped => escaped = true,
-                        end if end == c && !escaped => break,
-                        _ => escaped = false,
+                    if inside == '\'' {
+                        break;
                     }
+                }
+            }
+            '"' => {
+                code.push('_');
+                quoted(chars, code);
+            }
+            '#' if word_start => {
+                while chars.next_if(|c| *c != '\n').is_some() {
+                    code.push('_');
                 }
             }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
                 code.push_str("<<");
-                if chars.peek() == Some(&'<') {
-                    chars.next();
+                if chars.next_if_eq(&'<').is_some() {
                     code.push('<');
                     continue;
                 }
@@ -301,8 +327,36 @@ fn unquoted(command: &str) -> String {
             }
             c => code.push(c),
         }
+        word_start = c.is_whitespace() || ";&|()`".contains(c);
     }
-    code
+}
+
+/// Blanks a double-quoted string up to its close, keeping the substitutions it runs.
+fn quoted(chars: &mut Chars, code: &mut String) {
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                code.push('_');
+                return;
+            }
+            '\\' => {
+                code.push('_');
+                if chars.next().is_some() {
+                    code.push('_');
+                }
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                code.push_str("$(");
+                commands(chars, Some(')'), code);
+            }
+            '`' => {
+                code.push('`');
+                commands(chars, Some('`'), code);
+            }
+            _ => code.push('_'),
+        }
+    }
 }
 
 fn read_tail(path: &Path) -> Tail {
@@ -511,5 +565,14 @@ mod tests {
         ));
         assert!(!runs_pr_create("python3 -c '\ngh pr create\n'"));
         assert!(runs_pr_create("echo \"it's \\\"done\\\"\"; gh pr create"));
+        assert!(!runs_pr_create(
+            "printf '%s\\n' https://github.com/acme/widgets/pull/42 # ; gh pr create --fill"
+        ));
+        assert!(runs_pr_create("echo a#b; gh pr create"));
+        assert!(runs_pr_create(
+            "url=\"$(gh pr create --fill)\"; echo \"$url\""
+        ));
+        assert!(runs_pr_create("echo \"`gh pr create`\""));
+        assert!(!runs_pr_create("echo \"$(echo 'gh pr create')\""));
     }
 }
