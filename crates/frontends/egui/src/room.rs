@@ -24,6 +24,9 @@ pub struct Room {
     sent: Vec<Command>,
     /// The node whose details are open beside the map.
     selected: Option<NodeId>,
+    /// What the last click on the map picked. A double-click acts on it, since opening its
+    /// details on the first click moves it from under the pointer.
+    clicked: Option<NodeId>,
     markdown: CommonMarkCache,
 }
 
@@ -97,7 +100,14 @@ impl Room {
     fn clusters(&self) -> Vec<Cluster<'_>> {
         let mut children: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         let mut roots: BTreeMap<Option<&str>, Vec<&Node>> = BTreeMap::new();
-        for node in self.nodes.values().filter(|node| !finished(node)) {
+        let shown = |node: &&Node| {
+            !finished(node)
+                || node
+                    .parent
+                    .as_ref()
+                    .is_none_or(|p| !self.nodes.contains_key(p))
+        };
+        for node in self.nodes.values().filter(shown) {
             match node.parent.as_deref() {
                 Some(parent) if self.nodes.contains_key(parent) => {
                     children.entry(parent).or_default().push(node)
@@ -167,13 +177,22 @@ impl Room {
                 let left = screen - (ui.cursor().top() - top);
                 match self.map(ui, width, left, now) {
                     Some(Picked::Select(id)) => {
+                        self.clicked = Some(id.clone());
                         self.selected = (self.selected.as_ref() != Some(&id)).then_some(id);
                     }
-                    Some(Picked::Focus(node)) => self.sent.push(Command::Act {
-                        node,
-                        action: Action::Focus,
-                        request: 0,
-                    }),
+                    Some(Picked::Again) => {
+                        let agent = self.clicked.clone().filter(|id| {
+                            let node = self.nodes.get(id);
+                            node.is_some_and(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
+                        });
+                        if let Some(node) = agent {
+                            self.sent.push(Command::Act {
+                                node,
+                                action: Action::Focus,
+                                request: 0,
+                            });
+                        }
+                    }
                     None => {}
                 }
             });
@@ -445,6 +464,7 @@ impl Room {
             }
         }
 
+        let again = response.double_clicked().then_some(Picked::Again);
         let pointer = response.hover_pos();
         let hovered = pointer.and_then(|pointer| {
             drawn
@@ -452,7 +472,9 @@ impl Room {
                 .filter(|(_, at, radius)| at.distance(pointer) <= radius + 6.0)
                 .min_by(|a, b| a.1.distance(pointer).total_cmp(&b.1.distance(pointer)))
         });
-        let &(node, at, radius) = hovered?;
+        let Some(&(node, at, radius)) = hovered else {
+            return again;
+        };
         painter.circle_stroke(
             at,
             radius + 4.0,
@@ -460,8 +482,8 @@ impl Room {
         );
         let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let picked = if agent && response.double_clicked() {
-            Some(Picked::Focus(node.id.clone()))
+        let picked = if again.is_some() {
+            again
         } else if response.clicked() {
             Some(Picked::Select(node.id.clone()))
         } else {
@@ -481,11 +503,13 @@ impl Room {
 
 enum Picked {
     Select(NodeId),
-    Focus(NodeId),
+    /// A double-click, on what the click before it picked.
+    Again,
 }
 
-/// A run that ended well, or what it fanned out to. The map leaves it out, since under its
-/// agent it reads as still going; a finished review stays for its digest.
+/// A run that ended well, or what it fanned out to. The map leaves it out under its agent,
+/// where it reads as still going; a finished review stays for its digest, which its agent's
+/// details show, or its own once its agent has left.
 fn finished(node: &Node) -> bool {
     matches!(node.kind, Some(NodeKind::Run(_) | NodeKind::Subagent))
         && node.state == Some(NodeState::Done)
@@ -1210,6 +1234,17 @@ mod tests {
             .collect();
         assert_eq!(shown, ["going"]);
         assert!(room.nodes.contains_key("done"));
+        room.apply(RoomEvent::Removed("a".to_string()));
+        let roots: Vec<_> = room.clusters()[0]
+            .trees
+            .iter()
+            .map(|tree| tree.node.id.as_str())
+            .collect();
+        assert_eq!(
+            roots,
+            ["done", "going"],
+            "its agent left, so it is the way to its digest"
+        );
     }
 
     #[test]

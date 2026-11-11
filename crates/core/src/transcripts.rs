@@ -110,7 +110,7 @@ impl Opened {
                 };
                 for (id, output) in crate::engine::cli::call_results(&line) {
                     if self.calls.remove(&id) {
-                        self.links.extend(crate::github::pull_links(&output));
+                        self.links.extend(opened(&output));
                     }
                 }
             }
@@ -204,6 +204,22 @@ impl Transcripts {
             })
             .collect()
     }
+}
+
+/// The pull requests a `gh pr create` printed, leaving out the one it refused to open again
+/// for the branch: `a pull request for branch "x" into branch "main" already exists:` and its
+/// link on the next line.
+fn opened(output: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let mut refused = false;
+    for line in output.lines() {
+        let names_existing = line.contains("already exists");
+        if !names_existing && !refused {
+            links.extend(crate::github::pull_links(line));
+        }
+        refused = names_existing;
+    }
+    links
 }
 
 /// Whether a shell command runs `gh pr create`, rather than only mentioning it, as a
@@ -516,6 +532,12 @@ mod tests {
             result("b", "https://github.com/acme/widgets/pull/7"),
             call("c", "cd ../gadgets && gh pr create --fill"),
             result("c", "https://github.com/acme/gadgets/pull/9"),
+            call("e", "gh pr create --fill && git checkout main"),
+            answer(
+                "e",
+                "https://github.com/acme/widgets/pull/43\nerror: pathspec 'main' did not match",
+                true,
+            ),
             call("d", "gh pr create --fill"),
             answer(
                 "d",
@@ -533,15 +555,19 @@ mod tests {
             repo: repo.into(),
             draft: false,
         };
-        let open: HashMap<_, _> = [pr("acme/widgets", 42), pr("acme/widgets", 7)]
-            .into_iter()
-            .map(|pr| (pr.url.clone(), pr))
-            .collect();
+        let open: HashMap<_, _> = [
+            pr("acme/widgets", 42),
+            pr("acme/widgets", 43),
+            pr("acme/widgets", 7),
+        ]
+        .into_iter()
+        .map(|pr| (pr.url.clone(), pr))
+        .collect();
         let nodes = Transcripts::default().scan(&projects, SystemTime::now(), &open);
         let shown: Vec<_> = nodes[0].prs.iter().map(|pr| pr.number).collect();
         assert_eq!(
             shown,
-            [42],
+            [42, 43],
             "7 it only looked at or found already open, 9 it opened but is merged"
         );
         std::fs::remove_dir_all(projects).unwrap();
