@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
 /// cannot read. The backend sends it first, in `Hello`.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -605,6 +605,8 @@ pub enum RoomEvent {
     /// A node appeared or changed, and is sent whole.
     Upserted(Node),
     Removed(NodeId),
+    /// An `Act` on the node failed, to the client that asked alone.
+    Failed { node: NodeId, detail: String },
 }
 
 /// The model, thinking and permissions new conversations start with. These are concrete
@@ -747,6 +749,20 @@ pub enum Command {
     /// Replace the running app with the binary now installed where it was started from,
     /// handing it every agent as it is. Answered only by an `Error` if that fails.
     Restart,
+    /// Act on a node of the control room, such as an agent. Answered only by a
+    /// `RoomEvent::Failed` if that fails.
+    Act {
+        node: NodeId,
+        action: Action,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Action {
+    /// Bring its terminal forward.
+    Focus,
+    /// Send it a message, as if typed in its terminal.
+    Prompt(String),
 }
 
 /// Backend -> frontend.

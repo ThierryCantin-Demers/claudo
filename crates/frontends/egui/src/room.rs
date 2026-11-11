@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::f32::consts::PI;
 use std::time::Duration;
 
-use claudo_protocol::{Node, NodeId, NodeKind, NodeState, Provider, RoomEvent};
+use claudo_protocol::{Action, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent};
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, pos2, vec2};
 
@@ -16,6 +16,11 @@ pub struct Room {
     /// node already had when the page first saw it has no start.
     since: BTreeMap<NodeId, (Option<NodeState>, Option<f64>)>,
     primed: bool,
+    /// Answers being typed to the agents waiting on the person.
+    drafts: BTreeMap<NodeId, String>,
+    /// The last action that failed, and why.
+    failed: Option<(NodeId, String)>,
+    sent: Vec<Command>,
 }
 
 /// A repository's agents, each with what it started.
@@ -46,7 +51,13 @@ impl Room {
             RoomEvent::Removed(id) => {
                 self.nodes.remove(&id);
             }
+            RoomEvent::Failed { node, detail } => self.failed = Some((node, detail)),
         }
+    }
+
+    /// What the person asked of the agents since the last call, for the backend.
+    pub fn take_sent(&mut self) -> Vec<Command> {
+        std::mem::take(&mut self.sent)
     }
 
     fn stamp(&mut self, now: f64) {
@@ -134,11 +145,34 @@ impl Room {
                     ui.add_space(24.0);
                     legend(ui);
                 });
+                self.failure(ui);
                 ui.add_space(8.0);
                 self.tiles(ui, width, now);
                 let left = screen - (ui.cursor().top() - top);
-                self.map(ui, width, left, now);
+                if let Some(focus) = self.map(ui, width, left, now) {
+                    self.sent.push(focus);
+                }
             });
+    }
+
+    fn failure(&mut self, ui: &mut egui::Ui) {
+        let Some((node, detail)) = &self.failed else {
+            return;
+        };
+        let name = self
+            .nodes
+            .get(node)
+            .and_then(|node| node.name.as_deref())
+            .unwrap_or(node);
+        let mut dismissed = false;
+        ui.horizontal_wrapped(|ui| {
+            let text = format!("Could not reach {name}: {detail}");
+            ui.colored_label(ui.visuals().error_fg_color, text);
+            dismissed = ui.small_button("Dismiss").clicked();
+        });
+        if dismissed {
+            self.failed = None;
+        }
     }
 
     fn summary(&self, ui: &mut egui::Ui) {
@@ -177,15 +211,26 @@ impl Room {
         }
     }
 
-    fn tiles(&self, ui: &mut egui::Ui, width: f32, now: f64) {
-        let waiting: Vec<&Node> = self.waiting().collect();
+    fn tiles(&mut self, ui: &mut egui::Ui, width: f32, now: f64) {
+        let waiting: Vec<(Node, Option<f64>)> = self
+            .waiting()
+            .map(|node| (node.clone(), self.held(&node.id, now)))
+            .collect();
+        self.drafts
+            .retain(|id, _| waiting.iter().any(|(node, _)| node.id == *id));
         let outer = TILE_WIDTH + 2.0 * TILE_MARGIN + TILE_GAP;
         let across = (((width + TILE_GAP) / outer).floor() as usize).max(1);
         for row in waiting.chunks(across) {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = TILE_GAP;
-                for node in row {
-                    tile(ui, node, self.held(&node.id, now), now);
+                for (node, held) in row {
+                    let draft = self.drafts.entry(node.id.clone()).or_default();
+                    if let Some(action) = tile(ui, node, *held, now, draft) {
+                        self.sent.push(Command::Act {
+                            node: node.id.clone(),
+                            action,
+                        });
+                    }
                 }
             });
             ui.add_space(TILE_GAP);
@@ -193,12 +238,13 @@ impl Room {
     }
 
     /// `screen` is the height left on screen, which the map fits into while it stays readable.
-    fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) {
+    /// Clicking an agent focuses its terminal.
+    fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Command> {
         let clusters = self.clusters();
         let scale = fit(&clusters, width, screen);
         let map = Map::lay_out(&clusters, width / scale);
         let (response, painter) =
-            ui.allocate_painter(vec2(width, map.height * scale), Sense::hover());
+            ui.allocate_painter(vec2(width, map.height * scale), Sense::click());
         let origin = response.rect.min;
         let ctx = ui.ctx().clone();
         // Positions glide to where a change in the room moves them; a new window size lays
@@ -259,15 +305,28 @@ impl Room {
                 .filter(|(_, at, radius)| at.distance(pointer) <= radius + 6.0)
                 .min_by(|a, b| a.1.distance(pointer).total_cmp(&b.1.distance(pointer)))
         });
-        if let Some(&(node, at, radius)) = hovered {
-            painter.circle_stroke(
-                at,
-                radius + 4.0,
-                Stroke::new(1.5, visuals.strong_text_color()),
-            );
-            let held = self.held(&node.id, now);
-            response.on_hover_ui_at_pointer(|ui| about(ui, node, held));
+        let &(node, at, radius) = hovered?;
+        painter.circle_stroke(
+            at,
+            radius + 4.0,
+            Stroke::new(1.5, visuals.strong_text_color()),
+        );
+        let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
+        if agent {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+        let clicked = response.clicked();
+        let held = self.held(&node.id, now);
+        response.on_hover_ui_at_pointer(|ui| {
+            about(ui, node, held);
+            if agent {
+                ui.weak("Click to bring its terminal forward");
+            }
+        });
+        (agent && clicked).then(|| Command::Act {
+            node: node.id.clone(),
+            action: Action::Focus,
+        })
     }
 }
 
@@ -615,7 +674,15 @@ fn lines(
     painter.layout_job(job)
 }
 
-fn tile(ui: &mut egui::Ui, node: &Node, held: Option<f64>, now: f64) {
+/// What the person asked of the agent from its tile: an answer typed in it, or its terminal.
+fn tile(
+    ui: &mut egui::Ui,
+    node: &Node,
+    held: Option<f64>,
+    now: f64,
+    draft: &mut String,
+) -> Option<Action> {
+    let mut action = None;
     let warn = ui.visuals().warn_fg_color;
     let breath = (0.5 + 0.5 * (now * 3.0).sin()) as f32;
     egui::Frame::new()
@@ -649,8 +716,28 @@ fn tile(ui: &mut egui::Ui, node: &Node, held: Option<f64>, now: f64) {
                 if let Some(held) = held {
                     ui.label(RichText::new(format!("waiting {}", ago(held))).color(warn));
                 }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let answer = ui.add(
+                        egui::TextEdit::singleline(draft)
+                            .id(egui::Id::new(("answer", &node.id)))
+                            .hint_text("Answer")
+                            .desired_width(TILE_WIDTH - 60.0),
+                    );
+                    let entered = answer.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let send = ui.button("Send").clicked();
+                    if (entered || send) && !draft.trim().is_empty() {
+                        let text = std::mem::take(draft).trim().to_string();
+                        action = Some(Action::Prompt(text));
+                    }
+                });
+                if ui.link("Bring its terminal forward").clicked() {
+                    action = Some(Action::Focus);
+                }
             });
         });
+    action
 }
 
 fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {

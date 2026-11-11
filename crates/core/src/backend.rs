@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
-    Background, Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, ServerEvent,
-    TaskStatus, ToolCall, TurnTime,
+    Background, Command, ContextUsage, ConversationInfo, Decision, Item, ModelOption, RoomEvent,
+    ServerEvent, TaskStatus, ToolCall, TurnTime,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
@@ -542,6 +542,16 @@ impl Backend {
             }
 
             Command::Restart => self.restart(),
+
+            Command::Act { node, action } => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::herdr::act(&node, &action) {
+                        let detail = error.to_string();
+                        events.to(from, ServerEvent::Room(RoomEvent::Failed { node, detail }));
+                    }
+                });
+            }
 
             Command::OnScreen { conversation_ids } => self.on_screen(from, Some(conversation_ids)),
 

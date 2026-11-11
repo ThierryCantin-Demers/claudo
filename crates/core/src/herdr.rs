@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use claudo_protocol::{Node, NodeKind, NodeState, Provider};
+use claudo_protocol::{Action, Node, NodeKind, NodeState, Provider};
 use serde_json::{Value, json};
 
 use crate::room::Feed;
@@ -121,18 +121,63 @@ fn socket() -> PathBuf {
     config.join("herdr/herdr.sock")
 }
 
-/// herdr answers one request per connection.
+/// Does `action` to the agent the node `node` stands for, in its pane on this machine.
+pub fn act(node: &str, action: &Action) -> io::Result<()> {
+    let target = pane(&snapshot()?, node, &hostname())
+        .ok_or_else(|| io::Error::other(format!("no agent pane here for {node}")))?;
+    match action {
+        Action::Focus => request("agent.focus", json!({ "target": target })),
+        Action::Prompt(text) => request("agent.prompt", json!({ "target": target, "text": text })),
+    }
+    .map(drop)
+}
+
+/// The pane an agent node's id names: by its session, or by the pane itself on `machine`.
+fn pane(snapshot: &Value, node: &str, machine: &str) -> Option<String> {
+    if let Some(pane) = node
+        .strip_prefix("pane:")
+        .and_then(|rest| rest.strip_prefix(machine)?.strip_prefix(':'))
+    {
+        return Some(pane.to_string());
+    }
+    let session = node.strip_prefix("session:")?;
+    agents(snapshot)
+        .find(|agent| {
+            agent
+                .pointer("/agent_session/value")
+                .and_then(Value::as_str)
+                == Some(session)
+        })?
+        .get("pane_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn snapshot() -> io::Result<Value> {
+    request("session.snapshot", json!({}))?
+        .get("snapshot")
+        .cloned()
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
+/// herdr answers one request per connection, with its `result` or an `error`.
+fn request(method: &str, params: Value) -> io::Result<Value> {
     let mut stream = UnixStream::connect(socket())?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let request = json!({ "id": "claudo", "method": "session.snapshot", "params": {} });
+    let request = json!({ "id": "claudo", "method": method, "params": params });
     writeln!(stream, "{request}")?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
-    let reply: Value = serde_json::from_str(&line)?;
+    let mut reply: Value = serde_json::from_str(&line)?;
+    if let Some(error) = reply.get("error") {
+        let message = error.get("message").and_then(Value::as_str);
+        return Err(io::Error::other(
+            message.map_or_else(|| error.to_string(), str::to_string),
+        ));
+    }
     reply
-        .pointer("/result/snapshot")
-        .cloned()
+        .get_mut("result")
+        .map(Value::take)
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
@@ -255,5 +300,28 @@ mod tests {
         );
         assert_eq!(codex.name, None);
         assert_eq!(codex.kind, Some(NodeKind::Agent(Provider::Codex)));
+    }
+
+    #[test]
+    fn an_action_finds_its_agent_by_session_or_by_pane_on_this_machine() {
+        let snapshot = json!({ "agents": [
+            { "pane_id": "w0:p1", "agent_session": { "kind": "id", "value": "0a1b2c3d" } },
+            { "pane_id": "w1:p2" },
+        ]});
+        assert_eq!(
+            pane(&snapshot, "session:0a1b2c3d", "host-a").as_deref(),
+            Some("w0:p1")
+        );
+        assert_eq!(
+            pane(&snapshot, "pane:host-a:w1:p2", "host-a").as_deref(),
+            Some("w1:p2")
+        );
+        assert_eq!(
+            pane(&snapshot, "pane:host-b:w1:p2", "host-a"),
+            None,
+            "another machine's"
+        );
+        assert_eq!(pane(&snapshot, "session:gone", "host-a"), None);
+        assert_eq!(pane(&snapshot, "run:r1", "host-a"), None);
     }
 }

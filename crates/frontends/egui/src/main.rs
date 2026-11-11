@@ -620,6 +620,9 @@ impl eframe::App for ClaudoApp {
         // A machine running only Codex agents never has Claude ready.
         if self.page == Page::Room {
             egui::CentralPanel::default().show(ui, |ui| self.room.ui(ui));
+            for command in self.room.take_sent() {
+                self.transport.send(command);
+            }
             return;
         }
 

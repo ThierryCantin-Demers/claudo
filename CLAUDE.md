@@ -491,6 +491,11 @@ wrote it.
   (`Hub::notes`), which only adds to nodes others give, since a note outlives its agent. A
   note in state `waiting` asks a person for something, so the room shows its agent `Blocked`
   until herdr says it works again: herdr calls an agent that ended its turn done.
+- **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`
+  and `agent.prompt` with the agent's pane as `target`, found from the node id in a fresh
+  snapshot (`herdr::act`). Only this machine's panes are reachable. A failure comes back as
+  `RoomEvent::Failed` to the client that asked, not as an `Error`, which a chat would take
+  for its own. herdr refuses a prompt to an agent `blocked` on an approval.
 
 ## Workflow
 
