@@ -272,15 +272,17 @@ fn install_daemon() -> Result<(), String> {
          \n\
          [Service]\n\
          ExecStart={bin}\n\
-         Environment=\"PATH={path}\"\n\
-         Environment=\"CLAUDO_PORT={DAEMON_PORT}\"\n\
-         Environment=\"CLAUDO_STATIC_DIR={web}\"\n\
+         Environment={path}\n\
+         Environment={port}\n\
+         Environment={web}\n\
          Restart=on-failure\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        bin = bin.display(),
-        web = web.display(),
+        bin = unit_word(&bin.display().to_string()),
+        path = unit_word(&format!("PATH={path}")),
+        port = unit_word(&format!("CLAUDO_PORT={DAEMON_PORT}")),
+        web = unit_word(&format!("CLAUDO_STATIC_DIR={}", web.display())),
     );
     fs::write(&unit, service).map_err(|e| format!("cannot write {}: {e}", unit.display()))?;
     systemctl(&["daemon-reload"])?;
@@ -290,6 +292,15 @@ fn install_daemon() -> Result<(), String> {
     println!("service {}", unit.display());
     println!("the control room: http://127.0.0.1:{DAEMON_PORT}/?token={token}");
     Ok(())
+}
+
+/// One word of a unit file, whatever spaces, quotes or `%` it holds.
+fn unit_word(text: &str) -> String {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
 }
 
 fn systemctl(args: &[&str]) -> Result<(), String> {
@@ -505,4 +516,17 @@ fn remote_desktop_file(host: &str) -> Result<PathBuf, String> {
 
 fn icon_file() -> Result<PathBuf, String> {
     Ok(data_home()?.join(format!("icons/hicolor/scalable/apps/{APP_ID}.svg")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_unit_word_keeps_its_spaces_quotes_and_percent_signs() {
+        assert_eq!(
+            unit_word(r#"/opt/cargo installs/bin/say "100%""#),
+            r#""/opt/cargo installs/bin/say \"100%%\"""#
+        );
+    }
 }
