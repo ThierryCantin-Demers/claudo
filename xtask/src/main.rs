@@ -440,6 +440,7 @@ fn web() -> Result<(), String> {
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
     let status = Command::new("wasm-bindgen")
         .args(["--target", "web", "--no-typescript", "--out-dir", WEB_OUT])
+        .args(["--remove-name-section", "--remove-producers-section"])
         .args(["--out-name", "claudo"])
         .arg(target.join("wasm32-unknown-unknown/web/claudo.wasm"))
         .status()

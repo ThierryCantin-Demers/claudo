@@ -29,7 +29,6 @@ inherits = "release"
 lto = true
 codegen-units = 1
 opt-level = "s"
-strip = true
 
 [workspace.dependencies]
 claudo-protocol = { path = "crates/protocol" }
