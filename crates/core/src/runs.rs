@@ -121,7 +121,7 @@ impl Runs {
             .ok()?;
         let text = match self.digests.remove(path) {
             Some((at, text)) if at == written => text,
-            _ => std::fs::read_to_string(path).ok()?,
+            _ => tidy(&std::fs::read_to_string(path).ok()?),
         };
         digests.insert(path.to_path_buf(), (written, text.clone()));
         Some(text)
@@ -194,6 +194,13 @@ fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
             .map(str::to_string)
             .or(rounds),
         "cancelled" => Some("cancelled".to_string()),
+        "done" => meta
+            .get("round")
+            .and_then(Value::as_u64)
+            .map(|round| match round {
+                1 => "done after 1 round".to_string(),
+                _ => format!("done after {round} rounds"),
+            }),
         _ => rounds,
     };
     let machine = text("/parent/machine").map(str::to_string);
@@ -243,6 +250,25 @@ fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
         });
     }
     nodes
+}
+
+/// A digest without the sections that hold nothing, which an older `codex-review` wrote as
+/// bare headings.
+fn tidy(digest: &str) -> String {
+    let lines: Vec<&str> = digest.lines().collect();
+    let mut kept = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.starts_with("## ") {
+            let next = lines[i + 1..].iter().find(|line| !line.trim().is_empty());
+            if next.is_none_or(|next| next.starts_with("## ")) {
+                continue;
+            }
+        }
+        kept.push(*line);
+    }
+    let mut tidied = kept.join("\n");
+    tidied.push('\n');
+    tidied
 }
 
 /// How a review stands against the Codex week: a deep round run quick because the week was
@@ -364,12 +390,22 @@ mod tests {
         let ids: Vec<_> = nodes.iter().map(|node| node.id.as_str()).collect();
         assert_eq!(ids, ["run:read", "run:read/0", "run:read/1"]);
         assert_eq!(nodes[0].state, Some(NodeState::Done));
+        assert_eq!(nodes[0].doing.as_deref(), Some("done after 2 rounds"));
         assert_eq!(
             nodes[0].digest.as_deref(),
             Some("# Review of alpha, main\n")
         );
         assert!(runs.scan(&root, SystemTime::now() + KEPT).is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_digest_leaves_out_its_empty_sections() {
+        let digest = "# Review of alpha, main\n\nNo findings.\n## Fixed\n\n- F1 (fixed): a.\n\n## Disputed\n\n\n## Left open\n";
+        assert_eq!(
+            tidy(digest),
+            "# Review of alpha, main\n\nNo findings.\n## Fixed\n\n- F1 (fixed): a.\n\n\n\n"
+        );
     }
 
     #[test]
