@@ -6,17 +6,18 @@ use std::process::{Command, Stdio};
 use claudo_protocol::{Checks, PullRequest};
 use serde_json::Value;
 
-/// The open pull requests the person authored, with each one's CI on its last commit, in
-/// one request: `gh search prs` cannot give the checks.
-const OPEN: &str = "query { search(query: \"is:pr is:open author:@me archived:false\", \
-    type: ISSUE, first: 100) { nodes { ... on PullRequest { number title url isDraft \
-    repository { nameWithOwner } \
+/// The open pull requests the person authored, with each one's CI on its last commit, a
+/// page at a time: `gh search prs` cannot give the checks.
+const OPEN: &str = "query($endCursor: String) { search(query: \
+    \"is:pr is:open author:@me archived:false\", type: ISSUE, first: 100, \
+    after: $endCursor) { pageInfo { hasNextPage endCursor } \
+    nodes { ... on PullRequest { number title url isDraft repository { nameWithOwner } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
 
 /// Every open pull request the person authored, by its link. None when `gh` cannot say.
 pub fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
     let output = Command::new("gh")
-        .args(["api", "graphql", "-f"])
+        .args(["api", "graphql", "--paginate", "--slurp", "-f"])
         .arg(format!("query={OPEN}"))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -25,12 +26,12 @@ pub fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
     if !output.status.success() {
         return None;
     }
-    let answer: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let pages: Vec<Value> = serde_json::from_slice(&output.stdout).ok()?;
     Some(
-        answer
-            .pointer("/data/search/nodes")?
-            .as_array()?
+        pages
             .iter()
+            .filter_map(|page| page.pointer("/data/search/nodes")?.as_array())
+            .flatten()
             .filter_map(pull_request)
             .map(|pr| (pr.url.clone(), pr))
             .collect(),
