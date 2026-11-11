@@ -42,13 +42,21 @@ fn look() -> Option<String> {
 
 fn machines(text: &str) -> Vec<DibsMachine> {
     let mut machines: Vec<DibsMachine> = Vec::new();
-    for raw in text.lines() {
+    let mut lines = text.lines().filter(|raw| !raw.trim().is_empty()).peekable();
+    while let Some(raw) = lines.next() {
         let line = raw.trim();
-        if line.is_empty() {
+        let named = raw == line && !line.starts_with('{');
+        // A machine's name has its status or trouble indented under it; dibs's own notices,
+        // such as what changed since it last ran, have nothing.
+        if named
+            && !lines
+                .peek()
+                .is_some_and(|next| next.starts_with(char::is_whitespace))
+        {
             continue;
         }
         // Without `--all`, as with `DIBS_ON` set, the one machine's status comes alone.
-        if machines.is_empty() || !raw.starts_with(char::is_whitespace) && !line.starts_with('{') {
+        if machines.is_empty() || named {
             let name = match line.starts_with('{') {
                 true => "this machine",
                 false => line,
@@ -171,7 +179,7 @@ mod tests {
     fn each_machine_says_its_status_or_why_it_could_not() {
         let waiter = r#"{"position":1,"mode":"bench","pid":42,"label":"widgets-bench","agent":"tuner","cmd":"cargo bench","arrived":0,"waiting":30}"#;
         let text = format!(
-            "host-a\n  {}\n\nhost-b\n  ssh: Could not resolve hostname host-b\n  dibs: cannot reach it\nhost-c\n  {}\n",
+            "dibs changed since this session last ran it: 1111111 -> 2222222\nabc1234 A fix\nhost-a\n  {}\n\nhost-b\n  ssh: Could not resolve hostname host-b\n  dibs: cannot reach it\nhost-c\n  {}\n",
             status(
                 &[holder("shared", 41, "widgets-test", "builder", 125)],
                 &[waiter.to_string()]
