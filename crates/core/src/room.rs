@@ -5,7 +5,7 @@
 //! is the agent of that name. Other computers' daemons hear only what this computer's own
 //! collectors see, never what came from another, so two that watch each other echo nothing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{DibsMachine, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
@@ -132,6 +132,22 @@ fn merged(sources: &[&Source], passed_on: bool) -> BTreeMap<NodeId, Node> {
         if let Some(known) = nodes.get_mut(&node.id) {
             known.fill(node.clone());
         }
+    }
+    // A collector that knows more than one place for a node gives them as `a|b`, the most
+    // precise first, such as the subagent that started a run and then its agent: it goes
+    // under the first the room shows, or the last when it shows none.
+    let shown: HashSet<NodeId> = nodes.keys().cloned().collect();
+    for node in nodes.values_mut() {
+        let Some(parent) = node.parent.as_deref().filter(|parent| parent.contains('|')) else {
+            continue;
+        };
+        let places: Vec<&str> = parent.split('|').collect();
+        let chosen = places
+            .iter()
+            .find(|place| place.starts_with("name:") || shown.contains(**place))
+            .or(places.last())
+            .map(|place| place.to_string());
+        node.parent = chosen;
     }
     // A collector that knows agents by name alone gives a parent as `name:<agent>`; one no
     // agent here has the name of is someone else's.
@@ -426,6 +442,30 @@ mod tests {
         assert!(
             !room.lock().unwrap().shown.contains_key("dibs:host-a:1"),
             "this computer's page has no such agent"
+        );
+    }
+
+    #[test]
+    fn a_node_goes_under_the_first_place_it_names_that_the_room_shows() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        let under = |id: &str, parent: &str| Node {
+            parent: Some(parent.to_string()),
+            ..node(id)
+        };
+        Feed::new(room.clone(), "herdr").replace(vec![node("session:s1")]);
+        Feed::new(room.clone(), "subagents").replace(vec![under("subagent:a1", "session:s1")]);
+        Feed::new(room.clone(), "runs").replace(vec![
+            under("run:by-subagent", "subagent:a1|session:s1"),
+            under("run:subagent-left", "subagent:gone|session:s1"),
+        ]);
+        let shown = &room.lock().unwrap().shown;
+        assert_eq!(
+            shown["run:by-subagent"].parent.as_deref(),
+            Some("subagent:a1")
+        );
+        assert_eq!(
+            shown["run:subagent-left"].parent.as_deref(),
+            Some("session:s1")
         );
     }
 

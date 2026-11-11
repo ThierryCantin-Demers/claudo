@@ -514,6 +514,11 @@ wrote it.
   (`round_depth`, `budget`). `codex-review` holds an flock on the run's `.lock` while it runs, so one
   marked running whose lock `/proc/locks` does not list was killed and is dropped; a run
   that keeps no lock is dropped once untouched for 12 hours.
+  A run a Claude subagent started names it (`parent.subagent`, from the
+  `CLAUDE_SUBAGENT_ID` a PreToolUse hook gives a subagent's shell), so it hangs under
+  `subagent:<id>|session:<id>`: a parent may list places, the most precise first, and the
+  room takes the first it shows (`room.rs`), so the run falls back to its agent once the
+  subagent leaves.
 - **Board** (`core/src/board.rs`): `$BOARD_DIR/sessions/<session>.jsonl`, one note per line,
   the last standing, as the `note` of `session:<id>`. It joins as a collector of notes
   (`Hub::notes`), which only adds to nodes others give, since a note outlives its agent. A

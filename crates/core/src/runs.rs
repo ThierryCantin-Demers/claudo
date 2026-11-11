@@ -211,7 +211,10 @@ fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
     });
     let mut nodes = vec![Node {
         id: id.clone(),
-        parent: text("/parent/session").map(|session| format!("session:{session}")),
+        parent: text("/parent/session").map(|session| match text("/parent/subagent") {
+            Some(subagent) => format!("subagent:{subagent}|session:{session}"),
+            None => format!("session:{session}"),
+        }),
         kind: text("/kind").map(|kind| NodeKind::Run(kind.to_string())),
         name: text("/title").map(str::to_string),
         doing,
@@ -329,6 +332,14 @@ mod tests {
         assert_eq!(ids, ["run:r1", "run:r1/0", "run:r1/1"]);
         let run = &nodes[0];
         assert_eq!(run.parent.as_deref(), Some("session:s1"));
+        let mut started = review("running");
+        started["parent"]["subagent"] = json!("a1");
+        let from_subagent = super::run("r2", &started, None);
+        assert_eq!(
+            from_subagent[0].parent.as_deref(),
+            Some("subagent:a1|session:s1"),
+            "one a subagent started"
+        );
         assert_eq!(run.kind, Some(NodeKind::Run("review".to_string())));
         assert_eq!(run.state, Some(NodeState::Working));
         assert_eq!(run.doing.as_deref(), Some("round 2 of 3"));
