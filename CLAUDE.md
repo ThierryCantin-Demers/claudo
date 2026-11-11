@@ -543,8 +543,9 @@ wrote it.
   and `prs`, the open pull requests it opened. Those are the links in the results of the
   shell calls that ran `gh pr create` (a script that only names it does not count), read
   once from each transcript's start and then from where the last read stopped, kept to the
-  ones `gh search prs --author @me --state open` lists (`core/src/github.rs`, every 3
-  minutes). A run's node carries its `provider` from its `meta.json`, and so do its
+  open ones the person authored, with each one's CI on its last commit (`checks`), from one
+  GraphQL search (`core/src/github.rs`, every 3 minutes; `gh search prs` cannot give the
+  checks). A run's node carries its `provider` from its `meta.json`, and so do its
   sub-agents. The same collector feeds the room each Claude subagent running now
   (`subagent:<id>` under `session:<id>`, a regular feed, since a note collector only adds to
   nodes): one from `<session>/subagents/agent-<id>.meta.json` whose transcript changed in the

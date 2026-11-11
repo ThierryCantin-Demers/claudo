@@ -3,19 +3,21 @@
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
-use claudo_protocol::PullRequest;
+use claudo_protocol::{Checks, PullRequest};
 use serde_json::Value;
+
+/// The open pull requests the person authored, with each one's CI on its last commit, in
+/// one request: `gh search prs` cannot give the checks.
+const OPEN: &str = "query { search(query: \"is:pr is:open author:@me archived:false\", \
+    type: ISSUE, first: 100) { nodes { ... on PullRequest { number title url isDraft \
+    repository { nameWithOwner } \
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
 
 /// Every open pull request the person authored, by its link. None when `gh` cannot say.
 pub fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
     let output = Command::new("gh")
-        .args(["search", "prs", "--author", "@me", "--state", "open"])
-        .args([
-            "--json",
-            "number,title,url,repository,isDraft",
-            "--limit",
-            "200",
-        ])
+        .args(["api", "graphql", "-f"])
+        .arg(format!("query={OPEN}"))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -23,9 +25,11 @@ pub fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
     if !output.status.success() {
         return None;
     }
-    let listed: Vec<Value> = serde_json::from_slice(&output.stdout).ok()?;
+    let answer: Value = serde_json::from_slice(&output.stdout).ok()?;
     Some(
-        listed
+        answer
+            .pointer("/data/search/nodes")?
+            .as_array()?
             .iter()
             .filter_map(pull_request)
             .map(|pr| (pr.url.clone(), pr))
@@ -43,6 +47,15 @@ fn pull_request(pr: &Value) -> Option<PullRequest> {
             .as_str()?
             .to_string(),
         draft: pr.get("isDraft").and_then(Value::as_bool).unwrap_or(false),
+        checks: pr
+            .pointer("/commits/nodes/0/commit/statusCheckRollup/state")
+            .and_then(Value::as_str)
+            .and_then(|state| match state {
+                "SUCCESS" => Some(Checks::Passing),
+                "FAILURE" | "ERROR" => Some(Checks::Failing),
+                "PENDING" | "EXPECTED" => Some(Checks::Running),
+                _ => None,
+            }),
     })
 }
 
@@ -65,6 +78,27 @@ pub fn pull_links(text: &str) -> impl Iterator<Item = String> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pull_request_says_how_its_ci_stands() {
+        let answer = serde_json::json!({"data": {"search": {"nodes": [
+            {"number": 42, "title": "Fix", "url": "https://github.com/acme/widgets/pull/42",
+             "isDraft": false, "repository": {"nameWithOwner": "acme/widgets"},
+             "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}},
+            {"number": 43, "title": "Docs", "url": "https://github.com/acme/widgets/pull/43",
+             "isDraft": true, "repository": {"nameWithOwner": "acme/widgets"},
+             "commits": {"nodes": [{"commit": {"statusCheckRollup": null}}]}},
+        ]}}});
+        let nodes = answer
+            .pointer("/data/search/nodes")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let prs: Vec<_> = nodes.iter().filter_map(pull_request).collect();
+        assert_eq!(prs[0].checks, Some(Checks::Failing));
+        assert_eq!(prs[1].checks, None, "no checks");
+        assert!(prs[1].draft);
+    }
 
     #[test]
     fn pull_links_are_found_in_any_text() {

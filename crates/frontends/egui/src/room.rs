@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::f32::consts::PI;
 use std::time::Duration;
 
-use claudo_protocol::{Action, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent};
+use claudo_protocol::{
+    Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
+};
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, pos2, vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -228,6 +230,7 @@ impl Room {
                 ui.add_space(8.0);
                 let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
                 ui.hyperlink_to(repo, pr.link).on_hover_text(&pr.about);
+                ci(ui, pr.checks);
                 ui.weak(node.name.as_deref().unwrap_or("unnamed"));
             }
         });
@@ -332,8 +335,11 @@ impl Room {
                     }
                 }
                 for pr in open_prs(&node) {
-                    ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
-                        .on_hover_text(&pr.about);
+                    ui.horizontal(|ui| {
+                        ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
+                            .on_hover_text(&pr.about);
+                        ci(ui, pr.checks);
+                    });
                 }
                 if matches!(node.kind, Some(NodeKind::Agent(_))) {
                     ui.add_space(6.0);
@@ -888,29 +894,28 @@ fn caption(
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
-    let badges = badges(node);
+    let badges = badges(node, visuals);
     if !badges.is_empty() {
-        let tint = visuals.text_color();
-        let badges = lines(painter, &badges, 10.0 * scale, tint, 1, scale);
-        painter.galley(below + vec2(0.0, 15.0 * scale), badges, tint);
+        let badges = row(painter, &badges, 10.0 * scale, scale);
+        painter.galley(
+            below + vec2(0.0, 15.0 * scale),
+            badges,
+            visuals.text_color(),
+        );
     }
     if !started.is_empty() {
-        let mut job = egui::text::LayoutJob::default();
-        for (i, (text, tint)) in started.iter().enumerate() {
-            if i > 0 {
-                let format = egui::TextFormat::simple(
-                    FontId::proportional(10.5 * scale),
-                    visuals.weak_text_color(),
-                );
-                job.append("  ·  ", 0.0, format);
-            }
-            let format = egui::TextFormat::simple(FontId::proportional(10.5 * scale), *tint);
-            job.append(text, 0.0, format);
-        }
-        job.wrap.max_width = 2.0 * CAPTION_REACH * scale;
-        job.wrap.max_rows = 1;
-        job.halign = egui::Align::Center;
-        let started = painter.layout_job(job);
+        let dot = ("  ·  ".to_string(), visuals.weak_text_color());
+        let parts: Vec<(String, Color32)> = started
+            .iter()
+            .enumerate()
+            .flat_map(|(i, part)| {
+                (i > 0)
+                    .then(|| dot.clone())
+                    .into_iter()
+                    .chain([part.clone()])
+            })
+            .collect();
+        let started = row(painter, &parts, 10.5 * scale, scale);
         painter.galley(
             below + vec2(0.0, 29.0 * scale),
             started,
@@ -919,21 +924,62 @@ fn caption(
     }
 }
 
-/// What an agent carries: its context, and its open pull requests.
-fn badges(node: &Node) -> String {
-    let context = node
-        .context
-        .map(|tokens| format!("{} context", thousands(tokens)));
+/// Coloured parts on one row centred under an agent, its end cut when it runs over.
+fn row(
+    painter: &egui::Painter,
+    parts: &[(String, Color32)],
+    size: f32,
+    scale: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    for (text, tint) in parts {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat::simple(FontId::proportional(size), *tint),
+        );
+    }
+    job.wrap.max_width = 2.0 * CAPTION_REACH * scale;
+    job.wrap.max_rows = 1;
+    job.halign = egui::Align::Center;
+    painter.layout_job(job)
+}
+
+/// How a pull request's CI stands, in words and in its colour.
+fn checks(checks: Checks) -> (&'static str, Color32) {
+    match checks {
+        Checks::Passing => ("CI passing", Color32::from_rgb(80, 190, 120)),
+        Checks::Failing => ("CI failing", Color32::from_rgb(230, 85, 75)),
+        Checks::Running => ("CI running", Color32::from_rgb(230, 170, 60)),
+    }
+}
+
+fn ci(ui: &mut egui::Ui, state: Option<Checks>) {
+    if let Some((words, tint)) = state.map(checks) {
+        ui.label(RichText::new(words).color(tint).small());
+    }
+}
+
+/// What an agent carries: its context, and its open pull requests, each in the colour of
+/// its CI.
+fn badges(node: &Node, visuals: &egui::Visuals) -> Vec<(String, Color32)> {
+    let text = visuals.text_color();
+    let mut parts = Vec::new();
+    if let Some(tokens) = node.context {
+        parts.push((format!("{} context", thousands(tokens)), text));
+    }
     let prs = open_prs(node);
-    let prs = (!prs.is_empty()).then(|| {
-        let numbers: Vec<_> = prs.iter().map(|pr| format!("#{}", pr.number)).collect();
-        format!("PR {}", numbers.join(" "))
-    });
-    [context, prs]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("  ·  ")
+    if !prs.is_empty() {
+        if !parts.is_empty() {
+            parts.push(("  ·  ".to_string(), visuals.weak_text_color()));
+        }
+        parts.push(("PR".to_string(), text));
+        for pr in prs {
+            let tint = pr.checks.map_or(text, |state| checks(state).1);
+            parts.push((format!(" #{}", pr.number), tint));
+        }
+    }
+    parts
 }
 
 /// What an agent started, counted by kind and by whether it runs, each in its kind's
@@ -1049,6 +1095,7 @@ struct Shown<'a> {
     /// Its repository, number, whether it is a draft, and title.
     about: String,
     link: &'a str,
+    checks: Option<Checks>,
 }
 
 fn number(link: &str) -> &str {
@@ -1066,6 +1113,7 @@ fn open_prs(node: &Node) -> Vec<Shown<'_>> {
                 number: number(&pr.url),
                 about: format!("{}#{}{draft}: {}", short(&pr.repo), pr.number, pr.title),
                 link: &pr.url,
+                checks: pr.checks,
             }
         })
         .collect();
@@ -1076,6 +1124,7 @@ fn open_prs(node: &Node) -> Vec<Shown<'_>> {
             number: number(link),
             about: link.trim_start_matches("https://github.com/").to_string(),
             link,
+            checks: None,
         });
     }
     shown
@@ -1157,8 +1206,11 @@ fn tile(
                     ui.label(RichText::new(format!("waiting {}", ago(held))).color(warn));
                 }
                 for pr in open_prs(node) {
-                    ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
-                        .on_hover_text(&pr.about);
+                    ui.horizontal(|ui| {
+                        ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
+                            .on_hover_text(&pr.about);
+                        ci(ui, pr.checks);
+                    });
                 }
                 ui.add_space(4.0);
                 action = answer(ui, "tile", node, draft, TILE_WIDTH - 60.0);
@@ -1214,7 +1266,8 @@ fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
         ui.label(format!("{} tokens in context", thousands(tokens)));
     }
     for pr in open_prs(node) {
-        ui.label(format!("PR {}", pr.about));
+        let ci = pr.checks.map(|state| format!(", {}", checks(state).0));
+        ui.label(format!("PR {}{}", pr.about, ci.unwrap_or_default()));
     }
     if let Some(repo) = &node.repo {
         ui.label(RichText::new(repo).weak().monospace());

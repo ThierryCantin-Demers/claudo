@@ -753,6 +753,7 @@ mod tests {
             + "\n";
         std::fs::write(projects.join("-src-alpha/s1.jsonl"), transcript).unwrap();
         let pr = |repo: &str, number: u64| PullRequest {
+            checks: None,
             url: format!("https://github.com/{repo}/pull/{number}"),
             number,
             title: "Fix".into(),

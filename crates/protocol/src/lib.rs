@@ -577,6 +577,16 @@ pub struct PullRequest {
     /// `owner/name`.
     pub repo: String,
     pub draft: bool,
+    /// Its CI on its last commit; None when it has no checks.
+    #[serde(default)]
+    pub checks: Option<Checks>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Checks {
+    Passing,
+    Failing,
+    Running,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
