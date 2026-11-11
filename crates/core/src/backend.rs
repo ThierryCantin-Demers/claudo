@@ -543,6 +543,20 @@ impl Backend {
 
             Command::Restart => self.restart(),
 
+            Command::Dibs {
+                machine,
+                call,
+                label,
+            } => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let action = dibstop_view::action::Action::new(machine, call, &label);
+                    let body = action.run();
+                    let title = action.title;
+                    events.to(from, ServerEvent::DibsAnswer { title, body });
+                });
+            }
+
             Command::Act {
                 node,
                 action,

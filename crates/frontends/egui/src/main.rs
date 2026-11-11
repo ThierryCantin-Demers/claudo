@@ -11,6 +11,7 @@ use claudo_protocol::{
 };
 use claudo_transport::{Transport, connect};
 
+mod machines;
 mod room;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
@@ -112,13 +113,30 @@ struct ClaudoApp {
     lost: Option<String>,
     page: Page,
     room: room::Room,
+    machines: machines::Machines,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     /// Every agent the daemon's collectors see.
     Room,
+    /// The dibs machines, as dibstop shows them.
+    Machines,
     Chat,
+}
+
+/// Only the daemon has collectors to fill the room. A link ending in `#machines` opens on them.
+fn first_page() -> Page {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let hash = web_sys::window().and_then(|window| window.location().hash().ok());
+        match hash.as_deref() {
+            Some("#machines") => Page::Machines,
+            _ => Page::Room,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    Page::Chat
 }
 
 impl ClaudoApp {
@@ -152,13 +170,9 @@ impl ClaudoApp {
             md_cache: CommonMarkCache::default(),
             other_build: None,
             lost: None,
-            // Only the daemon has collectors to fill the room.
-            page: if cfg!(target_arch = "wasm32") {
-                Page::Room
-            } else {
-                Page::Chat
-            },
+            page: first_page(),
             room: room::Room::default(),
+            machines: machines::Machines::default(),
         }
     }
 
@@ -547,6 +561,8 @@ impl ClaudoApp {
                 }
 
                 ServerEvent::Room(event) => self.room.apply(event),
+                ServerEvent::Dibs(machines) => self.machines.heard(machines),
+                ServerEvent::DibsAnswer { title, body } => self.machines.answered(title, body),
 
                 ServerEvent::Answered { request_id, .. } => {
                     self.approvals.retain(|(_, id, ..)| *id != request_id);
@@ -614,6 +630,7 @@ impl eframe::App for ClaudoApp {
         egui::Panel::top("pages").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Room, "Room");
+                ui.selectable_value(&mut self.page, Page::Machines, "Machines");
                 ui.selectable_value(&mut self.page, Page::Chat, "Chat");
             });
         });
@@ -621,6 +638,15 @@ impl eframe::App for ClaudoApp {
         if self.page == Page::Room {
             egui::CentralPanel::default().show(ui, |ui| self.room.ui(ui));
             for command in self.room.take_sent() {
+                self.transport.send(command);
+            }
+            return;
+        }
+        if self.page == Page::Machines {
+            let asked = egui::CentralPanel::default()
+                .show(ui, |ui| self.machines.ui(ui))
+                .inner;
+            if let Some(command) = asked {
                 self.transport.send(command);
             }
             return;

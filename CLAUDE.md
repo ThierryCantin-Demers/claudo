@@ -266,7 +266,7 @@ Keep test prompts small.
 
 ## Toolkit notes
 
-**egui 0.35** differs from older examples: implement `fn ui(&mut self, ui: &mut egui::Ui, ...)`
+**egui 0.36** differs from older examples: implement `fn ui(&mut self, ui: &mut egui::Ui, ...)`
 rather than `update`; `CentralPanel::show` takes a `&mut Ui`; panels are `egui::Panel::bottom`
 / `left` / `top` with `default_size`, not `TopBottomPanel`/`SidePanel`; use
 `ui.selectable_label` rather than a `SelectableLabel` struct. Multiline newline insertion is
@@ -514,7 +514,8 @@ wrote it.
   note's time is its own `t`, in the writer's local time, since syncing the board between
   computers changes the files' times. Once the person writes to the agent after the note
   (`answered`, from its transcript) the note is stale and asks nothing.
-- **dibs** (`core/src/dibs.rs`): `dibs --status --json --all` every 30 seconds, unless
+- **dibs** (`core/src/dibs.rs`): `dibs --status --json --all` every 10 seconds, both
+  streams in order (a machine's trouble is on stderr, under its name on stdout), unless
   `CLAUDO_DIBS=off` (`install-daemon --no-dibs`) leaves it to another computer's daemon that
   shows this one's agents, since dibs says the same from both. Each job hangs under the
   agent its holder or waiter names. dibs knows agents by herdr name, so a job's parent is
@@ -530,6 +531,12 @@ wrote it.
   ones `gh search prs --author @me --state open` lists (`core/src/github.rs`, every 3
   minutes). A run's node carries its `provider` from its `meta.json`, and so do its
   sub-agents.
+- **Machines** (the page's Machines tab, `#machines`): the dibs collector also sends every
+  machine's status, and why one could not answer, as `ServerEvent::Dibs`, which the page draws
+  with dibstop's own egui view (`dibstop-view`, from the dibs repo, egui pinned to the
+  version dibs uses). An action the view returns goes back as `Command::Dibs` with its
+  `Call` and job label, never a command line, and the backend makes the `dibs` call again
+  from those (`Action::new(..).run()`), answering `DibsAnswer` to the client that asked.
 - **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`
   and `agent.prompt` with the agent's pane as `target`, found from the node id in a fresh
   snapshot (`herdr::act`). Only this machine's panes are reachable. A failure comes back as

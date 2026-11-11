@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+dibstop-view.workspace = true
 base64 = "0.22"

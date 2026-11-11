@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
+use claudo_protocol::{DibsMachine, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clients::{ClientId, Clients};
@@ -22,6 +22,8 @@ pub struct Room {
     /// What this computer's own collectors see, and the other computers' daemons hearing it.
     local: BTreeMap<NodeId, Node>,
     machines: Clients,
+    /// The dibs machines, which only this computer's pages hear.
+    dibs: Vec<DibsMachine>,
 }
 
 impl Room {
@@ -30,6 +32,17 @@ impl Room {
         let nodes = self.shown.values().cloned().collect();
         self.clients
             .to(client, ServerEvent::Room(RoomEvent::Snapshot(nodes)));
+        if !self.dibs.is_empty() {
+            self.clients
+                .to(client, ServerEvent::Dibs(self.dibs.clone()));
+        }
+    }
+
+    fn set_dibs(&mut self, machines: Vec<DibsMachine>) {
+        if machines != self.dibs {
+            self.clients.send(ServerEvent::Dibs(machines.clone()));
+            self.dibs = machines;
+        }
     }
 
     /// Another computer's daemon, which hears only what this computer's collectors see.
@@ -195,6 +208,11 @@ impl Feed {
             source,
             from: Gives::Machine,
         }
+    }
+
+    /// The dibs machines as the last look found them.
+    pub fn dibs(&self, machines: Vec<DibsMachine>) {
+        self.room.lock().unwrap().set_dibs(machines);
     }
 
     /// Everything this collector sees now, in place of what it saw before.

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
 /// cannot read. The backend sends it first, in `Hello`.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -804,6 +804,23 @@ pub enum Command {
         #[serde(default)]
         request: u64,
     },
+    /// Run a dibs call dibstop offers, made again here from its name, never from a command
+    /// line the client sends. Answered by `DibsAnswer`.
+    Dibs {
+        machine: String,
+        call: dibstop_view::action::Call,
+        /// The label of the job it is about, for its title.
+        label: String,
+    },
+}
+
+/// A dibs machine as the daemon last heard of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DibsMachine {
+    pub name: String,
+    pub status: Option<dibstop_view::dibs_format::status::Status>,
+    /// What it said that was not a status, such as why it could not be reached.
+    pub trouble: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -822,6 +839,13 @@ pub enum ServerEvent {
     /// runs another build, whose messages this one may not read.
     Hello {
         version: u32,
+    },
+    /// Every dibs machine, each time a look at them says something new.
+    Dibs(Vec<DibsMachine>),
+    /// What a `Dibs` call printed, to the client that asked.
+    DibsAnswer {
+        title: String,
+        body: String,
     },
     Status(SystemStatus),
     Settings(Settings),

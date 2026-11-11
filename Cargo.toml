@@ -29,6 +29,8 @@ claudo-core = { path = "crates/core" }
 claudo-transport = { path = "crates/transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Until dibs merges it, the branch of its pull request.
+dibstop-view = { git = "https://github.com/ThierryCantin-Demers/dibs", branch = "dibstop-egui" }
 
 # libcosmic's iced_core, made patch-safe behind its `hot` feature; see vendor/iced_core/Cargo.toml.
 [patch."https://github.com/pop-os/libcosmic"]

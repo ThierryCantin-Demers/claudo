@@ -2364,7 +2364,7 @@ mod app {
                     self.connection(connected, detail);
                 }
                 // The control room is the web page's.
-                ServerEvent::Room(_) => {}
+                ServerEvent::Room(_) | ServerEvent::Dibs(_) | ServerEvent::DibsAnswer { .. } => {}
                 ServerEvent::Hello { version } => {
                     if version != claudo_protocol::PROTOCOL_VERSION {
                         self.connection(

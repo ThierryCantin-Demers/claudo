@@ -1,103 +1,144 @@
-//! The jobs agents run on dibs machines, from `dibs --status --json --all`: each machine's
-//! name on a line of its own, then its status as one JSON line, whose `holders` and `queue`
-//! name the agent that asked. A job hangs under that agent, which the room finds by name.
-//! All of dibs's shapes stay in this file.
+//! The dibs machines and the jobs agents run on them, from `dibs --status --json --all`: each
+//! machine's name on a line of its own, then, indented under it, its status as one JSON line
+//! or what kept it from answering. The pages show every machine as dibstop does, and each job
+//! hangs under the agent that asked, which the room finds by name. All of dibs's shapes stay
+//! in this file.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use claudo_protocol::{Node, NodeKind, NodeState};
-use serde_json::Value;
+use claudo_protocol::{DibsMachine, Node, NodeKind, NodeState};
+use dibstop_view::dibs_format::Mode;
+use dibstop_view::dibs_format::status::Status;
 
 use crate::room::Feed;
 
-/// Each look reaches every machine over ssh, so it is not done often.
-const POLL: Duration = Duration::from_secs(30);
+/// Each look reaches every machine over ssh; dibstop looks this often by default.
+const POLL: Duration = Duration::from_secs(10);
 
-/// Reads the jobs into `feed` for as long as the process runs. Without dibs, there are none.
+/// Reads the machines and their jobs into `feed` for as long as the process runs. Without
+/// dibs, there are none.
 pub fn spawn(feed: Feed) {
     std::thread::spawn(move || {
         loop {
-            feed.replace(status().map(|text| jobs(&text)).unwrap_or_default());
+            let machines = look().map(|text| machines(&text)).unwrap_or_default();
+            feed.replace(jobs(&machines));
+            feed.dibs(machines);
             std::thread::sleep(POLL);
         }
     });
 }
 
-fn status() -> Option<String> {
-    let output = Command::new("dibs")
-        // Without `--all`, `DIBS_ON` or running on a machine itself narrows it to one machine,
-        // printed with no name above it.
-        .args(["--status", "--json", "--all"])
+/// Both streams, in the order they were written: a machine's trouble goes to stderr, under
+/// its name on stdout.
+fn look() -> Option<String> {
+    let output = Command::new("sh")
+        .args(["-c", "exec dibs --status --json --all 2>&1"])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()
         .ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn jobs(text: &str) -> Vec<Node> {
-    let mut machine = "this machine";
-    let mut nodes = Vec::new();
+fn machines(text: &str) -> Vec<DibsMachine> {
+    let mut machines: Vec<DibsMachine> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
-        // A machine's name stands at the start of its line, and what it said is indented
-        // under it, its status included unless it is the only machine.
-        if !line.starts_with('{') {
-            if !raw.starts_with(char::is_whitespace) && !line.is_empty() {
-                machine = line;
-            }
+        if line.is_empty() {
             continue;
         }
-        let Ok(status) = serde_json::from_str::<Value>(line) else {
+        // Without `--all`, as with `DIBS_ON` set, the one machine's status comes alone.
+        if machines.is_empty() || !raw.starts_with(char::is_whitespace) && !line.starts_with('{') {
+            let name = match line.starts_with('{') {
+                true => "this machine",
+                false => line,
+            };
+            machines.push(DibsMachine {
+                name: name.to_string(),
+                status: None,
+                trouble: None,
+            });
+            if !line.starts_with('{') {
+                continue;
+            }
+        }
+        let machine = machines.last_mut().expect("pushed above");
+        match serde_json::from_str::<Status>(line) {
+            Ok(status) => machine.status = Some(status),
+            Err(_) => {
+                let trouble = machine.trouble.get_or_insert_default();
+                if !trouble.is_empty() {
+                    trouble.push('\n');
+                }
+                trouble.push_str(line);
+            }
+        }
+    }
+    machines
+}
+
+fn jobs(machines: &[DibsMachine]) -> Vec<Node> {
+    let mut nodes = Vec::new();
+    for machine in machines {
+        let Some(status) = &machine.status else {
             continue;
         };
-        for (list, queued) in [("holders", false), ("queue", true)] {
-            let listed = status.get(list).and_then(Value::as_array);
-            nodes.extend(
-                listed
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|job| node(job, machine, queued)),
-            );
+        let name = machine.name.as_str();
+        for holder in &status.holders {
+            let doing = match holder.mode {
+                Mode::Bench => "measuring",
+                _ => "running",
+            };
+            nodes.push(job(
+                name,
+                &holder.agent,
+                holder.pid,
+                holder.label.as_str(),
+                false,
+                doing,
+                holder.elapsed,
+            ));
+        }
+        for waiter in &status.queue {
+            nodes.push(job(
+                name,
+                &waiter.agent,
+                waiter.pid,
+                waiter.label.as_str(),
+                true,
+                "queued",
+                waiter.waiting,
+            ));
         }
     }
     nodes
 }
 
-fn node(job: &Value, machine: &str, queued: bool) -> Option<Node> {
-    let text = |key: &str| {
-        job.get(key)
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-    };
-    let agent = text("agent")?;
-    let pid = job.get("pid").and_then(Value::as_u64)?;
-    let seconds = job
-        .get(if queued { "waiting" } else { "elapsed" })
-        .and_then(Value::as_u64);
-    let mut doing = match (queued, text("mode")) {
-        (true, _) => format!("queued on {machine}"),
-        (false, Some("bench")) => format!("measuring on {machine}"),
-        (false, _) => format!("running on {machine}"),
-    };
-    if let Some(seconds) = seconds {
-        doing.push_str(&format!(" for {}", took(seconds)));
-    }
-    Some(Node {
+fn job(
+    machine: &str,
+    agent: &str,
+    pid: u32,
+    label: &str,
+    queued: bool,
+    doing: &str,
+    seconds: u64,
+) -> Node {
+    Node {
         id: format!("dibs:{machine}:{pid}"),
         parent: Some(format!("name:{agent}")),
         kind: Some(NodeKind::Run("dibs".to_string())),
-        name: Some(text("label").unwrap_or("job").to_string()),
-        doing: Some(doing),
-        state: Some(if queued {
-            NodeState::Idle
-        } else {
-            NodeState::Working
+        name: Some(match label {
+            "" => "job".to_string(),
+            label => label.to_string(),
+        }),
+        doing: Some(format!("{doing} on {machine} for {}", took(seconds))),
+        state: Some(match queued {
+            true => NodeState::Idle,
+            false => NodeState::Working,
         }),
         machine: Some(machine.to_string()),
         ..Node::default()
-    })
+    }
 }
 
 fn took(seconds: u64) -> String {
@@ -112,18 +153,40 @@ fn took(seconds: u64) -> String {
 mod tests {
     use super::*;
 
+    fn holder(mode: &str, pid: u32, label: &str, agent: &str, elapsed: u64) -> String {
+        format!(
+            r#"{{"mode":"{mode}","pid":{pid},"label":"{label}","agent":"{agent}","cmd":"cargo test","started":0,"elapsed":{elapsed},"cpu":0}}"#
+        )
+    }
+
+    fn status(holders: &[String], queue: &[String]) -> String {
+        format!(
+            r#"{{"t":0,"state":"shared","cores":8,"load":0,"caches":[],"clones":[],"holders":[{}],"queue":[{}]}}"#,
+            holders.join(","),
+            queue.join(",")
+        )
+    }
+
     #[test]
-    fn each_job_hangs_under_the_agent_that_asked() {
-        let text = concat!(
-            "host-a\n",
-            r#"  {"state":"shared","holders":[{"mode":"shared","pid":41,"label":"widgets-test","agent":"builder","elapsed":125}],"queue":[{"mode":"bench","pid":42,"label":"widgets-bench","agent":"tuner","waiting":30}]}"#,
-            "\n\nhost-b\n",
-            "  ssh: Could not resolve hostname host-b\n",
-            "host-c\n",
-            r#"  {"state":"idle","holders":[],"queue":[]}"#,
-            "\n",
+    fn each_machine_says_its_status_or_why_it_could_not() {
+        let waiter = r#"{"position":1,"mode":"bench","pid":42,"label":"widgets-bench","agent":"tuner","cmd":"cargo bench","arrived":0,"waiting":30}"#;
+        let text = format!(
+            "host-a\n  {}\n\nhost-b\n  ssh: Could not resolve hostname host-b\n  dibs: cannot reach it\nhost-c\n  {}\n",
+            status(
+                &[holder("shared", 41, "widgets-test", "builder", 125)],
+                &[waiter.to_string()]
+            ),
+            status(&[], &[]),
         );
-        let nodes = jobs(text);
+        let machines = machines(&text);
+        let names: Vec<_> = machines.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["host-a", "host-b", "host-c"]);
+        assert!(machines[1].status.is_none());
+        assert_eq!(
+            machines[1].trouble.as_deref(),
+            Some("ssh: Could not resolve hostname host-b\ndibs: cannot reach it")
+        );
+        let nodes = jobs(&machines);
         let shown: Vec<_> = nodes
             .iter()
             .map(|node| {
@@ -159,9 +222,10 @@ mod tests {
 
     #[test]
     fn one_machine_alone_is_read_too() {
-        let text = r#"{"state":"shared","holders":[{"mode":"bench","pid":7,"label":"widgets-bench","agent":"tuner","elapsed":5}],"queue":[]}"#;
-        let nodes = jobs(text);
-        assert_eq!(nodes.len(), 1);
+        let text = status(&[holder("bench", 7, "widgets-bench", "tuner", 5)], &[]);
+        let machines = machines(&text);
+        assert_eq!(machines[0].name, "this machine");
+        let nodes = jobs(&machines);
         assert_eq!(
             nodes[0].doing.as_deref(),
             Some("measuring on this machine for 5s")
