@@ -1874,7 +1874,7 @@ dependencies = [
 [[package]]
 name = "dibs-format"
 version = "0.1.0"
-source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#3c0b9393afbbd76e5bb3d2021996795e92aaa141"
+source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#38b170d29607f6cfa18365a66a1e0990b8852079"
 dependencies = [
  "libc",
  "serde",
@@ -1884,7 +1884,7 @@ dependencies = [
 [[package]]
 name = "dibstop-view"
 version = "0.1.0"
-source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#3c0b9393afbbd76e5bb3d2021996795e92aaa141"
+source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#38b170d29607f6cfa18365a66a1e0990b8852079"
 dependencies = [
  "dibs-format",
  "egui",
@@ -6625,7 +6625,7 @@ version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e"
 dependencies = [
- "skrifa 0.44.0",
+ "skrifa 0.40.0",
  "yazi",
  "zeno",
 ]
