@@ -158,7 +158,8 @@ async fn caching(
 ) -> axum::response::Response {
     let kept = request.uri().path().ends_with(".ttf");
     let mut response = next.run(request).await;
-    let rule = match kept {
+    // A miss, as while an install replaces the bundle, must not be kept for a year.
+    let rule = match kept && response.status().is_success() {
         true => "public, max-age=31536000, immutable",
         false => "no-cache",
     };
