@@ -14,7 +14,8 @@ use crate::room::Feed;
 /// How often the folders are looked at. A `meta.json` is read again only once it changed.
 const POLL: Duration = Duration::from_secs(3);
 
-/// How long a run stays in the room after it last changed, once it no longer runs.
+/// How long a failed run stays in the room after it last changed. One that ended well
+/// leaves at once: still drawn under its agent, it reads as still going.
 const LINGER: Duration = Duration::from_secs(30 * 60);
 
 /// A run still marked running after this long without a change died without saying so.
@@ -73,8 +74,12 @@ impl Runs {
             };
             let quiet = now.duration_since(written).unwrap_or_default();
             if let Some(meta) = &meta {
-                let running = matches!(status(meta), "running" | "waiting-parent");
-                if quiet < LINGER || (running && quiet < STALE) {
+                let shown = match status(meta) {
+                    "running" | "waiting-parent" => quiet < STALE,
+                    "failed" => quiet < LINGER,
+                    _ => false,
+                };
+                if shown {
                     let name = folder.file_name();
                     nodes.extend(run(&name.to_string_lossy(), meta));
                 }
@@ -214,9 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_run_leaves_after_a_while_and_a_running_one_stays() {
+    fn a_run_shows_while_it_runs_and_a_failed_one_for_a_while() {
         let root = folder("linger");
         write(&root, "ended", review("done"));
+        write(&root, "failed", review("failed"));
         write(&root, "waiting", review("waiting-parent"));
         let mut runs = Runs::default();
         let shown = |nodes: Vec<Node>| -> Vec<String> {
@@ -228,7 +234,11 @@ mod tests {
         };
         let mut now = shown(runs.scan(&root, SystemTime::now()));
         now.sort();
-        assert_eq!(now, ["run:ended", "run:waiting"]);
+        assert_eq!(
+            now,
+            ["run:failed", "run:waiting"],
+            "one that ended well is gone"
+        );
         let later = SystemTime::now() + LINGER + Duration::from_secs(60);
         let nodes = runs.scan(&root, later);
         assert_eq!(
