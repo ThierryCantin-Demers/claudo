@@ -67,7 +67,10 @@ async fn serve() {
     claudo_core::herdr::spawn(hub.feed("herdr"));
     claudo_core::runs::spawn(hub.feed("runs"));
     claudo_core::board::spawn(hub.notes("board"));
-    claudo_core::dibs::spawn(hub.feed("dibs"));
+    // dibs says the same from every computer, so one whose daemon another shows can skip it.
+    if std::env::var("CLAUDO_DIBS").as_deref() != Ok("off") {
+        claudo_core::dibs::spawn(hub.feed("dibs"));
+    }
     claudo_core::transcripts::spawn(hub.notes("transcripts"));
     hub.serve(&machine_socket());
     let others = std::env::var("CLAUDO_MACHINES").unwrap_or_default();

@@ -48,6 +48,10 @@ enum Task {
         /// needs `install-daemon` there too. Repeat for more.
         #[arg(long, value_name = "HOST")]
         with: Vec<String>,
+        /// Leave dibs jobs to the daemon of another computer that shows this one's agents,
+        /// since dibs says the same from both.
+        #[arg(long)]
+        no_dibs: bool,
     },
     /// Remove what `install`, `install-applet` and `install-daemon` put in place.
     Uninstall,
@@ -124,7 +128,7 @@ fn run(task: Task) -> Result<(), String> {
         Task::Setup => need::setup(),
         Task::Install { on } => install(on.as_deref()),
         Task::InstallApplet => install_applet(),
-        Task::InstallDaemon { with } => install_daemon(&with),
+        Task::InstallDaemon { with, no_dibs } => install_daemon(&with, no_dibs),
         Task::Uninstall => uninstall(),
         Task::Cosmic { hot: true, .. } => hot(),
         Task::Cosmic { release, .. } => {
@@ -251,7 +255,7 @@ fn install_applet() -> Result<(), String> {
     Ok(())
 }
 
-fn install_daemon(others: &[String]) -> Result<(), String> {
+fn install_daemon(others: &[String], no_dibs: bool) -> Result<(), String> {
     if let Some(host) = others
         .iter()
         .find(|host| host.is_empty() || host.contains([',', ' ', '/']))
@@ -282,6 +286,9 @@ fn install_daemon(others: &[String]) -> Result<(), String> {
         format!("CLAUDO_PORT={DAEMON_PORT}"),
         format!("CLAUDO_STATIC_DIR={}", web.display()),
     ];
+    if no_dibs {
+        environment.push("CLAUDO_DIBS=off".to_string());
+    }
     if !others.is_empty() {
         environment.push(format!("CLAUDO_MACHINES={}", others.join(",")));
         // ssh from the service reaches the other computers with the keys of this session's agent.

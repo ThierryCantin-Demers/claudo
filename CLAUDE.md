@@ -511,7 +511,9 @@ wrote it.
   note in state `pr` gives the first pull request link in its text as `pr`. A
   note in state `waiting` asks a person for something, so the room shows its agent `Blocked`
   until herdr says it works again: herdr calls an agent that ended its turn done.
-- **dibs** (`core/src/dibs.rs`): `dibs --status --json` every 30 seconds, each job under the
+- **dibs** (`core/src/dibs.rs`): `dibs --status --json --all` every 30 seconds, unless
+  `CLAUDO_DIBS=off` (`install-daemon --no-dibs`) leaves it to another computer's daemon that
+  shows this one's agents, since dibs says the same from both. Each job hangs under the
   agent its holder or waiter names. dibs knows agents by herdr name, so a job's parent is
   `name:<agent>`, which the room resolves to the agent of that name, dropping jobs of
   agents it does not show (other people's).

@@ -56,6 +56,7 @@ cargo xtask install-daemon
 
 `--with <host>` also shows the agents of the daemon on another computer, as ssh names it,
 installed there the same way. The link is ssh, so nothing new listens on the network.
+dibs reports the same jobs from both computers, so install the other one with `--no-dibs`.
 
 ## Features
 
