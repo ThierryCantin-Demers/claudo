@@ -209,6 +209,7 @@ impl Transcripts {
 /// Whether a shell command runs `gh pr create`, rather than only mentioning it, as a
 /// script searching transcripts for it does.
 fn runs_pr_create(command: &str) -> bool {
+    let command = &unquoted(command);
     let assignment = |word: &str| {
         word.split_once('=').is_some_and(|(name, _)| {
             !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -231,6 +232,77 @@ fn runs_pr_create(command: &str) -> bool {
         }
         before.is_empty() || before.ends_with([';', '&', '|', '(', '{', '`', '\n'])
     })
+}
+
+/// The command with what its quotes and here-documents hold blanked out, since that is
+/// text it passes on rather than commands it runs.
+fn unquoted(command: &str) -> String {
+    let mut code = String::with_capacity(command.len());
+    let mut chars = command.chars().peekable();
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                code.push('_');
+                if chars.next().is_some() {
+                    code.push('_');
+                }
+            }
+            '\'' | '"' => {
+                code.push('_');
+                let mut escaped = false;
+                for inside in chars.by_ref() {
+                    code.push('_');
+                    match inside {
+                        '\\' if c == '"' && !escaped => escaped = true,
+                        end if end == c && !escaped => break,
+                        _ => escaped = false,
+                    }
+                }
+            }
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                code.push_str("<<");
+                if chars.peek() == Some(&'<') {
+                    chars.next();
+                    code.push('<');
+                    continue;
+                }
+                let tabs = chars.next_if_eq(&'-').is_some();
+                while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+                let mut word = String::new();
+                while let Some(c) = chars.next_if(|c| !c.is_whitespace() && !";&|<>()".contains(*c))
+                {
+                    if !matches!(c, '\'' | '"' | '\\') {
+                        word.push(c);
+                    }
+                }
+                code.push('_');
+                if !word.is_empty() {
+                    heredocs.push((word, tabs));
+                }
+            }
+            '\n' if !heredocs.is_empty() => {
+                code.push('\n');
+                for (word, tabs) in heredocs.drain(..) {
+                    loop {
+                        let line: String = chars.by_ref().take_while(|c| *c != '\n').collect();
+                        let line = if tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line
+                        };
+                        if line == word || chars.peek().is_none() {
+                            break;
+                        }
+                    }
+                }
+                code.push('\n');
+            }
+            c => code.push(c),
+        }
+    }
+    code
 }
 
 fn read_tail(path: &Path) -> Tail {
@@ -431,5 +503,13 @@ mod tests {
             "python3 -c 'if \"gh pr create\" in line: pass'"
         ));
         assert!(!runs_pr_create("echo gh pr creates"));
+        assert!(!runs_pr_create(
+            "cat <<'BODY'\ngh pr create --fill\nhttps://github.com/acme/widgets/pull/42\nBODY"
+        ));
+        assert!(runs_pr_create(
+            "cat > b.md <<-EOF\n\tgh pr create\n\tEOF\ngh pr create --body-file b.md"
+        ));
+        assert!(!runs_pr_create("python3 -c '\ngh pr create\n'"));
+        assert!(runs_pr_create("echo \"it's \\\"done\\\"\"; gh pr create"));
     }
 }

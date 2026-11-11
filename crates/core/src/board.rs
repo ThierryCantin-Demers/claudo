@@ -97,10 +97,19 @@ fn noted(session: &str, text: &str) -> Option<Node> {
     })
 }
 
-/// A note's time, written in the local time of the computer that wrote it.
+/// A note's time, written in the local time of the computer that wrote it unless it
+/// carries its offset.
 fn local_seconds(time: &str, zone: &TimeZone) -> Option<u64> {
-    let at = time.parse::<DateTime>().ok()?.to_zoned(zone.clone()).ok()?;
-    u64::try_from(at.timestamp().as_second()).ok()
+    let at = match time.parse::<jiff::Timestamp>() {
+        Ok(at) => at,
+        Err(_) => time
+            .parse::<DateTime>()
+            .ok()?
+            .to_zoned(zone.clone())
+            .ok()?
+            .timestamp(),
+    };
+    u64::try_from(at.as_second()).ok()
 }
 
 /// The first pull request link in a note, which one in state `pr` points at.
@@ -191,5 +200,7 @@ mod tests {
     fn a_notes_time_is_the_local_time_it_was_written_in() {
         let at = local_seconds("2026-11-10T14:21:03", &TimeZone::UTC);
         assert_eq!(at, Some(1_794_320_463));
+        let offset = local_seconds("2026-11-10T09:21:03-05:00", &TimeZone::UTC);
+        assert_eq!(offset, at, "a time with its offset");
     }
 }
