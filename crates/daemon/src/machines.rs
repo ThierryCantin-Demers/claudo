@@ -13,9 +13,9 @@ use claudo_protocol::{Command, Node, NodeId, RoomEvent, ServerEvent};
 use claudo_transport::Commands;
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Runs the other computer's bridge wherever `cargo xtask install-daemon` put it; sh reads
-/// it the same under any login shell.
-const BRIDGE: &str = r#"sh -c 'exec "${CARGO_HOME:-$HOME/.cargo}/bin/claudo-daemon" --bridge'"#;
+/// Runs the other computer's bridge wherever `cargo xtask install-daemon` put it, by
+/// `cargo install`'s own precedence; sh reads it the same under any login shell.
+const BRIDGE: &str = r#"sh -c 'exec "${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/claudo-daemon" --bridge'"#;
 
 #[derive(Default)]
 pub struct Machines(Vec<Machine>);

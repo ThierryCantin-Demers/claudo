@@ -134,11 +134,19 @@ impl Workdays {
         if (start..end).contains(&started) {
             return started;
         }
-        let into = self
-            .days(started)
-            .next()
-            .map_or(USUAL_START, |(day, _, _)| started - day);
-        start + into
+        // The clock time it started at, which a change to or from summer time keeps.
+        let zoned = |at: u64| {
+            Timestamp::from_second(at as i64)
+                .ok()
+                .map(|at| at.to_zoned(self.zone.clone()))
+        };
+        let (Some(started), Some(day)) = (zoned(started), zoned(start)) else {
+            return start + USUAL_START;
+        };
+        day.date()
+            .to_datetime(started.time())
+            .to_zoned(self.zone.clone())
+            .map_or(start + USUAL_START, |at| seconds(&at))
     }
 
     /// Each day from the one `from` falls in on: its start and end, and whether it counts.
@@ -318,6 +326,20 @@ mod tests {
             calendar.after(at("2026-11-14T01:00:00Z"), 9 * HOUR),
             at("2026-11-14T04:00:00Z"),
             "Friday's last three hours of work, past midnight"
+        );
+    }
+
+    #[test]
+    fn work_starts_at_the_same_clock_time_across_a_change_of_summer_time() {
+        let toronto = Workdays {
+            zone: TimeZone::get("America/Toronto").unwrap(),
+            started: Some(at("2026-11-01T14:00:00Z")),
+        };
+        let monday = at("2026-11-02T05:00:00Z");
+        assert_eq!(
+            toronto.work_starts(monday, monday + DAY),
+            at("2026-11-02T14:00:00Z"),
+            "9:00 on Sunday, the day clocks fell back, and 9:00 on Monday"
         );
     }
 }
