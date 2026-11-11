@@ -1018,13 +1018,14 @@ fn started_body(
         painter.circle_stroke(at, radius, rim);
     }
     if running {
-        let turn = (now * 1.6 + phase(&node.id)) as f32 * 2.0 * PI;
-        let reach = radius + 4.0 * scale;
-        let arc: Vec<Pos2> = (0..=16)
-            .map(|i| turn + i as f32 / 16.0 * PI * 1.2)
+        let turn = (now * 0.35 + phase(&node.id)) as f32 * 2.0 * PI;
+        let reach = radius + 3.5 * scale;
+        let arc: Vec<Pos2> = (0..=12)
+            .map(|i| turn + i as f32 / 12.0 * PI * 0.7)
             .map(|angle| at + Vec2::angled(angle) * reach)
             .collect();
-        painter.add(egui::Shape::line(arc, Stroke::new(2.0 * scale, tint)));
+        let stroke = Stroke::new(1.2 * scale, tint.gamma_multiply(0.6));
+        painter.add(egui::Shape::line(arc, stroke));
     }
     if label {
         let word = match &node.kind {
