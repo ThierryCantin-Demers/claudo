@@ -66,9 +66,12 @@ impl Transcripts {
             if now.duration_since(written).unwrap_or_default() > RECENT {
                 continue;
             }
+            // A long tool result can push the last request out of the end read; the context
+            // known before still stands.
             let context = match self.read.remove(&path) {
                 Some((at, context)) if at == written => context,
-                _ => last_context(&path),
+                Some((_, known)) => last_context(&path).or(known),
+                None => last_context(&path),
             };
             read.insert(path.clone(), (written, context));
             let Some(session) = path
@@ -156,6 +159,29 @@ mod tests {
         );
         let later = SystemTime::now() + RECENT + Duration::from_secs(60);
         assert!(Transcripts::default().scan(&projects, later).is_empty());
+        std::fs::remove_dir_all(projects).unwrap();
+    }
+
+    #[test]
+    fn a_request_pushed_out_of_the_end_read_keeps_its_context() {
+        let projects = std::env::temp_dir().join(format!("claudo-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&projects);
+        std::fs::create_dir_all(projects.join("-src-alpha")).unwrap();
+        let path = projects.join("-src-alpha/s1.jsonl");
+        let request = r#"{"type":"assistant","message":{"usage":{"input_tokens":7,"cache_read_input_tokens":1000}}}"#;
+        std::fs::write(&path, format!("{request}\n")).unwrap();
+        let mut transcripts = Transcripts::default();
+        assert_eq!(
+            transcripts.scan(&projects, SystemTime::now())[0].context,
+            Some(1007)
+        );
+        let result = format!(
+            r#"{{"type":"user","message":{{"content":"{}"}}}}"#,
+            "x".repeat(TAIL as usize)
+        );
+        std::fs::write(&path, format!("{request}\n{result}\n")).unwrap();
+        let later = SystemTime::now() + Duration::from_secs(1);
+        assert_eq!(transcripts.scan(&projects, later)[0].context, Some(1007));
         std::fs::remove_dir_all(projects).unwrap();
     }
 }

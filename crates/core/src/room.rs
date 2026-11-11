@@ -99,7 +99,9 @@ fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
         else {
             return true;
         };
-        node.parent = names.get(name).cloned();
+        // Something an agent started names itself after it: `builder~codex-review`.
+        let agent = name.split_once('~').map_or(name, |(agent, _)| agent);
+        node.parent = names.get(name).or_else(|| names.get(agent)).cloned();
         node.parent.is_some()
     });
     // herdr calls an agent that ended its turn done, though its note may ask for an answer.
@@ -300,9 +302,18 @@ mod tests {
                 parent: Some("name:someone-else".into()),
                 ..node("dibs:host-a:2")
             },
+            Node {
+                parent: Some("name:builder~codex-review".into()),
+                ..node("dibs:host-a:3")
+            },
         ]);
         let shown = &room.lock().unwrap().shown;
         assert_eq!(shown["dibs:host-a:1"].parent.as_deref(), Some("session:s1"));
         assert!(!shown.contains_key("dibs:host-a:2"));
+        assert_eq!(
+            shown["dibs:host-a:3"].parent.as_deref(),
+            Some("session:s1"),
+            "a job of a review the agent started"
+        );
     }
 }
