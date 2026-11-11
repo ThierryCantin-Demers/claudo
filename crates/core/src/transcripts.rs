@@ -213,7 +213,8 @@ fn opened(output: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut refused = false;
     for line in output.lines() {
-        let names_existing = line.contains("already exists");
+        let names_existing =
+            line.starts_with("a pull request for branch") && line.contains("already exists");
         if !names_existing && !refused {
             links.extend(crate::github::pull_links(line));
         }
@@ -538,6 +539,11 @@ mod tests {
                 "https://github.com/acme/widgets/pull/43\nerror: pathspec 'main' did not match",
                 true,
             ),
+            call("f", "git checkout -b feature; gh pr create --fill"),
+            result(
+                "f",
+                "fatal: a branch named 'feature' already exists\nhttps://github.com/acme/widgets/pull/44",
+            ),
             call("d", "gh pr create --fill"),
             answer(
                 "d",
@@ -558,6 +564,7 @@ mod tests {
         let open: HashMap<_, _> = [
             pr("acme/widgets", 42),
             pr("acme/widgets", 43),
+            pr("acme/widgets", 44),
             pr("acme/widgets", 7),
         ]
         .into_iter()
@@ -567,7 +574,7 @@ mod tests {
         let shown: Vec<_> = nodes[0].prs.iter().map(|pr| pr.number).collect();
         assert_eq!(
             shown,
-            [42, 43],
+            [42, 43, 44],
             "7 it only looked at or found already open, 9 it opened but is merged"
         );
         std::fs::remove_dir_all(projects).unwrap();

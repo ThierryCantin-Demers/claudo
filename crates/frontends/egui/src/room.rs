@@ -151,9 +151,11 @@ impl Room {
             .take()
             .filter(|id| self.nodes.contains_key(id));
         if let Some(id) = self.selected.clone() {
+            // Leaves the map at least half its tile, a narrow one too.
+            let room = ui.available_width() / 2.0;
             egui::Panel::right("room-details")
-                .default_size(440.0)
-                .size_range(280.0..=900.0)
+                .default_size(room.min(440.0))
+                .size_range(room.min(200.0)..=room)
                 .resizable(true)
                 .show(ui, |ui| self.details(ui, &id, now));
         }

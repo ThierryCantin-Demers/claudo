@@ -83,7 +83,9 @@ impl Runs {
             let quiet = now.duration_since(written).unwrap_or_default();
             if let Some(meta) = &meta {
                 let digest = match status(meta) {
-                    "done" => self.digest(&folder.path().join("digest.md"), &mut digests),
+                    "done" if quiet < KEPT => {
+                        self.digest(&folder.path().join("digest.md"), &mut digests)
+                    }
                     _ => None,
                 };
                 let shown = match status(meta) {
