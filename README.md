@@ -44,8 +44,15 @@ cargo xtask web
 cargo xtask daemon
 ```
 
-Open the URL the daemon prints; it carries the auth token. `CLAUDO_PORT` and
+Open the URL the daemon prints; it carries the auth token, which the daemon keeps in
+`~/.config/claudo/daemon-token` so the link survives restarts. `CLAUDO_PORT` and
 `CLAUDO_TOKEN` pin the port and token.
+
+To keep it running as a systemd user service instead, which prints the same link:
+
+```bash
+cargo xtask install-daemon
+```
 
 ## Features
 

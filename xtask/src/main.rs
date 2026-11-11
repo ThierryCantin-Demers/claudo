@@ -15,6 +15,9 @@ const COSMIC_BIN: &str = "claudo-cosmic";
 const APPLET_ID: &str = "com.claudo.Usage";
 const CODEX_APPLET_ID: &str = "com.claudo.CodexUsage";
 const APPLET_BIN: &str = "claudo-applet";
+const DAEMON_BIN: &str = "claudo-daemon";
+const DAEMON_UNIT: &str = "claudo-daemon.service";
+const DAEMON_PORT: u16 = 8787;
 const WEB_OUT: &str = "crates/frontends/egui/dist";
 
 #[derive(Parser)]
@@ -38,7 +41,10 @@ enum Task {
     /// Install the panel applets showing the Claude and Codex plans' usage; add them to the
     /// panel from Settings, Desktop, Panel, Configure applets.
     InstallApplet,
-    /// Remove what `install` and `install-applet` put in place.
+    /// Install the daemon as a systemd user service, serving the control room and the web
+    /// page at a link that survives restarts.
+    InstallDaemon,
+    /// Remove what `install`, `install-applet` and `install-daemon` put in place.
     Uninstall,
     /// Run the COSMIC app.
     Cosmic {
@@ -99,6 +105,7 @@ impl Task {
             Task::Egui => &[Need::Claude],
             Task::Daemon => &[Need::WebBundle, Need::Claude],
             Task::Web => &[Need::WasmTarget, Need::WasmBindgen],
+            Task::InstallDaemon => &[Need::WasmTarget, Need::WasmBindgen, Need::Claude],
             Task::Lint | Task::Test { .. } => &[Need::PkgConfig, Need::Xkbcommon],
             Task::Probe { name: Some(_) } => &[Need::Claude],
             Task::Setup | Task::Uninstall | Task::Probe { name: None } => &[],
@@ -112,6 +119,7 @@ fn run(task: Task) -> Result<(), String> {
         Task::Setup => need::setup(),
         Task::Install { on } => install(on.as_deref()),
         Task::InstallApplet => install_applet(),
+        Task::InstallDaemon => install_daemon(),
         Task::Uninstall => uninstall(),
         Task::Cosmic { hot: true, .. } => hot(),
         Task::Cosmic { release, .. } => {
@@ -155,7 +163,7 @@ fn install(on: Option<&str>) -> Result<(), String> {
     {
         return Err(format!("{host:?} is not a host ssh can reach"));
     }
-    cargo_install("crates/frontends/cosmic")?;
+    cargo_install("crates/frontends/cosmic", &["--features", "cosmic"])?;
     let bin = cargo_bin_dir()?.join(COSMIC_BIN);
     let (desktop, icon) = (desktop_file()?, icon_file()?);
     for file in [&desktop, &icon] {
@@ -203,7 +211,7 @@ fn install(on: Option<&str>) -> Result<(), String> {
 }
 
 fn install_applet() -> Result<(), String> {
-    cargo_install("crates/applet")?;
+    cargo_install("crates/applet", &["--features", "cosmic"])?;
     let bin = cargo_bin_dir()?.join(APPLET_BIN);
     println!("installed {}", bin.display());
     for (id, name, exec) in [
@@ -238,10 +246,99 @@ fn install_applet() -> Result<(), String> {
     Ok(())
 }
 
+fn install_daemon() -> Result<(), String> {
+    web()?;
+    let web = installed_web()?;
+    if web.exists() {
+        fs::remove_dir_all(&web).map_err(|e| format!("cannot replace {}: {e}", web.display()))?;
+    }
+    fs::create_dir_all(&web).map_err(|e| format!("cannot create {}: {e}", web.display()))?;
+    for file in fs::read_dir(WEB_OUT).map_err(|e| format!("cannot read {WEB_OUT}: {e}"))? {
+        let file = file.map_err(|e| format!("cannot read {WEB_OUT}: {e}"))?;
+        fs::copy(file.path(), web.join(file.file_name()))
+            .map_err(|e| format!("cannot install {}: {e}", file.path().display()))?;
+    }
+    cargo_install("crates/daemon", &[])?;
+    let bin = cargo_bin_dir()?.join(DAEMON_BIN);
+    let token = daemon_token()?;
+    let unit = daemon_unit()?;
+    fs::create_dir_all(unit.parent().unwrap())
+        .map_err(|e| format!("cannot create {}: {e}", unit.parent().unwrap().display()))?;
+    // A user service starts with systemd's PATH, which lacks where `claude` usually is.
+    let path = env::var("PATH").unwrap_or_default();
+    let service = format!(
+        "[Unit]\n\
+         Description=claudo's control room and web page\n\
+         \n\
+         [Service]\n\
+         ExecStart={bin}\n\
+         Environment=\"PATH={path}\"\n\
+         Environment=\"CLAUDO_PORT={DAEMON_PORT}\"\n\
+         Environment=\"CLAUDO_STATIC_DIR={web}\"\n\
+         Restart=on-failure\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        bin = bin.display(),
+        web = web.display(),
+    );
+    fs::write(&unit, service).map_err(|e| format!("cannot write {}: {e}", unit.display()))?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", DAEMON_UNIT])?;
+    systemctl(&["restart", DAEMON_UNIT])?;
+    println!("installed {}", bin.display());
+    println!("service {}", unit.display());
+    println!("the control room: http://127.0.0.1:{DAEMON_PORT}/?token={token}");
+    Ok(())
+}
+
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    status(Command::new("systemctl").arg("--user").args(args))
+}
+
+/// The daemon's token, kept where it reads it, made here when it has not started yet.
+fn daemon_token() -> Result<String, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = config_home()?.join("claudo/daemon-token");
+    if let Ok(kept) = fs::read_to_string(&file)
+        && !kept.trim().is_empty()
+    {
+        return Ok(kept.trim().to_string());
+    }
+    let token = fs::read_to_string("/proc/sys/kernel/random/uuid")
+        .map_err(|e| format!("cannot make a token: {e}"))?
+        .trim()
+        .to_string();
+    fs::create_dir_all(file.parent().unwrap())
+        .map_err(|e| format!("cannot create {}: {e}", file.parent().unwrap().display()))?;
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&file)
+        .and_then(|mut opened| opened.write_all(token.as_bytes()))
+        .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+    Ok(token)
+}
+
 fn uninstall() -> Result<(), String> {
     cargo(&["uninstall", COSMIC_BIN])?;
     if cargo_bin_dir()?.join(APPLET_BIN).exists() {
         cargo(&["uninstall", APPLET_BIN])?;
+    }
+    let unit = daemon_unit()?;
+    if unit.exists() {
+        systemctl(&["disable", "--now", DAEMON_UNIT])?;
+    }
+    if cargo_bin_dir()?.join(DAEMON_BIN).exists() {
+        cargo(&["uninstall", DAEMON_BIN])?;
+    }
+    let web = installed_web()?;
+    if web.exists() {
+        fs::remove_dir_all(&web).map_err(|e| format!("cannot remove {}: {e}", web.display()))?;
+        println!("removed {}", web.display());
     }
     let remote: Vec<PathBuf> = fs::read_dir(desktop_file()?.parent().unwrap())
         .into_iter()
@@ -259,6 +356,7 @@ fn uninstall() -> Result<(), String> {
         icon_file()?,
         applet_desktop_file(APPLET_ID)?,
         applet_desktop_file(CODEX_APPLET_ID)?,
+        unit,
     ]
     .into_iter()
     .chain(remote)
@@ -295,10 +393,12 @@ fn web() -> Result<(), String> {
         "wasm32-unknown-unknown",
         "--release",
     ])?;
+    let target =
+        env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
     let status = Command::new("wasm-bindgen")
         .args(["--target", "web", "--no-typescript", "--out-dir", WEB_OUT])
         .args(["--out-name", "claudo"])
-        .arg("target/wasm32-unknown-unknown/release/claudo.wasm")
+        .arg(target.join("wasm32-unknown-unknown/release/claudo.wasm"))
         .status()
         .map_err(|e| format!("cannot run wasm-bindgen: {e}"))?;
     if !status.success() {
@@ -318,21 +418,18 @@ fn cargo(args: &[&str]) -> Result<(), String> {
     status(Command::new("cargo").args(args))
 }
 
-fn cargo_install(path: &str) -> Result<(), String> {
+fn cargo_install(path: &str, features: &[&str]) -> Result<(), String> {
     let mut command = Command::new("cargo");
     // `cargo install` warns of a toolchain it takes from the environment, which is
     // where the cargo running this task left its own.
     if let Some(toolchain) = env::var_os("RUSTUP_TOOLCHAIN") {
         command.arg(format!("+{}", toolchain.to_string_lossy()));
     }
-    status(command.args([
-        "install",
-        "--path",
-        path,
-        "--features",
-        "cosmic",
-        "--locked",
-    ]))
+    status(
+        command
+            .args(["install", "--path", path, "--locked"])
+            .args(features),
+    )
 }
 
 fn status(command: &mut Command) -> Result<(), String> {
@@ -374,6 +471,22 @@ fn data_home() -> Result<PathBuf, String> {
         Some(dir) => Ok(PathBuf::from(dir)),
         None => Ok(home()?.join(".local/share")),
     }
+}
+
+fn config_home() -> Result<PathBuf, String> {
+    match env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(home()?.join(".config")),
+    }
+}
+
+/// Where the daemon finds the web bundle when not run from the repo.
+fn installed_web() -> Result<PathBuf, String> {
+    Ok(data_home()?.join("claudo/web"))
+}
+
+fn daemon_unit() -> Result<PathBuf, String> {
+    Ok(config_home()?.join(format!("systemd/user/{DAEMON_UNIT}")))
 }
 
 fn desktop_file() -> Result<PathBuf, String> {

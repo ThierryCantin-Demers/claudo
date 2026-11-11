@@ -33,6 +33,7 @@ cargo run -p claudo-egui --release           # native app
 
 cargo xtask web                              # wasm bundle -> crates/frontends/egui/dist
 cargo run -p claudo-daemon                   # serves bundle + WebSocket, prints token URL
+cargo xtask install-daemon                   # systemd user service, prints the page's link
 
 cargo run -p claudo-cosmic --features cosmic --release   # COSMIC frontend
 cargo build -p claudo-egui --target wasm32-unknown-unknown
@@ -463,6 +464,11 @@ The daemon is becoming a web control room over every agent herdr runs, Claude an
 alike; COSMIC stays the chat client. The plan lives outside the repo, with the agent that
 wrote it.
 
+- **The daemon keeps its token** in `$XDG_CONFIG_HOME/claudo/daemon-token` (mode 0600, made
+  on first start; `CLAUDO_TOKEN` overrides), so the page's link survives restarts. It serves
+  `CLAUDO_STATIC_DIR`, else `crates/frontends/egui/dist` when run from the repo, else the
+  bundle `install-daemon` copies to `$XDG_DATA_HOME/claudo/web`. The unit keeps the PATH of
+  the shell that installed it, since systemd's lacks where `claude` usually is.
 - **One hub per daemon** (`core/src/hub.rs`). Every WebSocket is a client of one headless
   `Backend`, on the thread that owns it, as the transport's clients are; a backend per
   socket ran every agent and collector once per tab. `examples/hub_probe` checks it.
