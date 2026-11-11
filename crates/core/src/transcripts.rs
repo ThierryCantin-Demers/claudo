@@ -502,12 +502,13 @@ mod tests {
             ]}})
             .to_string()
         };
-        let result = |id: &str, output: &str| {
+        let answer = |id: &str, output: &str, failed: bool| {
             serde_json::json!({"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": id, "content": output}
+                {"type": "tool_result", "tool_use_id": id, "content": output, "is_error": failed}
             ]}})
             .to_string()
         };
+        let result = |id: &str, output: &str| answer(id, output, false);
         let transcript = [
             call("a", "gh pr create --title 'Fix' --body-file body.md"),
             result("a", "https://github.com/acme/widgets/pull/42\n"),
@@ -515,6 +516,12 @@ mod tests {
             result("b", "https://github.com/acme/widgets/pull/7"),
             call("c", "cd ../gadgets && gh pr create --fill"),
             result("c", "https://github.com/acme/gadgets/pull/9"),
+            call("d", "gh pr create --fill"),
+            answer(
+                "d",
+                "a pull request for branch \"fix\" already exists:\nhttps://github.com/acme/widgets/pull/7",
+                true,
+            ),
         ]
         .join("\n")
             + "\n";
@@ -535,7 +542,7 @@ mod tests {
         assert_eq!(
             shown,
             [42],
-            "7 it only looked at, 9 it opened but is merged"
+            "7 it only looked at or found already open, 9 it opened but is merged"
         );
         std::fs::remove_dir_all(projects).unwrap();
     }

@@ -2216,9 +2216,11 @@ pub(crate) fn shell_calls(v: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// What the calls a transcript line answers returned, each with its call id.
+/// What the calls a transcript line answers returned, each with its call id, leaving out
+/// the ones that failed.
 pub(crate) fn call_results(v: &Value) -> Vec<(String, String)> {
     blocks_of(v, "tool_result")
+        .filter(|block| block.get("is_error").and_then(Value::as_bool) != Some(true))
         .filter_map(|block| {
             let id = block.get("tool_use_id")?.as_str()?;
             Some((id.to_string(), tool_result_text(block.get("content"))))
