@@ -51,7 +51,7 @@ impl Room {
             RoomEvent::Removed(id) => {
                 self.nodes.remove(&id);
             }
-            RoomEvent::Failed { node, detail } => self.failed = Some((node, detail)),
+            RoomEvent::Failed { node, detail, .. } => self.failed = Some((node, detail)),
         }
     }
 
@@ -229,6 +229,7 @@ impl Room {
                         self.sent.push(Command::Act {
                             node: node.id.clone(),
                             action,
+                            request: 0,
                         });
                     }
                 }
@@ -326,6 +327,7 @@ impl Room {
         (agent && clicked).then(|| Command::Act {
             node: node.id.clone(),
             action: Action::Focus,
+            request: 0,
         })
     }
 }

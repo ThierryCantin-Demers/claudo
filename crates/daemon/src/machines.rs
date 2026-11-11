@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command as Process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use claudo_core::hub::Hub;
@@ -23,8 +24,9 @@ struct Machine {
     commands: Commands,
     /// The nodes its room shows now.
     shows: Arc<Mutex<HashSet<NodeId>>>,
-    /// Who asked for an action on each node, to hear if it fails.
-    asked: Arc<Mutex<HashMap<NodeId, UnboundedSender<ServerEvent>>>>,
+    /// Who asked for each action relayed, by its `request`, to hear if it fails.
+    asked: Arc<Mutex<HashMap<u64, UnboundedSender<ServerEvent>>>>,
+    next: AtomicU64,
 }
 
 impl Machines {
@@ -40,7 +42,7 @@ impl Machines {
 
     /// Sends an action on another computer's node to it, saying whether one has the node.
     pub fn act(&self, command: &Command, from: &UnboundedSender<ServerEvent>) -> bool {
-        let Command::Act { node, .. } = command else {
+        let Command::Act { node, action, .. } = command else {
             return false;
         };
         let Some(machine) = self
@@ -50,12 +52,18 @@ impl Machines {
         else {
             return false;
         };
-        machine
-            .asked
-            .lock()
-            .unwrap()
-            .insert(node.clone(), from.clone());
-        machine.commands.send(command.clone());
+        // Only a failure answers, so an action that worked leaves its asker here until the
+        // tab closes.
+        let request = machine.next.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut asked = machine.asked.lock().unwrap();
+        asked.retain(|_, asker| !asker.is_closed());
+        asked.insert(request, from.clone());
+        drop(asked);
+        machine.commands.send(Command::Act {
+            node: node.clone(),
+            action: action.clone(),
+            request,
+        });
         true
     }
 }
@@ -79,7 +87,7 @@ impl Machine {
             ssh
         });
         let shows: Arc<Mutex<HashSet<NodeId>>> = Arc::default();
-        let asked: Arc<Mutex<HashMap<NodeId, UnboundedSender<ServerEvent>>>> = Arc::default();
+        let asked: Arc<Mutex<HashMap<u64, UnboundedSender<ServerEvent>>>> = Arc::default();
         let (shown, answer) = (shows.clone(), asked.clone());
         std::thread::spawn(move || {
             let mut nodes: BTreeMap<NodeId, Node> = BTreeMap::new();
@@ -97,9 +105,17 @@ impl Machine {
                     ServerEvent::Room(RoomEvent::Removed(id)) => {
                         nodes.remove(&id);
                     }
-                    ServerEvent::Room(RoomEvent::Failed { node, detail }) => {
-                        if let Some(asker) = answer.lock().unwrap().remove(&node) {
-                            let failed = RoomEvent::Failed { node, detail };
+                    ServerEvent::Room(RoomEvent::Failed {
+                        node,
+                        detail,
+                        request,
+                    }) => {
+                        if let Some(asker) = answer.lock().unwrap().remove(&request) {
+                            let failed = RoomEvent::Failed {
+                                node,
+                                detail,
+                                request: 0,
+                            };
                             let _ = asker.send(ServerEvent::Room(failed));
                         }
                         continue;
@@ -117,6 +133,7 @@ impl Machine {
             commands,
             shows,
             asked,
+            next: AtomicU64::new(0),
         }
     }
 }

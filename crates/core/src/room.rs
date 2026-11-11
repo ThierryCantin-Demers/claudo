@@ -51,14 +51,15 @@ impl Room {
             None => self.sources.push(Source { name, from, nodes }),
         }
         let every: Vec<&Source> = self.sources.iter().collect();
-        let next = merged(&every);
+        let next = merged(&every, false);
         tell(&self.clients, &self.shown, &next);
         self.shown = next;
         let own: Vec<&Source> = every
             .into_iter()
             .filter(|source| source.from != Gives::Machine)
             .collect();
-        let local = merged(&own);
+        // A job of an agent another computer runs reaches that computer through this one.
+        let local = merged(&own, true);
         tell(&self.machines, &self.local, &local);
         self.local = local;
     }
@@ -95,7 +96,8 @@ enum Gives {
     Machine,
 }
 
-fn merged(sources: &[&Source]) -> BTreeMap<NodeId, Node> {
+/// With `passed_on`, a `name:` parent no agent here has stays, for whoever hears it to find.
+fn merged(sources: &[&Source], passed_on: bool) -> BTreeMap<NodeId, Node> {
     let mut nodes: BTreeMap<NodeId, Node> = BTreeMap::new();
     for node in sources
         .iter()
@@ -135,8 +137,13 @@ fn merged(sources: &[&Source]) -> BTreeMap<NodeId, Node> {
         };
         // Something an agent started names itself after it: `builder~codex-review`.
         let agent = name.split_once('~').map_or(name, |(agent, _)| agent);
-        node.parent = names.get(name).or_else(|| names.get(agent)).cloned();
-        node.parent.is_some()
+        match names.get(name).or_else(|| names.get(agent)) {
+            Some(id) => {
+                node.parent = Some(id.clone());
+                true
+            }
+            None => passed_on,
+        }
     });
     // herdr calls an agent that ended its turn done, though its note may ask for an answer.
     for node in nodes.values_mut() {
@@ -374,5 +381,24 @@ mod tests {
             ["snapshot 0", "upserted here", "upserted there"]
         );
         assert_eq!(heard(&mut machine_events), ["snapshot 0", "upserted here"]);
+    }
+
+    #[test]
+    fn a_job_of_another_computers_agent_reaches_it() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        let (machine, mut machine_events) = unbounded_channel();
+        room.lock().unwrap().connect_machine(9, machine);
+        Feed::new(room.clone(), "dibs").replace(vec![Node {
+            parent: Some("name:elsewhere".into()),
+            ..node("dibs:host-a:1")
+        }]);
+        assert_eq!(
+            heard(&mut machine_events),
+            ["snapshot 0", "upserted dibs:host-a:1"]
+        );
+        assert!(
+            !room.lock().unwrap().shown.contains_key("dibs:host-a:1"),
+            "this computer's page has no such agent"
+        );
     }
 }

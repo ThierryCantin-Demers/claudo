@@ -543,12 +543,21 @@ impl Backend {
 
             Command::Restart => self.restart(),
 
-            Command::Act { node, action } => {
+            Command::Act {
+                node,
+                action,
+                request,
+            } => {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::herdr::act(&node, &action) {
                         let detail = error.to_string();
-                        events.to(from, ServerEvent::Room(RoomEvent::Failed { node, detail }));
+                        let failed = RoomEvent::Failed {
+                            node,
+                            detail,
+                            request,
+                        };
+                        events.to(from, ServerEvent::Room(failed));
                     }
                 });
             }

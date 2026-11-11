@@ -190,7 +190,8 @@ impl Calendar for Workdays {
 
     fn after(&self, from: u64, seconds: u64) -> u64 {
         let mut left = seconds;
-        for (start, end, work) in self.days(from) {
+        // A day's work started late runs on past midnight.
+        for (start, end, work) in self.days(from.saturating_sub(WORKDAY)) {
             let begin = self.work_starts(start, end);
             if !work || begin + WORKDAY <= from {
                 continue;
@@ -307,6 +308,16 @@ mod tests {
         assert!(
             !begins_day(Some(at("2026-11-10T09:00:00Z")), night, &zone),
             "still Tuesday's night"
+        );
+    }
+
+    #[test]
+    fn work_begun_late_runs_on_past_midnight() {
+        let calendar = utc(Some("2026-11-13T20:00:00Z"));
+        assert_eq!(
+            calendar.after(at("2026-11-14T01:00:00Z"), 9 * HOUR),
+            at("2026-11-14T04:00:00Z"),
+            "Friday's last three hours of work, past midnight"
         );
     }
 }

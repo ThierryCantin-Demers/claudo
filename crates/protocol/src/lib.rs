@@ -622,6 +622,9 @@ pub enum RoomEvent {
     Failed {
         node: NodeId,
         detail: String,
+        /// The `request` of the `Act`.
+        #[serde(default)]
+        request: u64,
     },
 }
 
@@ -770,6 +773,9 @@ pub enum Command {
     Act {
         node: NodeId,
         action: Action,
+        /// Given back in its `Failed`, for one who relays several clients' actions.
+        #[serde(default)]
+        request: u64,
     },
 }
 
