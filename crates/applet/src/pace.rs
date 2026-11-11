@@ -57,7 +57,8 @@ fn path(files: &str) -> PathBuf {
     config.join("claudo").join(format!("{files}-pace"))
 }
 
-/// Monday to Friday, by the days of a time zone.
+/// Monday to Friday, by the days of a time zone. A workday's share is there from its start:
+/// spending it in a few working hours is on pace, though the day has hours left.
 struct Workdays(TimeZone);
 
 /// Days enough for any window, should a time zone go wrong.
@@ -94,6 +95,22 @@ impl Calendar for Workdays {
             .filter(|&(_, _, work)| work)
             .map(|(start, end, _)| end.min(to).saturating_sub(start.max(from)))
             .sum()
+    }
+
+    /// Every workday begun by `now`, whole, the one the window starts in included.
+    fn allowed(&self, from: u64, now: u64) -> u64 {
+        self.days(from)
+            .take_while(|&(start, _, _)| start <= now)
+            .filter(|&(_, _, work)| work)
+            .map(|(start, end, _)| end - start)
+            .sum()
+    }
+
+    fn allowed_until(&self, now: u64) -> u64 {
+        match self.days(now).next() {
+            Some((_, end, true)) => end,
+            _ => now,
+        }
     }
 
     fn after(&self, from: u64, seconds: u64) -> u64 {
@@ -145,14 +162,38 @@ mod tests {
         };
         let monday_noon = at("2026-11-09T12:00:00Z");
         let workdays = window.standing_by(7 * DAY, monday_noon, &Workdays(TimeZone::UTC));
-        assert_eq!(workdays.even, Some(0.1), "half a workday of five");
+        assert_eq!(
+            workdays.even,
+            Some(0.2),
+            "Monday's whole share, one workday of five"
+        );
         assert_eq!(
             workdays.out_in,
-            Some(3 * DAY / 2),
-            "a quarter in half a workday: the rest in a workday and a half"
+            Some(DAY / 2 + 3 * DAY),
+            "a quarter on Monday: the rest by the end of Thursday"
         );
         let every_day = window.standing(7 * DAY, monday_noon);
         assert!(every_day.even.unwrap() > 0.35);
         assert_eq!(every_day.out_in, None);
+    }
+
+    #[test]
+    fn a_window_begun_this_afternoon_allows_todays_whole_share() {
+        let tuesday_afternoon = at("2026-11-10T13:00:00Z");
+        let window = QuotaWindow {
+            used: 0.17,
+            resets_at: tuesday_afternoon + 7 * DAY,
+        };
+        let evening = at("2026-11-10T20:00:00Z");
+        let workdays = window.standing_by(7 * DAY, evening, &Workdays(TimeZone::UTC));
+        assert_eq!(workdays.even, Some(0.2));
+        assert_eq!(workdays.out_in, None, "a day's share a day lasts the week");
+        let next_monday = at("2026-11-16T09:00:00Z");
+        let late = QuotaWindow {
+            used: 0.5,
+            ..window
+        }
+        .standing_by(7 * DAY, next_monday, &Workdays(TimeZone::UTC));
+        assert_eq!(late.even, Some(1.0), "Tuesday to Monday: all five shares");
     }
 }

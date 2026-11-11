@@ -157,6 +157,15 @@ pub trait Calendar {
     fn counted(&self, from: u64, to: u64) -> u64;
     /// When `seconds` more counted seconds will have passed after `from`.
     fn after(&self, from: u64, seconds: u64) -> u64;
+    /// How many counted seconds from `from` are meant to be spent by `now`: each as it
+    /// passes, unless the calendar gives a day's whole share when the day begins.
+    fn allowed(&self, from: u64, now: u64) -> u64 {
+        self.counted(from, now)
+    }
+    /// When what is allowed by `now` runs out: `now`, or the end of its day.
+    fn allowed_until(&self, now: u64) -> u64 {
+        now
+    }
 }
 
 /// Every second counts.
@@ -199,14 +208,15 @@ impl QuotaWindow {
         let used = self.used.clamp(0.0, 1.0);
         let start = self.resets_at.saturating_sub(length);
         let total = calendar.counted(start, self.resets_at).max(1);
-        let elapsed = calendar.counted(start, now);
-        let even = elapsed as f32 / total as f32;
+        let allowed = calendar.allowed(start, now).min(total);
+        let even = allowed as f32 / total as f32;
         // A turn or two in a window's first minutes says nothing yet of its pace.
         let judged = used >= 0.1 || even >= 0.1;
-        let out_in = (judged && elapsed > 0 && used > 0.0 && used < 1.0)
+        let out_in = (judged && allowed > 0 && used > 0.0 && used < 1.0)
             .then(|| {
-                let more = ((1.0 - used) / used * elapsed as f32) as u64;
-                calendar.after(now, more).saturating_sub(now)
+                let more = ((1.0 - used) / used * allowed as f32) as u64;
+                let from = calendar.allowed_until(now);
+                calendar.after(from, more).saturating_sub(now)
             })
             .filter(|&out_in| out_in < left);
         Standing {

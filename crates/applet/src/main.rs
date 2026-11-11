@@ -7,9 +7,9 @@
 
 mod asks;
 #[cfg_attr(not(feature = "cosmic"), allow(dead_code))]
-mod pace;
-#[cfg_attr(not(feature = "cosmic"), allow(dead_code))]
 mod codex;
+#[cfg_attr(not(feature = "cosmic"), allow(dead_code))]
+mod pace;
 #[cfg_attr(not(feature = "cosmic"), allow(dead_code))]
 mod usage;
 mod warned;
