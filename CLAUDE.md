@@ -495,8 +495,16 @@ wrote it.
 - **Board** (`core/src/board.rs`): `$BOARD_DIR/sessions/<session>.jsonl`, one note per line,
   the last standing, as the `note` of `session:<id>`. It joins as a collector of notes
   (`Hub::notes`), which only adds to nodes others give, since a note outlives its agent. A
+  note in state `pr` gives the first pull request link in its text as `pr`. A
   note in state `waiting` asks a person for something, so the room shows its agent `Blocked`
   until herdr says it works again: herdr calls an agent that ended its turn done.
+- **dibs** (`core/src/dibs.rs`): `dibs --status --json` every 30 seconds, each job under the
+  agent its holder or waiter names. dibs knows agents by herdr name, so a job's parent is
+  `name:<agent>`, which the room resolves to the agent of that name, dropping jobs of
+  agents it does not show (other people's).
+- **Transcripts** (`core/src/transcripts.rs`): a note collector giving each `session:<id>`
+  its `context`, the last main request's tokens (`cli::request_context`) read from the end
+  of transcripts changed in the last 12 hours.
 - **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`
   and `agent.prompt` with the agent's pane as `target`, found from the node id in a fresh
   snapshot (`herdr::act`). Only this machine's panes are reachable. A failure comes back as

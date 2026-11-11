@@ -5,6 +5,7 @@ pub mod backend;
 pub mod board;
 pub mod clients;
 pub mod debug;
+pub mod dibs;
 pub mod engine;
 pub mod handover;
 pub mod herdr;
@@ -15,6 +16,7 @@ pub mod runs;
 pub mod sessions;
 pub mod settings;
 pub mod status;
+pub mod transcripts;
 
 pub use status::detect_system;
 

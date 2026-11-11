@@ -85,9 +85,20 @@ fn noted(session: &str, text: &str) -> Option<Node> {
         note: Some(Note {
             waiting: field("state") == Some("waiting"),
             text: field("text").unwrap_or_default().to_string(),
+            pr: field("text")
+                .filter(|_| field("state") == Some("pr"))
+                .and_then(pull_request),
         }),
         ..Node::default()
     })
+}
+
+/// The first pull request link in a note, which one in state `pr` points at.
+fn pull_request(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .map(|word| word.trim_end_matches([',', '.', ';', ')']))
+        .find(|word| word.starts_with("https://github.com/") && word.contains("/pull/"))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -128,18 +139,39 @@ mod tests {
                     "session:s1",
                     Note {
                         waiting: true,
-                        text: "needs an answer: keep the old signature?".into()
+                        text: "needs an answer: keep the old signature?".into(),
+                        pr: None,
                     }
                 ),
                 (
                     "session:s2",
                     Note {
                         waiting: false,
-                        text: "needs a merge".into()
+                        text: "needs a merge".into(),
+                        pr: None,
                     }
                 ),
             ]
         );
         std::fs::remove_dir_all(sessions).unwrap();
+    }
+
+    #[test]
+    fn a_note_in_review_points_at_its_pull_request() {
+        let node = noted(
+            "s3",
+            r#"{"state": "pr", "text": "https://github.com/acme/widgets/pull/42, worklog widgets-42"}"#,
+        )
+        .unwrap();
+        let pr = node.note.unwrap().pr;
+        assert_eq!(
+            pr.as_deref(),
+            Some("https://github.com/acme/widgets/pull/42")
+        );
+        let working = noted(
+            "s4",
+            r#"{"state": "working", "text": "see https://github.com/acme/widgets/pull/42"}"#,
+        );
+        assert_eq!(working.unwrap().note.unwrap().pr, None);
     }
 }

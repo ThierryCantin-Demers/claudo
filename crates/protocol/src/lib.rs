@@ -547,6 +547,9 @@ pub struct Node {
     /// What its agent last noted about itself on the board.
     #[serde(default)]
     pub note: Option<Note>,
+    /// Tokens in its last request's context, for an agent with a transcript.
+    #[serde(default)]
+    pub context: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -554,6 +557,9 @@ pub struct Note {
     /// It needs a person: an answer, a decision, a review.
     pub waiting: bool,
     pub text: String,
+    /// The pull request it waits on reviewers for.
+    #[serde(default)]
+    pub pr: Option<String>,
 }
 
 impl Node {
@@ -567,13 +573,15 @@ impl Node {
         self.repo = self.repo.take().or(other.repo);
         self.machine = self.machine.take().or(other.machine);
         self.note = self.note.take().or(other.note);
+        self.context = self.context.take().or(other.context);
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeKind {
     Agent(Provider),
-    /// A folder under `agent-runs`: `review`, `explore` or `task`.
+    /// Something an agent runs, by its kind: a folder under `agent-runs` (`review`,
+    /// `explore`, `task`), or a job on a dibs machine (`dibs`).
     Run(String),
     Subagent,
 }
@@ -603,10 +611,13 @@ pub enum RoomEvent {
     /// Every node, to a client that just arrived.
     Snapshot(Vec<Node>),
     /// A node appeared or changed, and is sent whole.
-    Upserted(Node),
+    Upserted(Box<Node>),
     Removed(NodeId),
     /// An `Act` on the node failed, to the client that asked alone.
-    Failed { node: NodeId, detail: String },
+    Failed {
+        node: NodeId,
+        detail: String,
+    },
 }
 
 /// The model, thinking and permissions new conversations start with. These are concrete

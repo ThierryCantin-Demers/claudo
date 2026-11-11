@@ -2139,7 +2139,7 @@ fn quota(v: &Value) -> Option<Quota> {
 
 /// The tokens one request of the main agent had in context, from its `assistant` message;
 /// a subagent's carry the call that started it.
-fn request_context(v: &Value) -> Option<u64> {
+pub(crate) fn request_context(v: &Value) -> Option<u64> {
     let main = v.get("parent_tool_use_id").is_none_or(Value::is_null);
     if v.get("type")?.as_str()? != "assistant" || !main {
         return None;

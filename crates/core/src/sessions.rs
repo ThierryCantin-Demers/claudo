@@ -33,7 +33,7 @@ pub fn data_root() -> PathBuf {
     base.join("claudo")
 }
 
-fn claude_projects_dir() -> Option<PathBuf> {
+pub(crate) fn claude_projects_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("projects"))
 }
 

@@ -1,6 +1,7 @@
-//! Prints the control room as the herdr, runs and board collectors fill it: the nodes it starts
-//! with, then each change for as many seconds as the first argument says (30 by default).
-//! Reads herdr's socket, the `agent-runs` folders and the board; runs no turn.
+//! Prints the control room as the collectors fill it: the nodes it starts with, then each
+//! change for as many seconds as the first argument says (30 by default). Reads herdr's
+//! socket, the `agent-runs` folders, the board, `dibs --status` and the transcripts; runs
+//! no turn.
 //!   cargo run -p claudo-core --example room_probe -- 60
 
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,8 @@ fn main() {
     claudo_core::herdr::spawn(Feed::new(room.clone(), "herdr"));
     claudo_core::runs::spawn(Feed::new(room.clone(), "runs"));
     claudo_core::board::spawn(Feed::notes(room.clone(), "board"));
+    claudo_core::dibs::spawn(Feed::new(room.clone(), "dibs"));
+    claudo_core::transcripts::spawn(Feed::notes(room.clone(), "transcripts"));
     let (events, mut heard) = unbounded_channel();
     room.lock().unwrap().connect(1, events);
     std::thread::spawn(move || {
@@ -44,8 +47,18 @@ fn line(node: &Node) -> String {
         .repo
         .as_deref()
         .and_then(|repo| repo.rsplit('/').next());
+    let mut badges = Vec::new();
+    if let Some(tokens) = node.context {
+        badges.push(format!("context {tokens}"));
+    }
+    if let Some(pr) = node.note.as_ref().and_then(|note| note.pr.as_deref()) {
+        badges.push(format!("pr {pr}"));
+    }
+    if let Some(parent) = &node.parent {
+        badges.push(format!("under {parent}"));
+    }
     format!(
-        "{:<28} {:<10} {:<20} {:?} {}",
+        "{:<28} {:<10} {:<20} {:?} {} [{}]",
         node.name.as_deref().unwrap_or("(unnamed)"),
         format!(
             "{:?}",
@@ -54,5 +67,6 @@ fn line(node: &Node) -> String {
         repo.unwrap_or("-"),
         node.kind,
         node.doing.as_deref().unwrap_or(""),
+        badges.join(", "),
     )
 }

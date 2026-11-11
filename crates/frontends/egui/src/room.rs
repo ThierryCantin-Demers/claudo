@@ -46,7 +46,7 @@ impl Room {
                     .collect();
             }
             RoomEvent::Upserted(node) => {
-                self.nodes.insert(node.id.clone(), node);
+                self.nodes.insert(node.id.clone(), *node);
             }
             RoomEvent::Removed(id) => {
                 self.nodes.remove(&id);
@@ -338,8 +338,8 @@ const AGENT: f32 = 17.0;
 const CHILD: f32 = 6.0;
 /// How far an agent's caption reaches to either side.
 const CAPTION_REACH: f32 = 88.0;
-/// Under an agent: its name on up to two rows and what it is doing.
-const CAPTION: f32 = 56.0;
+/// Under an agent: its name on up to two rows, what it is doing, and its badges.
+const CAPTION: f32 = 70.0;
 const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
 /// Above an agent that started nothing.
 const HEADROOM: f32 = 10.0;
@@ -651,6 +651,38 @@ fn caption(painter: &egui::Painter, visuals: &egui::Visuals, node: &Node, at: Po
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
+    let badges = badges(node);
+    if !badges.is_empty() {
+        let tint = visuals.text_color();
+        let badges = lines(painter, &badges, 10.0 * scale, tint, 1, scale);
+        painter.galley(below + vec2(0.0, 15.0 * scale), badges, tint);
+    }
+}
+
+/// What an agent carries: its context, and the pull request it waits on.
+fn badges(node: &Node) -> String {
+    let context = node
+        .context
+        .map(|tokens| format!("{} context", thousands(tokens)));
+    let pr = pr(node).map(|(number, _)| format!("PR #{number}"));
+    [context, pr]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ·  ")
+}
+
+fn pr(node: &Node) -> Option<(&str, &str)> {
+    let link = node.note.as_ref()?.pr.as_deref()?;
+    Some((link.rsplit('/').next()?, link))
+}
+
+fn thousands(tokens: u64) -> String {
+    match tokens {
+        0..1000 => tokens.to_string(),
+        1000..1_000_000 => format!("{}k", tokens / 1000),
+        _ => format!("{:.1}M", tokens as f64 / 1e6),
+    }
 }
 
 /// Text centred on the point it is painted at, wrapped to a caption's width, its last row
@@ -716,6 +748,9 @@ fn tile(
                 if let Some(held) = held {
                     ui.label(RichText::new(format!("waiting {}", ago(held))).color(warn));
                 }
+                if let Some((number, link)) = pr(node) {
+                    ui.hyperlink_to(format!("PR #{number}"), link);
+                }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let answer = ui.add(
@@ -756,6 +791,9 @@ fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
     }
     if let Some(note) = node.note.as_ref().filter(|note| !note.text.is_empty()) {
         ui.label(format!("noted: {}", note.text));
+    }
+    if let Some(tokens) = node.context {
+        ui.label(format!("{} tokens in context", thousands(tokens)));
     }
     if let Some(repo) = &node.repo {
         ui.label(RichText::new(repo).weak().monospace());
@@ -886,11 +924,11 @@ mod tests {
     fn changes_apply_by_id() {
         let mut room = Room::default();
         room.apply(RoomEvent::Snapshot(vec![node("a", None, None)]));
-        room.apply(RoomEvent::Upserted(Node {
+        room.apply(RoomEvent::Upserted(Box::new(Node {
             state: Some(NodeState::Blocked),
             ..node("a", None, None)
-        }));
-        room.apply(RoomEvent::Upserted(node("b", None, None)));
+        })));
+        room.apply(RoomEvent::Upserted(Box::new(node("b", None, None))));
         room.apply(RoomEvent::Removed("b".to_string()));
         assert_eq!(
             room.waiting().map(|node| &node.id).collect::<Vec<_>>(),
@@ -909,11 +947,11 @@ mod tests {
             None,
             "already so when the page opened"
         );
-        room.apply(RoomEvent::Upserted(Node {
+        room.apply(RoomEvent::Upserted(Box::new(Node {
             state: Some(NodeState::Blocked),
             ..node("a", None, None)
-        }));
-        room.apply(RoomEvent::Upserted(node("b", None, None)));
+        })));
+        room.apply(RoomEvent::Upserted(Box::new(node("b", None, None))));
         room.stamp(20.0);
         room.stamp(30.0);
         assert_eq!(room.held("a", 50.0), Some(30.0));

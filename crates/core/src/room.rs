@@ -1,9 +1,10 @@
 //! The control room's graph. Each collector replaces its own nodes whenever what it watches
 //! changes; the room merges them by id, the fields of the collector that joined first
 //! first, and tells every client only what changed. A collector of notes only adds to the
-//! nodes others give: a note outlives the agent it is about.
+//! nodes others give: a note outlives the agent it is about. A parent named `name:<agent>`
+//! is the agent of that name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{Node, NodeId, NodeState, RoomEvent, ServerEvent};
@@ -44,7 +45,9 @@ impl Room {
         for (id, node) in &next {
             if self.shown.get(id) != Some(node) {
                 self.clients
-                    .send(ServerEvent::Room(RoomEvent::Upserted(node.clone())));
+                    .send(ServerEvent::Room(RoomEvent::Upserted(Box::new(
+                        node.clone(),
+                    ))));
             }
         }
         self.shown = next;
@@ -81,6 +84,23 @@ fn merged(sources: &[Source]) -> BTreeMap<NodeId, Node> {
             known.fill(node.clone());
         }
     }
+    // A collector that knows agents by name alone gives a parent as `name:<agent>`; one no
+    // agent here has the name of is someone else's.
+    let names: HashMap<String, NodeId> = nodes
+        .values()
+        .filter_map(|node| Some((node.name.clone()?, node.id.clone())))
+        .collect();
+    nodes.retain(|_, node| {
+        let Some(name) = node
+            .parent
+            .as_deref()
+            .and_then(|parent| parent.strip_prefix("name:"))
+        else {
+            return true;
+        };
+        node.parent = names.get(name).cloned();
+        node.parent.is_some()
+    });
     // herdr calls an agent that ended its turn done, though its note may ask for an answer.
     for node in nodes.values_mut() {
         let asks = node.note.as_ref().is_some_and(|note| note.waiting);
@@ -209,6 +229,7 @@ mod tests {
             note: Some(Note {
                 waiting,
                 text: "which signature?".into(),
+                pr: None,
             }),
             ..node(id)
         }
@@ -254,5 +275,27 @@ mod tests {
         assert_eq!(shown["asks"].state, Some(NodeState::Blocked));
         assert_eq!(shown["answered"].state, Some(NodeState::Working));
         assert_eq!(shown["finished"].state, Some(NodeState::Done));
+    }
+
+    #[test]
+    fn a_job_known_by_its_agents_name_hangs_under_that_agent() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        Feed::new(room.clone(), "herdr").replace(vec![Node {
+            name: Some("builder".into()),
+            ..node("session:s1")
+        }]);
+        Feed::new(room.clone(), "dibs").replace(vec![
+            Node {
+                parent: Some("name:builder".into()),
+                ..node("dibs:host-a:1")
+            },
+            Node {
+                parent: Some("name:someone-else".into()),
+                ..node("dibs:host-a:2")
+            },
+        ]);
+        let shown = &room.lock().unwrap().shown;
+        assert_eq!(shown["dibs:host-a:1"].parent.as_deref(), Some("session:s1"));
+        assert!(!shown.contains_key("dibs:host-a:2"));
     }
 }
