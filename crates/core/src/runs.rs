@@ -2,7 +2,7 @@
 //! `agent-runs`. Each folder's `meta.json` names the session of the agent that started it, so
 //! the run sits under that agent in the room. All of the folder's shapes stay in this file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -18,7 +18,8 @@ const POLL: Duration = Duration::from_secs(3);
 /// leaves at once: still drawn under its agent, it reads as still going.
 const LINGER: Duration = Duration::from_secs(30 * 60);
 
-/// A run still marked running after this long without a change died without saying so.
+/// A run that keeps no lock, still marked running after this long without a change, died
+/// without saying so.
 const STALE: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// Reads the runs in `$CLAUDO_AGENT_RUNS`, or else `agent-runs` in the XDG state directory,
@@ -60,6 +61,7 @@ impl Runs {
         };
         let mut read = HashMap::new();
         let mut nodes = Vec::new();
+        let locked = locked_inodes();
         for folder in folders.flatten() {
             let path = folder.path().join("meta.json");
             let Ok(written) = std::fs::metadata(&path).and_then(|file| file.modified()) else {
@@ -75,7 +77,11 @@ impl Runs {
             let quiet = now.duration_since(written).unwrap_or_default();
             if let Some(meta) = &meta {
                 let shown = match status(meta) {
-                    "running" | "waiting-parent" => quiet < STALE,
+                    "running" => match held(&folder.path(), &locked) {
+                        Some(held) => held,
+                        None => quiet < STALE,
+                    },
+                    "waiting-parent" => quiet < STALE,
                     "failed" => quiet < LINGER,
                     _ => false,
                 };
@@ -89,6 +95,29 @@ impl Runs {
         self.read = read;
         nodes
     }
+}
+
+/// Whether the run's driver still holds the lock it keeps on `.lock` while it runs, which
+/// one killed does not let go of in its `meta.json`. None for a run that keeps no lock.
+fn held(folder: &Path, locked: &HashSet<u64>) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let lock = std::fs::metadata(folder.join(".lock")).ok()?;
+    Some(locked.contains(&lock.ino()))
+}
+
+/// The inodes of the files locked now, from `/proc/locks`, read rather than tried: taking
+/// the lock even for a moment could turn away a run starting then.
+fn locked_inodes() -> HashSet<u64> {
+    let locks = std::fs::read_to_string("/proc/locks").unwrap_or_default();
+    locks
+        .lines()
+        .filter_map(|line| {
+            let file = line
+                .split_whitespace()
+                .find(|word| word.matches(':').count() == 2)?;
+            file.rsplit(':').next()?.parse().ok()
+        })
+        .collect()
 }
 
 fn status(meta: &Value) -> &str {
@@ -260,6 +289,26 @@ mod tests {
         std::fs::create_dir_all(root.join("half")).unwrap();
         std::fs::write(root.join("half/meta.json"), "{\"kind\":").unwrap();
         assert!(Runs::default().scan(&root, SystemTime::now()).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_run_marked_running_shows_only_while_its_lock_is_held() {
+        use std::os::unix::io::AsRawFd;
+        let root = folder("held");
+        write(&root, "live", review("running"));
+        write(&root, "killed", review("running"));
+        let lock = std::fs::File::create(root.join("live/.lock")).unwrap();
+        std::fs::File::create(root.join("killed/.lock")).unwrap();
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let runs: Vec<_> = Runs::default()
+            .scan(&root, SystemTime::now())
+            .into_iter()
+            .filter(|node| node.parent.as_deref() == Some("session:s1"))
+            .map(|node| node.id)
+            .collect();
+        assert_eq!(runs, ["run:live"]);
+        drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -502,7 +502,9 @@ wrote it.
   its Codex sub-agents (`subagents[].path`) under it. Polled, and a `meta.json` is read again
   only when its time changes. A run shows while it runs or waits on its agent, and a failed
   one for 30 minutes; one that ended well leaves at once, since under its agent it reads as
-  still going. One marked running but untouched for 12 hours died quietly and is dropped.
+  still going. `codex-review` holds an flock on the run's `.lock` while it runs, so one
+  marked running whose lock `/proc/locks` does not list was killed and is dropped; a run
+  that keeps no lock is dropped once untouched for 12 hours.
 - **Board** (`core/src/board.rs`): `$BOARD_DIR/sessions/<session>.jsonl`, one note per line,
   the last standing, as the `note` of `session:<id>`. It joins as a collector of notes
   (`Hub::notes`), which only adds to nodes others give, since a note outlives its agent. A
