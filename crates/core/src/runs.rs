@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use claudo_protocol::{Node, NodeKind, NodeState};
+use claudo_protocol::{Node, NodeKind, NodeState, Provider};
 use serde_json::Value;
 
 use crate::room::Feed;
@@ -162,6 +162,11 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
         _ => rounds,
     };
     let machine = text("/parent/machine").map(str::to_string);
+    let provider = text("/provider").map(|provider| match provider {
+        "codex" => Provider::Codex,
+        "claude" => Provider::Claude,
+        other => Provider::Other(other.to_string()),
+    });
     let mut nodes = vec![Node {
         id: id.clone(),
         parent: text("/parent/session").map(|session| format!("session:{session}")),
@@ -174,6 +179,8 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
         note: None,
         context: None,
         answered: None,
+        provider: provider.clone(),
+        prs: Vec::new(),
     }];
     let subagents = meta.get("subagents").and_then(Value::as_array);
     for (i, subagent) in subagents.into_iter().flatten().enumerate() {
@@ -194,6 +201,8 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
             note: None,
             context: None,
             answered: None,
+            provider: provider.clone(),
+            prs: Vec::new(),
         });
     }
     nodes
@@ -218,6 +227,7 @@ mod tests {
     fn review(status: &str) -> Value {
         json!({
             "kind": "review",
+            "provider": "codex",
             "title": "Review alpha",
             "parent": {"agent": "builder", "session": "s1", "machine": "host-a"},
             "repo": "/src/alpha",
@@ -245,6 +255,12 @@ mod tests {
         assert_eq!(run.doing.as_deref(), Some("round 2 of 3"));
         assert_eq!(run.machine.as_deref(), Some("host-a"));
         assert_eq!(nodes[1].parent.as_deref(), Some("run:r1"));
+        assert_eq!(run.provider, Some(Provider::Codex));
+        assert_eq!(
+            nodes[1].provider,
+            Some(Provider::Codex),
+            "a reviewer it fanned out to"
+        );
         assert_eq!(nodes[1].name.as_deref(), Some("correctness"));
         std::fs::remove_dir_all(root).unwrap();
     }

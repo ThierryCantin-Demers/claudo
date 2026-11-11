@@ -523,7 +523,13 @@ wrote it.
 - **Transcripts** (`core/src/transcripts.rs`): a note collector giving each `session:<id>`
   its `context`, the last main request's tokens (`cli::request_context`), and `answered`,
   when the person last wrote to it (`cli::from_person`: `origin.kind` `human` on a user
-  line or a queued command), read from the end of transcripts changed in the last 12 hours.
+  line or a queued command), read from the end of transcripts changed in the last 12 hours,
+  and `prs`, the open pull requests it opened. Those are the links in the results of the
+  shell calls that ran `gh pr create` (a script that only names it does not count), read
+  once from each transcript's start and then from where the last read stopped, kept to the
+  ones `gh search prs --author @me --state open` lists (`core/src/github.rs`, every 3
+  minutes). A run's node carries its `provider` from its `meta.json`, and so do its
+  sub-agents.
 - **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`
   and `agent.prompt` with the agent's pane as `target`, found from the node id in a fresh
   snapshot (`herdr::act`). Only this machine's panes are reachable. A failure comes back as

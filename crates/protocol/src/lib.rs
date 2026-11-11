@@ -558,6 +558,22 @@ pub struct Node {
     /// When the person last wrote to it, in Unix seconds.
     #[serde(default)]
     pub answered: Option<u64>,
+    /// Who runs what an agent started, such as a Codex review; an agent's is in its kind.
+    #[serde(default)]
+    pub provider: Option<Provider>,
+    /// The open pull requests it opened.
+    #[serde(default)]
+    pub prs: Vec<PullRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub url: String,
+    pub number: u64,
+    pub title: String,
+    /// `owner/name`.
+    pub repo: String,
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -586,6 +602,10 @@ impl Node {
         self.note = self.note.take().or(other.note);
         self.context = self.context.take().or(other.context);
         self.answered = self.answered.take().or(other.answered);
+        self.provider = self.provider.take().or(other.provider);
+        if self.prs.is_empty() {
+            self.prs = other.prs;
+        }
     }
 }
 

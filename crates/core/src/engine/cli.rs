@@ -2205,6 +2205,35 @@ fn content_blocks(v: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// The shell commands a transcript line's message runs, each with its call id.
+pub(crate) fn shell_calls(v: &Value) -> Vec<(String, String)> {
+    blocks_of(v, "tool_use")
+        .filter_map(|block| {
+            let id = block.get("id")?.as_str()?;
+            let command = block.pointer("/input/command")?.as_str()?;
+            Some((id.to_string(), command.to_string()))
+        })
+        .collect()
+}
+
+/// What the calls a transcript line answers returned, each with its call id.
+pub(crate) fn call_results(v: &Value) -> Vec<(String, String)> {
+    blocks_of(v, "tool_result")
+        .filter_map(|block| {
+            let id = block.get("tool_use_id")?.as_str()?;
+            Some((id.to_string(), tool_result_text(block.get("content"))))
+        })
+        .collect()
+}
+
+fn blocks_of<'a>(v: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a Value> {
+    v.pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(move |block| block.get("type").and_then(Value::as_str) == Some(kind))
+}
+
 /// `tool_result.content` is either a string or an array of text blocks.
 fn tool_result_text(v: Option<&Value>) -> String {
     match v {

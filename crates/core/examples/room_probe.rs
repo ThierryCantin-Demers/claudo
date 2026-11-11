@@ -54,6 +54,9 @@ fn line(node: &Node) -> String {
     if let Some(pr) = node.note.as_ref().and_then(|note| note.pr.as_deref()) {
         badges.push(format!("pr {pr}"));
     }
+    for pr in &node.prs {
+        badges.push(format!("open {}#{}", pr.repo, pr.number));
+    }
     if let Some(parent) = &node.parent {
         badges.push(format!("under {parent}"));
     }

@@ -7,6 +7,7 @@ pub mod clients;
 pub mod debug;
 pub mod dibs;
 pub mod engine;
+pub mod github;
 pub mod handover;
 pub mod herdr;
 pub mod hub;
