@@ -534,7 +534,8 @@ wrote it.
   ones `gh search prs --author @me --state open` lists (`core/src/github.rs`, every 3
   minutes). A run's node carries its `provider` from its `meta.json`, and so do its
   sub-agents.
-- **Machines** (the page's Machines tab, `#machines`): the dibs collector also sends every
+- **Machines** (beside the agents on the page's Room tab, as tiles the person drags into a
+  split or tabs, `egui_tiles`, laid out as eframe keeps it): the dibs collector also sends every
   machine's status, and why one could not answer, as `ServerEvent::Dibs`, which the page draws
   with dibstop's own egui view (`dibstop-view`, from the dibs repo, egui pinned to the
   version dibs uses). An action the view returns goes back as `Command::Dibs` with its

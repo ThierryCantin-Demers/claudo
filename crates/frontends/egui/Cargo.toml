@@ -12,9 +12,11 @@ path = "src/main.rs"
 claudo-protocol.workspace = true
 claudo-transport.workspace = true
 dibstop-view = { workspace = true, features = ["egui"] }
-eframe = "=0.36.2"
+eframe = { version = "=0.36.2", features = ["persistence"] }
 egui = "=0.36.2"
 egui_commonmark = "0.25.0"
+egui_tiles = "0.17.1"
+serde.workspace = true
 
 # Native folder picker (browser can't pick the daemon's server-side folders).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -22,4 +24,4 @@ rfd = "0.17.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Location"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }

@@ -11,6 +11,7 @@ use claudo_protocol::{
 };
 use claudo_transport::{Transport, connect};
 
+mod desk;
 mod machines;
 mod room;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -26,7 +27,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             install_jp_font(&cc.egui_ctx);
-            Ok(Box::new(ClaudoApp::new()))
+            Ok(Box::new(ClaudoApp::new(cc.storage)))
         }),
     )
 }
@@ -48,7 +49,7 @@ fn main() {
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
                     install_jp_font(&cc.egui_ctx);
-                    Ok(Box::new(ClaudoApp::new()))
+                    Ok(Box::new(ClaudoApp::new(cc.storage)))
                 }),
             )
             .await
@@ -114,33 +115,27 @@ struct ClaudoApp {
     page: Page,
     room: room::Room,
     machines: machines::Machines,
+    desk: desk::Desk,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
-    /// Every agent the daemon's collectors see.
+    /// Every agent the daemon's collectors see, beside the dibs machines.
     Room,
-    /// The dibs machines, as dibstop shows them.
-    Machines,
     Chat,
 }
 
-/// Only the daemon has collectors to fill the room. A link ending in `#machines` opens on them.
+/// Only the daemon has collectors to fill the room.
 fn first_page() -> Page {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let hash = web_sys::window().and_then(|window| window.location().hash().ok());
-        match hash.as_deref() {
-            Some("#machines") => Page::Machines,
-            _ => Page::Room,
-        }
+    if cfg!(target_arch = "wasm32") {
+        Page::Room
+    } else {
+        Page::Chat
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    Page::Chat
 }
 
 impl ClaudoApp {
-    fn new() -> Self {
+    fn new(storage: Option<&dyn eframe::Storage>) -> Self {
         let mut transport = connect();
         transport.send(Command::GetStatus);
         transport.send(Command::GetSettings);
@@ -172,6 +167,7 @@ impl ClaudoApp {
             lost: None,
             page: first_page(),
             room: room::Room::default(),
+            desk: desk::Desk::new(storage),
             machines: machines::Machines::default(),
         }
     }
@@ -590,6 +586,10 @@ impl ClaudoApp {
 }
 
 impl eframe::App for ClaudoApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.desk.save(storage);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.handle_zoom(ui);
@@ -630,23 +630,17 @@ impl eframe::App for ClaudoApp {
         egui::Panel::top("pages").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Room, "Room");
-                ui.selectable_value(&mut self.page, Page::Machines, "Machines");
                 ui.selectable_value(&mut self.page, Page::Chat, "Chat");
             });
         });
         // A machine running only Codex agents never has Claude ready.
         if self.page == Page::Room {
-            egui::CentralPanel::default().show(ui, |ui| self.room.ui(ui));
-            for command in self.room.take_sent() {
-                self.transport.send(command);
-            }
-            return;
-        }
-        if self.page == Page::Machines {
-            let asked = egui::CentralPanel::default()
-                .show(ui, |ui| self.machines.ui(ui))
+            let sent = egui::CentralPanel::default()
+                .show(ui, |ui| {
+                    self.desk.ui(ui, &mut self.room, &mut self.machines)
+                })
                 .inner;
-            if let Some(command) = asked {
+            for command in sent {
                 self.transport.send(command);
             }
             return;
