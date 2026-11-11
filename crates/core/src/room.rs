@@ -145,9 +145,16 @@ fn merged(sources: &[&Source], passed_on: bool) -> BTreeMap<NodeId, Node> {
             None => passed_on,
         }
     });
-    // herdr calls an agent that ended its turn done, though its note may ask for an answer.
+    // herdr calls an agent that ended its turn done, though its note may ask for an answer:
+    // until the person writes to it, when the note has gone stale unless written again.
     for node in nodes.values_mut() {
-        let asks = node.note.as_ref().is_some_and(|note| note.waiting);
+        let asks = node.note.as_ref().is_some_and(|note| {
+            let answered = node
+                .answered
+                .zip(note.at)
+                .is_some_and(|(answered, at)| answered >= at);
+            note.waiting && !answered
+        });
         if asks && node.state != Some(NodeState::Working) {
             node.state = Some(NodeState::Blocked);
         }
@@ -283,6 +290,7 @@ mod tests {
                 waiting,
                 text: "which signature?".into(),
                 pr: None,
+                at: Some(100),
             }),
             ..node(id)
         }
@@ -400,5 +408,29 @@ mod tests {
             !room.lock().unwrap().shown.contains_key("dibs:host-a:1"),
             "this computer's page has no such agent"
         );
+    }
+
+    #[test]
+    fn a_waiting_note_goes_stale_once_the_person_writes_to_the_agent() {
+        let room = Arc::new(Mutex::new(Room::default()));
+        let done = |id: &str, answered: Option<u64>| Node {
+            state: Some(NodeState::Done),
+            answered,
+            ..node(id)
+        };
+        Feed::new(room.clone(), "herdr").replace(vec![
+            done("unanswered", Some(50)),
+            done("answered", Some(150)),
+            done("never", None),
+        ]);
+        Feed::notes(room.clone(), "board").replace(vec![
+            noted("unanswered", true),
+            noted("answered", true),
+            noted("never", true),
+        ]);
+        let shown = &room.lock().unwrap().shown;
+        assert_eq!(shown["unanswered"].state, Some(NodeState::Blocked));
+        assert_eq!(shown["answered"].state, Some(NodeState::Done));
+        assert_eq!(shown["never"].state, Some(NodeState::Blocked));
     }
 }

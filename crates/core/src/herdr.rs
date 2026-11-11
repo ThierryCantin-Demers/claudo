@@ -218,6 +218,7 @@ fn nodes(snapshot: &Value, machine: &str, repos: &mut Repos) -> Vec<Node> {
                 parent: None,
                 note: None,
                 context: None,
+                answered: None,
             })
         })
         .collect()

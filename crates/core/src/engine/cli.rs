@@ -2137,6 +2137,22 @@ fn quota(v: &Value) -> Option<Quota> {
     })
 }
 
+/// Whether a transcript line is a message the person wrote: typed in the terminal or the
+/// Claude app, or sent while a turn ran, which joins it as a queued command. Another
+/// agent's message, a background call's end and an interrupt are not.
+pub(crate) fn from_person(v: &Value) -> bool {
+    let human = |v: &Value| v.pointer("/origin/kind").and_then(Value::as_str) == Some("human");
+    match v.get("type").and_then(Value::as_str) {
+        Some("user") => human(v),
+        Some("attachment") => {
+            let attachment = &v["attachment"];
+            attachment.get("type").and_then(Value::as_str) == Some("queued_command")
+                && human(attachment)
+        }
+        _ => false,
+    }
+}
+
 /// The tokens one request of the main agent had in context, from its `assistant` message;
 /// a subagent's carry the call that started it.
 pub(crate) fn request_context(v: &Value) -> Option<u64> {

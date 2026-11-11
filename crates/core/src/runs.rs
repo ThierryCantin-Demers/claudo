@@ -173,6 +173,7 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
         machine: machine.clone(),
         note: None,
         context: None,
+        answered: None,
     }];
     let subagents = meta.get("subagents").and_then(Value::as_array);
     for (i, subagent) in subagents.into_iter().flatten().enumerate() {
@@ -192,6 +193,7 @@ fn run(folder: &str, meta: &Value) -> Vec<Node> {
             machine: machine.clone(),
             note: None,
             context: None,
+            answered: None,
         });
     }
     nodes

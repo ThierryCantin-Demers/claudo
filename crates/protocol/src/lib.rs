@@ -555,6 +555,9 @@ pub struct Node {
     /// Tokens in its last request's context, for an agent with a transcript.
     #[serde(default)]
     pub context: Option<u64>,
+    /// When the person last wrote to it, in Unix seconds.
+    #[serde(default)]
+    pub answered: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -565,6 +568,9 @@ pub struct Note {
     /// The pull request it waits on reviewers for.
     #[serde(default)]
     pub pr: Option<String>,
+    /// When it was written, in Unix seconds.
+    #[serde(default)]
+    pub at: Option<u64>,
 }
 
 impl Node {
@@ -579,6 +585,7 @@ impl Node {
         self.machine = self.machine.take().or(other.machine);
         self.note = self.note.take().or(other.note);
         self.context = self.context.take().or(other.context);
+        self.answered = self.answered.take().or(other.answered);
     }
 }
 

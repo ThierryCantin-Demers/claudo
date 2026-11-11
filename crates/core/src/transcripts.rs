@@ -1,5 +1,6 @@
 //! How full each Claude agent's context is, from its transcript's last request of the main
-//! agent. A note on `session:<id>`, so only an agent another collector shows gets one.
+//! agent, and when the person last wrote to it. A note on `session:<id>`, so only an agent
+//! another collector shows gets one.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -34,17 +35,24 @@ pub fn spawn(feed: Feed) {
     });
 }
 
-/// Each recent transcript's context as last read, with when it was written.
+/// Each recent transcript's end as last read, with when it was written.
 #[derive(Default)]
 struct Transcripts {
-    read: HashMap<PathBuf, (SystemTime, Option<u64>)>,
+    read: HashMap<PathBuf, (SystemTime, Tail)>,
+}
+
+/// What a transcript's end says.
+#[derive(Clone, Copy, Default)]
+struct Tail {
+    context: Option<u64>,
+    answered: Option<u64>,
 }
 
 impl Transcripts {
     fn scan(&mut self, projects: &Path, now: SystemTime) -> Vec<Node> {
         let mut read = HashMap::new();
         // A session that moved leaves a copy behind; the newest is the live one.
-        let mut sessions: HashMap<String, (SystemTime, Option<u64>)> = HashMap::new();
+        let mut sessions: HashMap<String, (SystemTime, Tail)> = HashMap::new();
         let files = std::fs::read_dir(projects)
             .into_iter()
             .flatten()
@@ -66,14 +74,20 @@ impl Transcripts {
             if now.duration_since(written).unwrap_or_default() > RECENT {
                 continue;
             }
-            // A long tool result can push the last request out of the end read; the context
+            // A long tool result can push the last request out of the end read; what was
             // known before still stands.
-            let context = match self.read.remove(&path) {
-                Some((at, context)) if at == written => context,
-                Some((_, known)) => last_context(&path).or(known),
-                None => last_context(&path),
+            let tail = match self.read.remove(&path) {
+                Some((at, tail)) if at == written => tail,
+                Some((_, known)) => {
+                    let tail = read_tail(&path);
+                    Tail {
+                        context: tail.context.or(known.context),
+                        answered: tail.answered.or(known.answered),
+                    }
+                }
+                None => read_tail(&path),
             };
-            read.insert(path.clone(), (written, context));
+            read.insert(path.clone(), (written, tail));
             let Some(session) = path
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
@@ -82,24 +96,48 @@ impl Transcripts {
             };
             let newest = sessions.get(&session).is_none_or(|(at, _)| *at < written);
             if newest {
-                sessions.insert(session, (written, context));
+                sessions.insert(session, (written, tail));
             }
         }
         self.read = read;
         sessions
             .into_iter()
-            .filter_map(|(session, (_, context))| {
-                Some(Node {
-                    id: format!("session:{session}"),
-                    context: Some(context?),
-                    ..Node::default()
-                })
+            .filter(|(_, (_, tail))| tail.context.is_some() || tail.answered.is_some())
+            .map(|(session, (_, tail))| Node {
+                id: format!("session:{session}"),
+                context: tail.context,
+                answered: tail.answered,
+                ..Node::default()
             })
             .collect()
     }
 }
 
-fn last_context(path: &Path) -> Option<u64> {
+fn read_tail(path: &Path) -> Tail {
+    tail_text(path).map_or_else(Tail::default, |text| Tail {
+        context: text
+            .lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .find_map(|line| crate::engine::cli::request_context(&line)),
+        answered: text
+            .lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(crate::engine::cli::from_person)
+            .and_then(|line| {
+                let at = line
+                    .get("timestamp")?
+                    .as_str()?
+                    .parse::<jiff::Timestamp>()
+                    .ok()?;
+                u64::try_from(at.as_second()).ok()
+            }),
+    })
+}
+
+/// The last whole lines of a transcript, up to `TAIL` bytes of them.
+fn tail_text(path: &Path) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(TAIL);
@@ -108,16 +146,12 @@ fn last_context(path: &Path) -> Option<u64> {
     file.read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
     // A read from the middle starts partway through a line.
-    let whole = if start > 0 {
-        text.split_once('\n').map_or("", |(_, rest)| rest)
+    Some(if start > 0 {
+        text.split_once('\n')
+            .map_or(String::new(), |(_, rest)| rest.to_string())
     } else {
-        &text
-    };
-    whole
-        .lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .find_map(|line| crate::engine::cli::request_context(&line))
+        text.into_owned()
+    })
 }
 
 #[cfg(test)]
@@ -182,6 +216,25 @@ mod tests {
         std::fs::write(&path, format!("{request}\n{result}\n")).unwrap();
         let later = SystemTime::now() + Duration::from_secs(1);
         assert_eq!(transcripts.scan(&projects, later)[0].context, Some(1007));
+        std::fs::remove_dir_all(projects).unwrap();
+    }
+
+    #[test]
+    fn the_person_answered_at_their_last_message_and_no_one_elses() {
+        let projects = std::env::temp_dir().join(format!("claudo-answered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&projects);
+        std::fs::create_dir_all(projects.join("-src-alpha")).unwrap();
+        let transcript = [
+            r#"{"type":"user","timestamp":"2026-11-11T10:00:00Z","origin":{"kind":"human"},"message":{"content":"go"}}"#,
+            r#"{"type":"attachment","timestamp":"2026-11-11T10:05:00Z","attachment":{"type":"queued_command","prompt":"also this","origin":{"kind":"human"}}}"#,
+            r#"{"type":"user","timestamp":"2026-11-11T11:00:00Z","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>"}}"#,
+            r#"{"type":"user","timestamp":"2026-11-11T11:30:00Z","origin":{"name":"builder"},"message":{"content":"from another agent"}}"#,
+        ]
+        .join("\n");
+        std::fs::write(projects.join("-src-alpha/s1.jsonl"), transcript).unwrap();
+        let nodes = Transcripts::default().scan(&projects, SystemTime::now());
+        let at = "2026-11-11T10:05:00Z".parse::<jiff::Timestamp>().unwrap();
+        assert_eq!(nodes[0].answered, Some(at.as_second() as u64));
         std::fs::remove_dir_all(projects).unwrap();
     }
 }

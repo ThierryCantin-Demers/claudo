@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use claudo_protocol::{Node, Note};
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use crate::room::Feed;
@@ -88,9 +90,17 @@ fn noted(session: &str, text: &str) -> Option<Node> {
             pr: field("text")
                 .filter(|_| field("state") == Some("pr"))
                 .and_then(pull_request),
+            // Its own time, as the file's changes with every sync between computers.
+            at: field("t").and_then(|time| local_seconds(time, &TimeZone::system())),
         }),
         ..Node::default()
     })
+}
+
+/// A note's time, written in the local time of the computer that wrote it.
+fn local_seconds(time: &str, zone: &TimeZone) -> Option<u64> {
+    let at = time.parse::<DateTime>().ok()?.to_zoned(zone.clone()).ok()?;
+    u64::try_from(at.timestamp().as_second()).ok()
 }
 
 /// The first pull request link in a note, which one in state `pr` points at.
@@ -141,6 +151,7 @@ mod tests {
                         waiting: true,
                         text: "needs an answer: keep the old signature?".into(),
                         pr: None,
+                        at: None,
                     }
                 ),
                 (
@@ -149,6 +160,7 @@ mod tests {
                         waiting: false,
                         text: "needs a merge".into(),
                         pr: None,
+                        at: None,
                     }
                 ),
             ]
@@ -173,5 +185,11 @@ mod tests {
             r#"{"state": "working", "text": "see https://github.com/acme/widgets/pull/42"}"#,
         );
         assert_eq!(working.unwrap().note.unwrap().pr, None);
+    }
+
+    #[test]
+    fn a_notes_time_is_the_local_time_it_was_written_in() {
+        let at = local_seconds("2026-11-10T14:21:03", &TimeZone::UTC);
+        assert_eq!(at, Some(1_794_320_463));
     }
 }
