@@ -26,7 +26,7 @@ fn main() -> eframe::Result<()> {
         "claudo",
         options,
         Box::new(|cc| {
-            install_jp_font(&cc.egui_ctx);
+            load_jp_font(&cc.egui_ctx);
             Ok(Box::new(ClaudoApp::new(cc.storage)))
         }),
     )
@@ -48,7 +48,7 @@ fn main() {
                 canvas,
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
-                    install_jp_font(&cc.egui_ctx);
+                    load_jp_font(&cc.egui_ctx);
                     Ok(Box::new(ClaudoApp::new(cc.storage)))
                 }),
             )
@@ -1300,14 +1300,50 @@ impl ClaudoApp {
 /// is embedded in the binary rather than read from the system, so it works
 /// identically on any machine and in the browser (no fontconfig, no download).
 /// BIZ UDPGothic, SIL OFL: see assets/fonts/OFL.txt.
+#[cfg(not(target_arch = "wasm32"))]
 const JP_FONT: &[u8] = include_bytes!("../../../../assets/fonts/BIZUDPGothic-Regular.ttf");
 
-fn install_jp_font(ctx: &egui::Context) {
+/// The page fetches the font beside it rather than carrying it, so a new build does not send
+/// its megabytes again: the daemon lets the browser keep it for good.
+#[cfg(target_arch = "wasm32")]
+const JP_FONT_FILE: &str = "BIZUDPGothic-Regular.ttf";
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_jp_font(ctx: &egui::Context) {
+    install_jp_font(ctx, egui::FontData::from_static(JP_FONT));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_jp_font(ctx: &egui::Context) {
+    let ctx = ctx.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Some(bytes) = fetch(JP_FONT_FILE).await {
+            install_jp_font(&ctx, egui::FontData::from_owned(bytes));
+            ctx.request_repaint();
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch(path: &str) -> Option<Vec<u8>> {
+    use eframe::wasm_bindgen::JsCast as _;
+    use wasm_bindgen_futures::JsFuture;
+    let response = JsFuture::from(web_sys::window()?.fetch_with_str(path))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let buffer = JsFuture::from(response.array_buffer().ok()?).await.ok()?;
+    Some(wasm_bindgen_futures::js_sys::Uint8Array::new(&buffer).to_vec())
+}
+
+fn install_jp_font(ctx: &egui::Context, font: egui::FontData) {
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "jp".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(JP_FONT)),
-    );
+    fonts
+        .font_data
+        .insert("jp".to_owned(), std::sync::Arc::new(font));
     // Fallback (appended, not prepended) so Latin keeps egui's default face.
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts

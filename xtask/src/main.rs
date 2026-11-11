@@ -433,14 +433,15 @@ fn web() -> Result<(), String> {
         "claudo-egui",
         "--target",
         "wasm32-unknown-unknown",
-        "--release",
+        "--profile",
+        "web",
     ])?;
     let target =
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
     let status = Command::new("wasm-bindgen")
         .args(["--target", "web", "--no-typescript", "--out-dir", WEB_OUT])
         .args(["--out-name", "claudo"])
-        .arg(target.join("wasm32-unknown-unknown/release/claudo.wasm"))
+        .arg(target.join("wasm32-unknown-unknown/web/claudo.wasm"))
         .status()
         .map_err(|e| format!("cannot run wasm-bindgen: {e}"))?;
     if !status.success() {
@@ -451,6 +452,11 @@ fn web() -> Result<(), String> {
         format!("{WEB_OUT}/index.html"),
     )
     .map_err(|e| format!("cannot copy index.html: {e}"))?;
+    fs::copy(
+        "assets/fonts/BIZUDPGothic-Regular.ttf",
+        format!("{WEB_OUT}/BIZUDPGothic-Regular.ttf"),
+    )
+    .map_err(|e| format!("cannot copy the font: {e}"))?;
     compress_web();
     println!("web bundle in {WEB_OUT}; serve it with: cargo xtask daemon");
     Ok(())
@@ -460,7 +466,7 @@ fn web() -> Result<(), String> {
 /// takes them: the bundle is tens of megabytes, and a tunnel over Wi-Fi is slow. A compressor
 /// that is missing only costs the copy, and an old copy is removed first so none is stale.
 fn compress_web() {
-    for file in ["claudo_bg.wasm", "claudo.js"] {
+    for file in ["claudo_bg.wasm", "claudo.js", "BIZUDPGothic-Regular.ttf"] {
         let path = format!("{WEB_OUT}/{file}");
         for (tool, args, out) in [
             ("brotli", &["-q", "9", "-k", "-f"][..], format!("{path}.br")),

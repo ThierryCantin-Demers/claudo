@@ -93,6 +93,7 @@ async fn serve() {
                 .precompressed_br()
                 .precompressed_gzip(),
         )
+        .layer(axum::middleware::from_fn(caching))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -149,6 +150,25 @@ fn kept_token() -> String {
 
 /// `CLAUDO_STATIC_DIR`, else the bundle `cargo xtask web` builds when run from the repo,
 /// else the one `cargo xtask install-daemon` installs.
+/// The font never changes, so the browser keeps it; everything else it checks on every load,
+/// which costs a "not modified" when nothing did and brings a new build at once when one did.
+async fn caching(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let kept = request.uri().path().ends_with(".ttf");
+    let mut response = next.run(request).await;
+    let rule = match kept {
+        true => "public, max-age=31536000, immutable",
+        false => "no-cache",
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static(rule),
+    );
+    response
+}
+
 fn static_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLAUDO_STATIC_DIR") {
         return dir.into();

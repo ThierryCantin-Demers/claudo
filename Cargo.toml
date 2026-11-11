@@ -23,6 +23,14 @@ license = "MIT"
 [profile.dev.package."*"]
 opt-level = 3
 
+# The web page, which every browser downloads: smaller rather than faster to build.
+[profile.web]
+inherits = "release"
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true
+
 [workspace.dependencies]
 claudo-protocol = { path = "crates/protocol" }
 claudo-core = { path = "crates/core" }

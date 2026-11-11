@@ -288,9 +288,15 @@ as written. Tables are its own too: iced's sizes a column by what its cells meas
 and a block, which fills the width it is given, measures nothing, so claudo's fit the reply's
 width and share it by each column's longest cell.
 
-**Fonts**: egui bundles Latin glyphs only, so the Japanese font is embedded via
-`include_bytes!` and registered as a fallback. Do not switch to loading system fonts; that
-breaks the web build and portability.
+**Fonts**: egui bundles Latin glyphs only, so the Japanese font is registered as a fallback:
+embedded via `include_bytes!` natively, and on the web fetched from beside the page, which
+the daemon lets the browser keep for good (`Cache-Control: immutable`; everything else is
+`no-cache`), so a new build does not send it again. A changed font needs a new file name. Do
+not switch to loading system fonts; that breaks the web build and portability.
+
+**The web page** builds in the `web` profile (LTO, `opt-level = "s"`), and `xtask web`
+writes brotli and gzip copies beside each file, which the daemon serves to a browser that
+takes them.
 
 **libcosmic** is a git dependency pinned to a rev, optional behind the `cosmic` feature.
 Keep it optional. Markdown and code highlighting come from its `markdown` and
