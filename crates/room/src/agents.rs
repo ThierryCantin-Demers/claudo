@@ -244,6 +244,11 @@ pub const CHILD: f32 = 7.5;
 pub const CAPTION_REACH: f32 = 72.0;
 /// Under an agent, a row each: its name, what it is doing, its badges, and what it started.
 const CAPTION: f32 = 62.0;
+/// The size of what an agent started, written under it, and how far apart its rows are.
+pub const STARTED_SIZE: f32 = 10.5;
+pub const STARTED_ROW: f32 = 13.0;
+/// Between two parts on one row of what an agent started.
+pub const STARTED_GAP: &str = "  ·  ";
 /// An agent that started at most this many has each one named on the map.
 pub const LABELLED: usize = 3;
 const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
@@ -310,7 +315,14 @@ impl<'a> Island<'a> {
             0 => HEADROOM,
             _ => FAN_NEAR + (fan.div_ceil(FAN) - 1) as f32 * FAN_STEP + CHILD * 2.0,
         };
-        let cell = above + AGENT * 2.0 + CAPTION;
+        let more = cluster
+            .trees
+            .iter()
+            .map(|tree| started_rows(started(tree.children.iter().map(|child| child.node))).len())
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        let cell = above + AGENT * 2.0 + CAPTION + more as f32 * STARTED_ROW;
         let mut placed = Vec::new();
         for (i, tree) in cluster.trees.iter().enumerate() {
             let at = v(
@@ -531,6 +543,34 @@ pub fn started<'a>(children: impl Iterator<Item = &'a Node>) -> Vec<(String, [u8
             _ => (format!("{count} {what}s {how}"), tint),
         })
         .collect()
+}
+
+/// About how wide `text` is at `size`, for a frontend that cannot measure it and for the
+/// layout, which must know before either draws.
+pub fn wide(text: &str, size: f32) -> f32 {
+    text.chars().count() as f32 * size * 0.55
+}
+
+/// What an agent started, in as few rows as fit under it, the parts of a row to be written
+/// with `STARTED_GAP` between them.
+pub fn started_rows<T>(parts: Vec<(String, T)>) -> Vec<Vec<(String, T)>> {
+    let mut rows: Vec<Vec<(String, T)>> = Vec::new();
+    let mut taken = 0.0;
+    for part in parts {
+        let width = wide(&part.0, STARTED_SIZE);
+        let gap = wide(STARTED_GAP, STARTED_SIZE);
+        match rows.last_mut() {
+            Some(row) if taken + gap + width <= 2.0 * CAPTION_REACH => {
+                taken += gap + width;
+                row.push(part);
+            }
+            _ => {
+                taken = width;
+                rows.push(vec![part]);
+            }
+        }
+    }
+    rows
 }
 
 /// The colour of what an agent started, by what runs it: a Claude subagent, a Codex run or
@@ -971,6 +1011,27 @@ mod tests {
                 "1 subagent running"
             ]
         );
+    }
+
+    #[test]
+    fn what_an_agent_started_wraps_to_fit_under_it() {
+        let parts = |texts: &[&str]| -> Vec<(String, ())> {
+            texts.iter().map(|text| (text.to_string(), ())).collect()
+        };
+        let rows: Vec<usize> = started_rows(parts(&[
+            "1 Codex review running",
+            "1 dibs job running",
+            "1 dibs job waiting",
+        ]))
+        .iter()
+        .map(Vec::len)
+        .collect();
+        assert_eq!(rows, [1, 1, 1]);
+        assert_eq!(started_rows(parts(&["1 review", "2 dibs"])).len(), 1);
+        for row in started_rows(parts(&["1 Codex review running", "1 dibs job running"])) {
+            let text: Vec<&str> = row.iter().map(|(text, _)| text.as_str()).collect();
+            assert!(wide(&text.join(STARTED_GAP), STARTED_SIZE) <= 2.0 * CAPTION_REACH);
+        }
     }
 
     #[test]

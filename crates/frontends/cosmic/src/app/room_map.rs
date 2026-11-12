@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use claudo_protocol::{Node, NodeKind, NodeState};
 use claudo_room::agents::{
-    AGENT, CAPTION_REACH, CHILD, LABELLED, Map, PAD, Tint, V, badges, codex, dibs_job, hue,
-    made_by, phase, started, started_word, state_tint,
+    AGENT, CAPTION_REACH, CHILD, LABELLED, Map, PAD, STARTED_GAP, STARTED_ROW, STARTED_SIZE, Tint,
+    V, badges, codex, dibs_job, hue, made_by, phase, started, started_rows, started_word,
+    state_tint, wide,
 };
 use cosmic::iced::widget::canvas::{self, Frame, Path, Stroke, path::Arc};
 use cosmic::iced::{Radians, Rectangle, mouse};
@@ -517,21 +518,17 @@ fn caption(
     if !badges.is_empty() {
         centred(frame, &badges, at.x, top + 15.0 * scale, 10.0 * scale);
     }
-    if !started.is_empty() {
+    for (row, started) in started_rows(started).into_iter().enumerate() {
         let mut parts = Vec::new();
         for (i, (text, tint)) in started.into_iter().enumerate() {
             if i > 0 {
-                parts.push(("  ·  ".to_string(), palette.weak));
+                parts.push((STARTED_GAP.to_string(), palette.weak));
             }
-            parts.push((text, rgb(tint)));
+            parts.push((cut(&text, STARTED_SIZE * scale, width), rgb(tint)));
         }
-        centred(frame, &parts, at.x, top + 29.0 * scale, 10.5 * scale);
+        let y = top + (29.0 + row as f32 * STARTED_ROW) * scale;
+        centred(frame, &parts, at.x, y, STARTED_SIZE * scale);
     }
-}
-
-/// About how wide `text` is at `size`: the canvas cannot measure it.
-fn wide(text: &str, size: f32) -> f32 {
-    text.chars().count() as f32 * size * 0.55
 }
 
 fn fits(text: &str, size: f32, width: f32) -> bool {

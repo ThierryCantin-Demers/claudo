@@ -9,9 +9,10 @@ use claudo_protocol::{
     Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
 };
 use claudo_room::agents::{
-    AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, Shown, Tint, V,
-    agent_colour, ago, badges, checks, codex, dibs_job, fit, hue, kind, legend_kinds, made_by,
-    open_prs, phase, reason, short, started, started_word, state, state_tint, thousands,
+    AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, STARTED_GAP,
+    STARTED_ROW, STARTED_SIZE, Shown, Tint, V, agent_colour, ago, badges, checks, codex, dibs_job,
+    fit, hue, kind, legend_kinds, made_by, open_prs, phase, reason, short, started, started_rows,
+    started_word, state, state_tint, thousands,
 };
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, vec2};
@@ -660,21 +661,16 @@ fn caption(
             visuals.text_color(),
         );
     }
-    if !started.is_empty() {
-        let dot = ("  ·  ".to_string(), visuals.weak_text_color());
+    let dot = (STARTED_GAP.to_string(), visuals.weak_text_color());
+    for (i, started) in started_rows(started.to_vec()).into_iter().enumerate() {
         let parts: Vec<(String, Color32)> = started
-            .iter()
+            .into_iter()
             .enumerate()
-            .flat_map(|(i, part)| {
-                (i > 0)
-                    .then(|| dot.clone())
-                    .into_iter()
-                    .chain([part.clone()])
-            })
+            .flat_map(|(i, part)| (i > 0).then(|| dot.clone()).into_iter().chain([part]))
             .collect();
-        let started = row(painter, &parts, 10.5 * scale, scale);
+        let started = row(painter, &parts, STARTED_SIZE * scale, scale);
         painter.galley(
-            below + vec2(0.0, 29.0 * scale),
+            below + vec2(0.0, (29.0 + i as f32 * STARTED_ROW) * scale),
             started,
             visuals.text_color(),
         );
