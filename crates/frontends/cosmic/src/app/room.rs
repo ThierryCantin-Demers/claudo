@@ -45,20 +45,37 @@ const ZOOMS: std::ops::RangeInclusive<f32> = 0.5..=1.5;
 /// How the page is shared between the agents and the machines, and each one's zoom.
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Panes {
-    /// The agents' share of the width the two have.
+    /// The agents' share of the width the two have, their details included.
     split: f32,
+    /// The details' share of the agents' width, when a node's are open.
+    #[serde(default = "half")]
+    details: f32,
     agents: f32,
     machines: f32,
+}
+
+fn half() -> f32 {
+    0.4
 }
 
 impl Default for Panes {
     fn default() -> Self {
         Self {
             split: 0.6,
+            details: half(),
             agents: 1.0,
             machines: 1.0,
         }
     }
+}
+
+/// A handle that drags a split of the page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Handle {
+    /// Between the agents, their details included, and the machines.
+    Machines,
+    /// Between the map and a node's details.
+    Details,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,14 +123,16 @@ pub struct Room {
     /// The width the agents and the machines shared when last drawn, which a drag of the
     /// handle between them moves across.
     spread: std::cell::Cell<f32>,
+    /// The width the map and the details shared when last drawn.
+    inner: std::cell::Cell<f32>,
 }
 
 #[derive(Debug, Clone)]
 pub enum RoomMessage {
     Connected(Commands),
     TogglePrs,
-    /// The handle between the agents and the machines was pressed; the app follows the drag.
-    StartSplit,
+    /// A handle between panes was pressed; the app follows the drag.
+    StartSplit(Handle),
     /// A pane's zoom a step up or down, or back to whole with 0.
     Zoom(Side, i8),
     /// An agent's name: opens its details, or with Shift brings its terminal forward.
@@ -166,17 +185,27 @@ impl Room {
         }
     }
 
-    /// The agents' share of the width they and the machines have.
-    pub fn split(&self) -> f32 {
-        self.panes.split
+    /// The share `handle` sets: the agents' of the page, or the details' of the agents'.
+    pub fn split(&self, handle: Handle) -> f32 {
+        match handle {
+            Handle::Machines => self.panes.split,
+            Handle::Details => self.panes.details,
+        }
     }
 
-    pub fn spread(&self) -> f32 {
-        self.spread.get()
+    /// The width `handle` shares out, when last drawn.
+    pub fn spread(&self, handle: Handle) -> f32 {
+        match handle {
+            Handle::Machines => self.spread.get(),
+            Handle::Details => self.inner.get(),
+        }
     }
 
-    pub fn resize(&mut self, split: f32) {
-        self.panes.split = split.clamp(0.2, 0.85);
+    pub fn resize(&mut self, handle: Handle, share: f32) {
+        match handle {
+            Handle::Machines => self.panes.split = share.clamp(0.2, 0.85),
+            Handle::Details => self.panes.details = share.clamp(0.15, 0.8),
+        }
     }
 
     /// Keeps the split and the zooms for the next start.
@@ -275,7 +304,7 @@ impl Room {
             }
             RoomMessage::Focus(id) => self.act(id, Act::Focus),
             RoomMessage::TogglePrs => self.prs_open = !self.prs_open,
-            RoomMessage::StartSplit => {}
+            RoomMessage::StartSplit(_) => {}
             RoomMessage::Zoom(side, step) => {
                 let zoom = match side {
                     Side::Agents => &mut self.panes.agents,
@@ -403,27 +432,23 @@ impl Room {
             .picked
             .as_ref()
             .and_then(|id| self.agents.nodes.get(id));
-        let aside = if details.is_some() { 380.0 * zoom } else { 0.0 };
-        let spread = width - aside - HANDLE;
+        let spread = width - HANDLE;
         self.spread.set(spread);
-        let agents = spread * self.panes.split;
-        let mut columns: Vec<Element<Message>> =
-            vec![self.agents_view(zoom * self.panes.agents, agents, height)];
-        if let Some(node) = details {
-            columns.push(widget::divider::vertical::default().into());
-            columns.push(self.details(node, aside));
+        let left = spread * self.panes.split;
+        let mut columns: Vec<Element<Message>> = Vec::new();
+        match details {
+            Some(node) => {
+                let inner = left - HANDLE;
+                self.inner.set(inner);
+                let aside = inner * self.panes.details;
+                columns.push(self.agents_view(zoom * self.panes.agents, inner - aside, height));
+                columns.push(handle(Handle::Details));
+                columns.push(self.details(node, aside));
+            }
+            None => columns.push(self.agents_view(zoom * self.panes.agents, left, height)),
         }
-        columns.push(
-            widget::mouse_area(
-                widget::container(widget::divider::vertical::default())
-                    .center_x(Length::Fixed(HANDLE))
-                    .height(Length::Fill),
-            )
-            .on_press(Message::Room(RoomMessage::StartSplit))
-            .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
-            .into(),
-        );
-        columns.push(self.machines_view(zoom * self.panes.machines, spread - agents));
+        columns.push(handle(Handle::Machines));
+        columns.push(self.machines_view(zoom * self.panes.machines, spread - left));
         widget::Row::with_children(columns)
             .height(Length::Fill)
             .into()
@@ -1224,6 +1249,18 @@ fn pull_request_table<'a>(prs: &[(&Node, room_agents::Shown)]) -> Element<'a, Me
         .spacing(2)
         .padding([0, 8])
         .into()
+}
+
+/// A line between two panes that drags the split between them.
+fn handle<'a>(which: Handle) -> Element<'a, Message> {
+    widget::mouse_area(
+        widget::container(widget::divider::vertical::default())
+            .center_x(Length::Fixed(HANDLE))
+            .height(Length::Fill),
+    )
+    .on_press(Message::Room(RoomMessage::StartSplit(which)))
+    .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
+    .into()
 }
 
 /// A pane's zoom: smaller, the percentage, which resets it, and larger.

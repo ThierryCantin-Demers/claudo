@@ -773,7 +773,11 @@ mod app {
             start: (f32, f32),
         },
         /// The handle between the room's agents and its machines, from the split at the start.
-        Room { origin: Option<f32>, start: f32 },
+        Room {
+            handle: room::Handle,
+            origin: Option<f32>,
+            start: f32,
+        },
         /// A tile picked up by its title, or with Ctrl anywhere in it. Positions are in the
         /// tile row; `at` is set once the cursor has moved far enough to lift the tile, and
         /// `slot` is where it would land among the others.
@@ -1871,10 +1875,20 @@ mod app {
                 return;
             };
             self.current = w;
-            if let Some(Drag::Room { origin, start }) = &mut self.layout_mut().drag {
-                let (origin, start) = (*origin.get_or_insert(x), *start);
-                let spread = self.room.spread().max(1.0);
-                self.room.resize(start + (x - origin) / spread);
+            if let Some(Drag::Room {
+                handle,
+                origin,
+                start,
+            }) = &mut self.layout_mut().drag
+            {
+                let (handle, origin, start) = (*handle, *origin.get_or_insert(x), *start);
+                let moved = (x - origin) / self.room.spread(handle).max(1.0);
+                // The details sit right of their handle, so dragging it right narrows them.
+                let share = match handle {
+                    room::Handle::Machines => start + moved,
+                    room::Handle::Details => start - moved,
+                };
+                self.room.resize(handle, share);
                 return;
             }
             let room = self.tile_room(w).1;
@@ -5091,9 +5105,10 @@ mod app {
                     }
                     self.room.update(room::RoomMessage::Focus(agent));
                 }
-                Message::Room(room::RoomMessage::StartSplit) => {
-                    let start = self.room.split();
+                Message::Room(room::RoomMessage::StartSplit(handle)) => {
+                    let start = self.room.split(handle);
                     self.layout_mut().drag = Some(Drag::Room {
+                        handle,
                         origin: None,
                         start,
                     });
