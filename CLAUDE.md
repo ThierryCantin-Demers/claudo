@@ -558,12 +558,12 @@ wrote it.
 - **Machines** (each a tile beside the agents on the page's Room tab, which the person drags
   into a split or tabs, `egui_tiles`, laid out as eframe keeps it, and hides or shows from
   the Machines menu on the agents' tab bar): the dibs collector also sends every machine's
-  status, and why one could not answer, as `ServerEvent::Dibs`, which each tile draws with
-  dibstop's own egui view (`dibstop-view`, from the dibs repo, egui pinned to the version
-  dibs uses), given that machine alone. dibstop reads its keys from the whole page, so only
-  the tile last clicked is given them. Over the view, each tile draws its machine's CPU,
-  memory and cards (`meters.rs`), from the `metrics` that `dibs --status --metrics` adds,
-  read in dibs's runner from `/proc`, NVML and sysfs, so cheap enough beside a benchmark.
+  status, and why one could not answer, as `ServerEvent::Dibs`. Each tile draws its
+  machine's state, its CPU, memory and cards (`meters.rs`, from the `metrics` that
+  `dibs --status --metrics` adds, read in dibs's runner from `/proc`, NVML and sysfs, so
+  cheap enough beside a benchmark) and its jobs, from dibstop's own items and actions
+  (`dibstop-view`, from the dibs repo, egui pinned to the version dibs uses), and takes
+  dibstop's keys when it was the tile last clicked.
   The same menu sets how often the daemon looks and which machines' metrics it asks for
   (`Command::DibsWatch`, kept in `$XDG_CONFIG_HOME/claudo/dibs-watch.json` and told to every
   page as `ServerEvent::DibsWatch`). An action the view returns goes back as `Command::Dibs` with its
