@@ -494,24 +494,41 @@ pub fn checks(checks: Checks) -> (&'static str, [u8; 3]) {
     }
 }
 
+/// A piece of an agent's badges, and the page it opens when clicked.
+pub struct Badge<'a> {
+    pub text: String,
+    pub tint: Tint,
+    pub link: Option<&'a str>,
+}
+
 /// What an agent carries: its context, and its open pull requests, each in the colour of
-/// its CI.
-pub fn badges(node: &Node) -> Vec<(String, Tint)> {
+/// its CI and opening it.
+pub fn badges(node: &Node) -> Vec<Badge<'_>> {
+    let plain = |text: String, tint| Badge {
+        text,
+        tint,
+        link: None,
+    };
     let mut parts = Vec::new();
     if let Some(tokens) = node.context {
-        parts.push((format!("{} context", thousands(tokens)), Tint::Text));
+        parts.push(plain(format!("{} context", thousands(tokens)), Tint::Text));
     }
     let prs = open_prs(node);
     if !prs.is_empty() {
         if !parts.is_empty() {
-            parts.push(("  ·  ".to_string(), Tint::Weak));
+            parts.push(plain("  ·  ".to_string(), Tint::Weak));
         }
-        parts.push(("PR".to_string(), Tint::Text));
+        parts.push(plain("PR".to_string(), Tint::Text));
         for pr in prs {
             let tint = pr
                 .checks
                 .map_or(Tint::Text, |state| Tint::Rgb(checks(state).1));
-            parts.push((format!(" #{}", pr.number), tint));
+            parts.push(plain(" ".to_string(), tint));
+            parts.push(Badge {
+                text: format!("#{}", pr.number),
+                tint,
+                link: Some(pr.link),
+            });
         }
     }
     parts

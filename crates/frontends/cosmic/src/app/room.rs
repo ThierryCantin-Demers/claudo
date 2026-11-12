@@ -493,7 +493,7 @@ impl Room {
             .collect();
         let hint = match node.kind {
             Some(NodeKind::Agent(_)) => {
-                "Click for details, double-click to bring its terminal forward"
+                "Click for details, shift-click to bring its terminal forward"
             }
             _ => "Click for details",
         };

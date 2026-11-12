@@ -15,7 +15,7 @@ use claudo_room::agents::{
     started_word, state, state_tint, thousands,
 };
 use egui::epaint::QuadraticBezierShape;
-use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2, vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 #[derive(Default)]
@@ -29,9 +29,6 @@ pub struct Room {
     sent: Vec<Command>,
     /// The node whose details are open beside the map.
     selected: Option<NodeId>,
-    /// What the last click on the map picked, and when. A double-click right after acts on
-    /// it wherever it lands, since the details the first click opened move the map.
-    clicked: Option<(NodeId, f64)>,
     markdown: CommonMarkCache,
 }
 
@@ -71,11 +68,6 @@ impl Room {
                 .resizable(true)
                 .show(ui, |ui| self.details(ui, &id, now));
         }
-        let double = ui.input(|input| {
-            input
-                .pointer
-                .button_double_clicked(egui::PointerButton::Primary)
-        });
         let screen = ui.available_height();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
@@ -95,29 +87,16 @@ impl Room {
                 self.waiting_lines(ui, width, now);
                 let left = screen - (ui.cursor().top() - top);
                 let picked = self.map(ui, width, left, now);
-                if double {
-                    let agent = self.clicked.take().filter(|(id, at)| {
-                        let node = self.agents.nodes.get(id);
-                        now - at < DOUBLE_CLICK
-                            && node
-                                .is_some_and(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
-                    });
-                    if let Some((node, _)) = agent {
-                        self.sent.push(Command::Act {
-                            node,
-                            action: Action::Focus,
-                            request: 0,
-                        });
+                match picked {
+                    Some(Picked::Node(id)) => {
+                        self.selected = (self.selected.as_ref() != Some(&id)).then_some(id);
                     }
-                } else {
-                    match picked {
-                        Some(Picked::Node(id)) => {
-                            self.clicked = Some((id.clone(), now));
-                            self.selected = (self.selected.as_ref() != Some(&id)).then_some(id);
-                        }
-                        Some(Picked::Nothing) => self.clicked = None,
-                        None => {}
-                    }
+                    Some(Picked::Focus(node)) => self.sent.push(Command::Act {
+                        node,
+                        action: Action::Focus,
+                        request: 0,
+                    }),
+                    None => {}
                 }
             });
     }
@@ -370,8 +349,8 @@ impl Room {
     }
 
     /// `screen` is the height left on screen, which the map fits into while it stays readable.
-    /// Clicking a node opens its details, and double-clicking an agent brings its terminal
-    /// forward.
+    /// Clicking a node opens its details, shift-clicking an agent brings its terminal forward,
+    /// and a pull request's number opens it.
     fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Picked> {
         let clusters = self.agents.clusters();
         let scale = fit(&clusters, width, screen);
@@ -394,6 +373,7 @@ impl Room {
         let visuals = ui.visuals().clone();
 
         let mut drawn: Vec<(&Node, Pos2, f32)> = Vec::new();
+        let mut links: Vec<(Rect, &str)> = Vec::new();
         for island in &map.islands {
             let key = island.repo.unwrap_or("");
             let corner = glide(&format!("island:{key}"), spot(island.top));
@@ -458,22 +438,42 @@ impl Room {
                         .into_iter()
                         .map(|(text, tint)| (text, rgb(tint)))
                         .collect();
-                    caption(&painter, &visuals, placed.node, &started, here, scale);
+                    links.extend(caption(
+                        &painter,
+                        &visuals,
+                        placed.node,
+                        &started,
+                        here,
+                        scale,
+                    ));
                 }
                 drawn.push((placed.node, here, radius));
             }
         }
 
         let pointer = response.hover_pos();
+        let link =
+            pointer.and_then(|pointer| links.iter().find(|(rect, _)| rect.contains(pointer)));
+        if let Some(&(rect, link)) = link {
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                Stroke::new(1.0, visuals.text_color()),
+            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(link));
+            }
+            response.on_hover_text_at_pointer(link);
+            return None;
+        }
         let hovered = pointer.and_then(|pointer| {
             drawn
                 .iter()
                 .filter(|(_, at, radius)| at.distance(pointer) <= radius + 6.0)
                 .min_by(|a, b| a.1.distance(pointer).total_cmp(&b.1.distance(pointer)))
         });
-        let Some(&(node, at, radius)) = hovered else {
-            return response.clicked().then_some(Picked::Nothing);
-        };
+        let &(node, at, radius) = hovered?;
         painter.circle_stroke(
             at,
             radius + 4.0,
@@ -481,12 +481,16 @@ impl Room {
         );
         let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        let picked = response.clicked().then(|| Picked::Node(node.id.clone()));
+        let shift = ui.input(|input| input.modifiers.shift);
+        let picked = response.clicked().then(|| match shift && agent {
+            true => Picked::Focus(node.id.clone()),
+            false => Picked::Node(node.id.clone()),
+        });
         let held = self.agents.held(&node.id, now);
         response.on_hover_ui_at_pointer(|ui| {
             about(ui, node, held);
             ui.weak(match agent {
-                true => "Click for details, double-click to bring its terminal forward",
+                true => "Click for details, shift-click to bring its terminal forward",
                 false => "Click for details",
             });
         });
@@ -494,15 +498,11 @@ impl Room {
     }
 }
 
-/// What a click on the map landed on.
+/// What a click on the map asked for.
 enum Picked {
     Node(NodeId),
-    Nothing,
+    Focus(NodeId),
 }
-
-/// How soon after a click on an agent a double-click brings its terminal forward, in seconds:
-/// longer than egui's own double-click delay.
-const DOUBLE_CLICK: f64 = 0.6;
 
 fn shore(
     painter: &egui::Painter,
@@ -623,14 +623,16 @@ fn body(
     }
 }
 
-fn caption(
+/// Under an agent: its name, what it is doing, its badges, and what it started. Gives back
+/// where its pull requests' numbers are written, and what each opens.
+fn caption<'a>(
     painter: &egui::Painter,
     visuals: &egui::Visuals,
-    node: &Node,
+    node: &'a Node,
     started: &[(String, Color32)],
     at: Pos2,
     scale: f32,
-) {
+) -> Vec<(Rect, &'a str)> {
     let top = at + vec2(0.0, (AGENT + 6.0) * scale);
     let name = node.name.as_deref().unwrap_or("unnamed");
     // Written as dibs writes the agent's jobs, so they match beside the machines.
@@ -649,17 +651,32 @@ fn caption(
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
-    let badges: Vec<(String, Color32)> = badges(node)
-        .into_iter()
-        .map(|(text, shade)| (text, tint(visuals, shade)))
-        .collect();
-    if !badges.is_empty() {
-        let badges = row(painter, &badges, 10.0 * scale, scale);
-        painter.galley(
-            below + vec2(0.0, 15.0 * scale),
-            badges,
-            visuals.text_color(),
-        );
+    let parts = badges(node);
+    let mut links = Vec::new();
+    if !parts.is_empty() {
+        let coloured: Vec<(String, Color32)> = parts
+            .iter()
+            .map(|part| (part.text.clone(), tint(visuals, part.tint)))
+            .collect();
+        let galley = row(painter, &coloured, 10.0 * scale, scale);
+        let at = below + vec2(0.0, 15.0 * scale);
+        if let Some(placed) = galley.rows.first() {
+            // One glyph a character, on the one row a badge line is cut to.
+            let mut first = 0;
+            for part in &parts {
+                let count = part.text.chars().count();
+                let glyphs = placed.row.glyphs.get(first..first + count);
+                if let (Some(link), Some(glyphs)) = (part.link, glyphs) {
+                    let rect = glyphs
+                        .iter()
+                        .map(|glyph| glyph.logical_rect())
+                        .fold(Rect::NOTHING, Rect::union);
+                    links.push((rect.translate(at.to_vec2() + placed.pos.to_vec2()), link));
+                }
+                first += count;
+            }
+        }
+        painter.galley(at, galley, visuals.text_color());
     }
     let dot = (STARTED_GAP.to_string(), visuals.weak_text_color());
     for (i, started) in started_rows(started.to_vec()).into_iter().enumerate() {
@@ -675,6 +692,7 @@ fn caption(
             visuals.text_color(),
         );
     }
+    links
 }
 
 /// Coloured parts on one row centred under an agent, its end cut when it runs over.

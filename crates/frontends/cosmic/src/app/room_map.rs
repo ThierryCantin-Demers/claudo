@@ -1,24 +1,20 @@
 //! The map of agents on a canvas: one island per repository, each agent with what it
 //! started fanned out above it, laid out by `claudo_room` as the web page lays it out.
-//! Clicking a node opens its details; double-clicking an agent brings its terminal forward.
+//! Clicking a node opens its details, shift-clicking an agent brings its terminal forward,
+//! and a pull request's number opens it.
 
-use std::f32::consts::PI;
-use std::time::{Duration, Instant};
-
-use claudo_protocol::{Node, NodeKind, NodeState};
+use claudo_protocol::{Node, NodeState};
 use claudo_room::agents::{
     AGENT, CAPTION_REACH, CHILD, LABELLED, Map, PAD, STARTED_GAP, STARTED_ROW, STARTED_SIZE, Tint,
     V, badges, codex, dibs_job, hue, made_by, phase, started, started_rows, started_word,
     state_tint, wide,
 };
 use cosmic::iced::widget::canvas::{self, Frame, Path, Stroke, path::Arc};
-use cosmic::iced::{Radians, Rectangle, mouse};
+use cosmic::iced::{Radians, Rectangle, keyboard, mouse};
+use std::f32::consts::PI;
 
 use super::room::RoomMessage;
 use super::*;
-
-/// How soon after a click on an agent a second one brings its terminal forward.
-const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 /// The map as laid out for this frame, at `scale` screen pixels to a map unit.
 pub struct MapView<'a> {
@@ -32,7 +28,9 @@ pub struct MapView<'a> {
 #[derive(Default)]
 pub struct Pointer {
     hovered: Option<String>,
-    last: Option<(String, Instant)>,
+    /// The pull request link under the pointer.
+    link: Option<String>,
+    modifiers: keyboard::Modifiers,
 }
 
 /// A node as drawn: where, how big, how deep under its agent.
@@ -40,6 +38,7 @@ struct Drawn<'a> {
     node: &'a Node,
     at: Point,
     radius: f32,
+    agent: bool,
 }
 
 impl<'a> MapView<'a> {
@@ -56,6 +55,7 @@ impl<'a> MapView<'a> {
                     node: placed.node,
                     at: self.point(island.top + placed.at),
                     radius: self.scale * if placed.depth == 0 { AGENT } else { CHILD },
+                    agent: placed.depth == 0,
                 })
             })
             .collect()
@@ -67,6 +67,36 @@ impl<'a> MapView<'a> {
             .into_iter()
             .filter(|drawn| drawn.at.distance(pointer) <= drawn.radius + 6.0)
             .min_by(|a, b| a.at.distance(pointer).total_cmp(&b.at.distance(pointer)))
+    }
+
+    /// Where each agent's pull request numbers are written, and what each opens.
+    fn links(&self) -> Vec<(Rectangle, &'a str)> {
+        let scale = self.scale;
+        self.drawn()
+            .into_iter()
+            .filter(|drawn| drawn.agent)
+            .flat_map(|drawn| {
+                let parts = badges(drawn.node);
+                let texts: Vec<&str> = parts.iter().map(|part| part.text.as_str()).collect();
+                let (y, size) = badge_row(drawn.at, scale);
+                let lefts = lefts(&texts, drawn.at.x, size);
+                parts
+                    .iter()
+                    .zip(lefts)
+                    .filter_map(|(part, left)| {
+                        let size = Size::new(wide(&part.text, size), size * 1.3);
+                        Some((Rectangle::new(Point::new(left, y), size), part.link?))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn link_under(&self, pointer: Point) -> Option<&'a str> {
+        self.links()
+            .into_iter()
+            .find(|(rect, _)| rect.contains(pointer))
+            .map(|(_, link)| link)
     }
 }
 
@@ -82,31 +112,40 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
     ) -> Option<canvas::Action<Message>> {
         let pointer = cursor.position_in(bounds);
         match event {
+            canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+                None
+            }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let link = pointer
+                    .and_then(|pointer| self.link_under(pointer))
+                    .map(str::to_string);
+                let moved = link != state.link;
+                state.link = link;
                 let under = pointer.and_then(|pointer| self.under(pointer));
                 let hovered = under.as_ref().map(|drawn| drawn.node.id.clone());
-                (hovered != state.hovered).then(|| {
-                    state.hovered = hovered;
-                    // The page draws the hover's card over the canvas: text a canvas draws
-                    // goes over all its shapes, so a card drawn here would not hide the map.
-                    let at = under.map(|drawn| (drawn.node.id.clone(), drawn.at.x, drawn.at.y));
-                    canvas::Action::publish(Message::Room(RoomMessage::Hover(at)))
-                })
+                if hovered == state.hovered {
+                    return moved.then(canvas::Action::request_redraw);
+                }
+                state.hovered = hovered;
+                // The page draws the hover's card over the canvas: text a canvas draws goes
+                // over all its shapes, so a card drawn here would not hide the map.
+                let at = under.map(|drawn| (drawn.node.id.clone(), drawn.at.x, drawn.at.y));
+                Some(canvas::Action::publish(Message::Room(RoomMessage::Hover(
+                    at,
+                ))))
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let drawn = self.under(pointer?)?;
+                let pointer = pointer?;
+                if let Some(link) = self.link_under(pointer) {
+                    let open = Message::Link(link.to_string());
+                    return Some(canvas::Action::publish(open).and_capture());
+                }
+                let drawn = self.under(pointer)?;
                 let id = drawn.node.id.clone();
-                let agent = matches!(drawn.node.kind, Some(NodeKind::Agent(_)));
-                let again = state
-                    .last
-                    .take()
-                    .is_some_and(|(last, at)| last == id && at.elapsed() < DOUBLE_CLICK);
-                let message = match again && agent {
+                let message = match state.modifiers.shift() && drawn.agent {
                     true => RoomMessage::Focus(id),
-                    false => {
-                        state.last = Some((id.clone(), Instant::now()));
-                        RoomMessage::Pick(id)
-                    }
+                    false => RoomMessage::Pick(id),
                 };
                 Some(canvas::Action::publish(Message::Room(message)).and_capture())
             }
@@ -212,6 +251,20 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
                 Stroke::default().with_color(palette.strong).with_width(1.5),
             );
         }
+        if let Some((rect, _)) = state.link.as_ref().and_then(|link| {
+            self.links()
+                .into_iter()
+                .find(|(_, other)| *other == link.as_str())
+        }) {
+            let under = rect.y + rect.height * 0.85;
+            frame.stroke(
+                &Path::line(
+                    Point::new(rect.x, under),
+                    Point::new(rect.x + rect.width, under),
+                ),
+                Stroke::default().with_color(palette.text).with_width(1.0),
+            );
+        }
         vec![frame.into_geometry()]
     }
 
@@ -221,9 +274,9 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
         _bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        match state.hovered {
-            Some(_) => mouse::Interaction::Pointer,
-            None => mouse::Interaction::default(),
+        match state.hovered.is_some() || state.link.is_some() {
+            true => mouse::Interaction::Pointer,
+            false => mouse::Interaction::default(),
         }
     }
 }
@@ -513,10 +566,11 @@ fn caption(
     }
     let badges: Vec<(String, Color)> = badges(node)
         .into_iter()
-        .map(|(text, tint)| (text, palette.tint(tint)))
+        .map(|part| (part.text, palette.tint(part.tint)))
         .collect();
     if !badges.is_empty() {
-        centred(frame, &badges, at.x, top + 15.0 * scale, 10.0 * scale);
+        let (y, size) = badge_row(at, scale);
+        centred(frame, &badges, at.x, y, size);
     }
     for (row, started) in started_rows(started).into_iter().enumerate() {
         let mut parts = Vec::new();
@@ -544,6 +598,26 @@ fn cut(text: &str, size: f32, width: f32) -> String {
     format!("{}…", text.chars().take(keep).collect::<String>())
 }
 
+/// Where an agent at `at` has its badges written, and their size.
+fn badge_row(at: Point, scale: f32) -> (f32, f32) {
+    let doing = at.y + (AGENT + 6.0) * scale + 13.0 * scale * 1.3 + 2.0 * scale;
+    (doing + 15.0 * scale, 10.0 * scale)
+}
+
+/// Where each of `texts` starts when they are written on one row centred on `x`.
+fn lefts(texts: &[&str], x: f32, size: f32) -> Vec<f32> {
+    let total: f32 = texts.iter().map(|text| wide(text, size)).sum();
+    let mut left = x - total / 2.0;
+    texts
+        .iter()
+        .map(|text| {
+            let at = left;
+            left += wide(text, size);
+            at
+        })
+        .collect()
+}
+
 /// Coloured parts on one row centred on `x`.
 fn centred(
     frame: &mut Frame<cosmic::Renderer>,
@@ -552,9 +626,8 @@ fn centred(
     y: f32,
     size: f32,
 ) {
-    let total: f32 = parts.iter().map(|(text, _)| wide(text, size)).sum();
-    let mut left = x - total / 2.0;
-    for (text, color) in parts {
+    let texts: Vec<&str> = parts.iter().map(|(text, _)| text.as_str()).collect();
+    for ((text, color), left) in parts.iter().zip(lefts(&texts, x, size)) {
         frame.fill_text(canvas::Text {
             content: text.clone(),
             position: Point::new(left, y),
@@ -562,6 +635,5 @@ fn centred(
             size: size.into(),
             ..Default::default()
         });
-        left += wide(text, size);
     }
 }
