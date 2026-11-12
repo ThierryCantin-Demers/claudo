@@ -5026,6 +5026,16 @@ mod app {
             subscriptions.push(named("hot-patches", hot_patches));
             if self.room.wanted {
                 subscriptions.push(named("room", room::worker));
+                let shown = self
+                    .windows
+                    .values()
+                    .any(|layout| layout.page == Page::Room);
+                if shown && self.room.moving() {
+                    subscriptions.push(
+                        cosmic::iced::time::every(std::time::Duration::from_millis(50))
+                            .map(|_| Message::Room(room::RoomMessage::Tick)),
+                    );
+                }
             }
             let drag = self.dragging().map(|(_, drag)| drag);
             if matches!(drag, Some(Drag::Tile { .. }))
@@ -6081,7 +6091,8 @@ mod app {
                     } else {
                         0.0
                     };
-                    self.room.view(self.zoom, window - sidebar)
+                    let height = layout.size.map_or(900.0, |(_, height)| height);
+                    self.room.view(self.zoom, window - sidebar, height)
                 }
             };
             let mut columns = Vec::new();
@@ -6333,6 +6344,7 @@ mod app {
     pub mod remote;
     mod review;
     mod room;
+    mod room_map;
     mod scroll;
     mod selectable;
     mod sessions;

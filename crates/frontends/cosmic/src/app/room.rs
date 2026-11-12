@@ -1,11 +1,18 @@
-//! The control room, as the daemon serves it on its room socket: each dibs machine's state,
-//! what its CPU, memory, disks and cards are doing, and its jobs, with dibstop's actions,
-//! which the daemon runs. What is shown and how is worked out in `claudo_room`, as for the
-//! web page.
+//! The control room, as the daemon serves it on its room socket: the agents waiting on the
+//! person as cards and every agent on a map, beside each dibs machine's state, what its CPU,
+//! memory, disks and cards are doing, and its jobs, with dibstop's actions, which the daemon
+//! runs. What is shown and how is worked out in `claudo_room`, as for the web page.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::time::Instant;
 
-use claudo_protocol::{DIBS_POLL, DibsMachine, DibsWatch, Node, NodeId, RoomEvent};
+use claudo_protocol::{
+    Action as Act, DIBS_POLL, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState,
+};
+use claudo_room::agents::{
+    self as room_agents, Agents, LEGEND, Map, ago, checks, fit, legend_kinds, open_prs, place_of,
+    reason, state, state_tint,
+};
 use claudo_room::machines::{
     Arrangement, Cards, History, KEPT, Show, card_name, filled, gib, heat, held_by, level, memory,
     percent, running_on,
@@ -36,7 +43,15 @@ pub struct Room {
     commands: Option<Commands>,
     /// A window has shown the room, so the app keeps a link to it.
     pub wanted: bool,
-    nodes: BTreeMap<NodeId, Node>,
+    agents: Agents,
+    /// When the room was first heard, the zero of its clock.
+    clock: Option<Instant>,
+    /// The last action on an agent that failed, and why.
+    failed: Option<(NodeId, String)>,
+    /// Answers being typed to agents.
+    drafts: HashMap<NodeId, String>,
+    /// The node whose details are open beside the map.
+    picked: Option<NodeId>,
     machines: Vec<DibsMachine>,
     watch: Option<DibsWatch>,
     histories: HashMap<String, History>,
@@ -70,6 +85,14 @@ pub enum RoomMessage {
     Show(Show),
     Poll(u64),
     PollDone,
+    /// Time passed while something on the map moves.
+    Tick,
+    Draft(NodeId, String),
+    Answer(NodeId),
+    Focus(NodeId),
+    Pick(NodeId),
+    Unpick,
+    Dismiss,
 }
 
 impl Room {
@@ -156,6 +179,25 @@ impl Room {
                 self.arrangement.show = show;
                 self.arranged();
             }
+            RoomMessage::Tick => {
+                let now = self.now();
+                self.agents.stamp(now);
+            }
+            RoomMessage::Draft(id, text) => {
+                self.drafts.insert(id, text);
+            }
+            RoomMessage::Answer(id) => {
+                let text = self.drafts.remove(&id).unwrap_or_default();
+                if !text.trim().is_empty() {
+                    self.act(id, Act::Prompt(text.trim().to_string()));
+                }
+            }
+            RoomMessage::Focus(id) => self.act(id, Act::Focus),
+            RoomMessage::Pick(id) => {
+                self.picked = (self.picked.as_ref() != Some(&id)).then_some(id);
+            }
+            RoomMessage::Unpick => self.picked = None,
+            RoomMessage::Dismiss => self.failed = None,
             RoomMessage::Poll(seconds) => self.poll = Some(seconds),
             // Each change makes the daemon look again at once, so only where a drag ends is sent.
             RoomMessage::PollDone => {
@@ -173,19 +215,20 @@ impl Room {
 
     fn heard(&mut self, event: ServerEvent) {
         match event {
-            ServerEvent::Room(RoomEvent::Snapshot(nodes)) => {
-                self.nodes = nodes
-                    .into_iter()
-                    .map(|node| (node.id.clone(), node))
-                    .collect();
+            ServerEvent::Room(event) => {
+                if let Some(failed) = self.agents.apply(event) {
+                    self.failed = Some(failed);
+                }
+                let now = self.now();
+                self.agents.stamp(now);
+                if self
+                    .picked
+                    .as_ref()
+                    .is_some_and(|id| !self.agents.nodes.contains_key(id))
+                {
+                    self.picked = None;
+                }
             }
-            ServerEvent::Room(RoomEvent::Upserted(node)) => {
-                self.nodes.insert(node.id.clone(), *node);
-            }
-            ServerEvent::Room(RoomEvent::Removed(id)) => {
-                self.nodes.remove(&id);
-            }
-            ServerEvent::Room(RoomEvent::Failed { .. }) => {}
             ServerEvent::Dibs(machines) => {
                 for machine in &machines {
                     if let Some(status) = &machine.status {
@@ -209,6 +252,32 @@ impl Room {
         }
     }
 
+    fn act(&self, node: NodeId, action: Act) {
+        self.send(Command::Act {
+            node,
+            action,
+            request: 0,
+        });
+    }
+
+    /// Seconds on the room's clock.
+    fn now(&mut self) -> f64 {
+        self.clock
+            .get_or_insert_with(Instant::now)
+            .elapsed()
+            .as_secs_f64()
+    }
+
+    fn time(&self) -> f64 {
+        self.clock
+            .map_or(0.0, |clock| clock.elapsed().as_secs_f64())
+    }
+
+    /// Something on the map moves, so it is drawn again while it shows.
+    pub fn moving(&self) -> bool {
+        self.agents.moving()
+    }
+
     fn names(&self) -> Vec<String> {
         self.machines
             .iter()
@@ -216,8 +285,28 @@ impl Room {
             .collect()
     }
 
-    /// The room page, `width` wide.
-    pub fn view(&self, zoom: f32, width: f32) -> Element<'_, Message> {
+    /// The room page, `width` by `height`: the agents, their details when one is picked,
+    /// and the machines.
+    pub fn view(&self, zoom: f32, width: f32, height: f32) -> Element<'_, Message> {
+        let details = self
+            .picked
+            .as_ref()
+            .and_then(|id| self.agents.nodes.get(id));
+        let aside = if details.is_some() { 380.0 * zoom } else { 0.0 };
+        let agents = (width - aside) * 0.6;
+        let mut columns: Vec<Element<Message>> = vec![self.agents_view(zoom, agents, height)];
+        if let Some(node) = details {
+            columns.push(widget::divider::vertical::default().into());
+            columns.push(self.details(node, aside));
+        }
+        columns.push(widget::divider::vertical::default().into());
+        columns.push(self.machines_view(zoom, width - aside - agents));
+        widget::Row::with_children(columns)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn machines_view(&self, zoom: f32, width: f32) -> Element<'_, Message> {
         let mut page: Vec<Element<Message>> = Vec::new();
         let mut bar: Vec<Element<Message>> = vec![widget::text::title3("Machines").into()];
         if let Some(busy) = &self.busy {
@@ -257,6 +346,269 @@ impl Room {
                 .spacing(12)
                 .padding([16, 16]),
         )
+        .width(Length::Fixed(width))
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// How many agents and how they stand, the legend, the open pull requests, the agents
+    /// waiting on the person, and the map.
+    fn agents_view(&self, zoom: f32, width: f32, height: f32) -> Element<'_, Message> {
+        let mut page: Vec<Element<Message>> = Vec::new();
+        let mut summary: Vec<Element<Message>> =
+            vec![widget::text::title3(format!("{} agents", self.agents.agents())).into()];
+        for (shown, word) in [
+            (NodeState::Working, "working"),
+            (NodeState::Blocked, "need you"),
+            (NodeState::Failed, "failed"),
+        ] {
+            let n = self.agents.count(shown);
+            if n > 0 {
+                summary.push(dot(Some(shown)));
+                summary.push(widget::text(format!("{n} {word}")).into());
+            }
+        }
+        if self.agents.waiting().next().is_none() {
+            summary.push(dot(Some(NodeState::Working)));
+            summary.push(widget::text("nobody is waiting on you").into());
+        }
+        page.push(
+            widget::flex_row(summary)
+                .spacing(8)
+                .align_items(Alignment::Center)
+                .into(),
+        );
+        page.push(legend());
+        let open = self.agents.pull_requests();
+        if !open.is_empty() {
+            let mut row: Vec<Element<Message>> =
+                vec![widget::text("Open PRs:").class(dim()).into()];
+            for (node, pr) in open {
+                let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
+                row.push(link(repo, pr.link));
+                if let Some((words, tint)) = pr.checks.map(checks) {
+                    row.push(
+                        widget::text(words)
+                            .size(11.0)
+                            .class(cosmic::theme::Text::Color(super::room_map::rgb(tint)))
+                            .into(),
+                    );
+                }
+                row.push(
+                    widget::text(node.name.clone().unwrap_or_else(|| "unnamed".into()))
+                        .class(dim())
+                        .into(),
+                );
+            }
+            page.push(
+                widget::flex_row(row)
+                    .spacing(8)
+                    .align_items(Alignment::Center)
+                    .into(),
+            );
+        }
+        if let Some((node, detail)) = &self.failed {
+            let name = self
+                .agents
+                .nodes
+                .get(node)
+                .and_then(|node| node.name.clone())
+                .unwrap_or_else(|| node.clone());
+            page.push(
+                widget::Row::with_children(vec![
+                    widget::text(format!("Could not reach {name}: {detail}"))
+                        .class(destructive())
+                        .into(),
+                    widget::button::text("Dismiss")
+                        .on_press(Message::Room(RoomMessage::Dismiss))
+                        .into(),
+                ])
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
+            );
+        }
+        let waiting: Vec<Element<Message>> = self
+            .agents
+            .waiting()
+            .map(|node| self.waiting_card(node, zoom))
+            .collect();
+        if !waiting.is_empty() {
+            page.push(widget::flex_row(waiting).spacing(12).into());
+        }
+        let width = width - 32.0;
+        let clusters = self.agents.clusters();
+        let screen = (height - 260.0).max(200.0);
+        let scale = fit(&clusters, width / zoom, screen / zoom) * zoom;
+        let map = Map::lay_out(&clusters, width / scale);
+        let tall = map.height * scale;
+        page.push(
+            canvas::Canvas::new(super::room_map::MapView {
+                agents: &self.agents,
+                map,
+                scale,
+                now: self.time(),
+                selected: self.picked.as_deref(),
+            })
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(tall))
+            .into(),
+        );
+        widget::scrollable(
+            widget::Column::with_children(page)
+                .spacing(12)
+                .padding([16, 16]),
+        )
+        .width(Length::Fixed(width + 32.0))
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// An agent waiting on the person: who, where, why and for how long, with a box to
+    /// answer it and its terminal a click away.
+    fn waiting_card(&self, node: &Node, zoom: f32) -> Element<'_, Message> {
+        let mut parts: Vec<Element<Message>> = vec![
+            widget::Row::with_children(vec![
+                dot(Some(NodeState::Blocked)),
+                widget::text::title4(node.name.clone().unwrap_or_else(|| "unnamed".into())).into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::text(place_of(node)).class(dim()).into(),
+        ];
+        if let Some(reason) = reason(node) {
+            parts.push(widget::text(reason.to_string()).into());
+        }
+        if let Some(held) = self.agents.held(&node.id, self.time()) {
+            parts.push(
+                widget::text(format!("waiting {}", ago(held)))
+                    .class(cosmic::theme::Text::Color(warning()))
+                    .into(),
+            );
+        }
+        for pr in open_prs(node) {
+            parts.push(link(format!("PR #{}", pr.number), pr.link));
+        }
+        parts.push(self.answer_box(node));
+        widget::container(widget::Column::with_children(parts).spacing(6))
+            .padding(14)
+            .width(Length::Fixed(300.0 * zoom))
+            .class(cosmic::theme::Container::custom(|theme| {
+                let warn = Color::from(theme.cosmic().warning_color());
+                container::Style {
+                    background: Some(Color { a: 0.1, ..warn }.into()),
+                    border: cosmic::iced::Border {
+                        color: Color { a: 0.8, ..warn },
+                        width: 1.5,
+                        radius: 12.0.into(),
+                    },
+                    ..Default::default()
+                }
+            }))
+            .into()
+    }
+
+    /// A box to write to the agent in, and its terminal brought forward.
+    fn answer_box(&self, node: &Node) -> Element<'_, Message> {
+        let id = node.id.clone();
+        let draft = self.drafts.get(&node.id).map_or("", String::as_str);
+        widget::Column::with_children(vec![
+            widget::Row::with_children(vec![
+                widget::text_input("Answer", draft)
+                    .on_input({
+                        let id = id.clone();
+                        move |text| Message::Room(RoomMessage::Draft(id.clone(), text))
+                    })
+                    .on_submit({
+                        let id = id.clone();
+                        move |_| Message::Room(RoomMessage::Answer(id.clone()))
+                    })
+                    .width(Length::Fill)
+                    .into(),
+                widget::button::standard("Send")
+                    .on_press(Message::Room(RoomMessage::Answer(id.clone())))
+                    .into(),
+            ])
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+            widget::button::link("Bring its terminal forward")
+                .on_press(Message::Room(RoomMessage::Focus(id)))
+                .into(),
+        ])
+        .spacing(4)
+        .into()
+    }
+
+    /// The picked node: what the hover says, who started it, its pull requests, a box to
+    /// answer an agent, its digest, and the runs an agent started with theirs.
+    fn details<'a>(&'a self, node: &'a Node, width: f32) -> Element<'a, Message> {
+        let mut parts: Vec<Element<Message>> = vec![
+            widget::Row::with_children(vec![
+                dot(node.state),
+                widget::text(room_agents::kind(node)).class(dim()).into(),
+                widget::space::horizontal().into(),
+                widget::button::text("Close")
+                    .on_press(Message::Room(RoomMessage::Unpick))
+                    .into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        ];
+        let held = self.agents.held(&node.id, self.time());
+        for (i, line) in room_agents::about(node, held).into_iter().enumerate() {
+            parts.push(match i {
+                0 => widget::text::title4(line).into(),
+                _ => widget::text(line).into(),
+            });
+        }
+        if let Some(agent) = self.agents.agent_of(node) {
+            let name = agent.name.clone().unwrap_or_else(|| "its agent".into());
+            parts.push(
+                widget::button::link(format!("Started by {name}"))
+                    .on_press(Message::Room(RoomMessage::Pick(agent.id.clone())))
+                    .into(),
+            );
+        }
+        for pr in open_prs(node) {
+            parts.push(link(format!("PR #{}", pr.number), pr.link));
+        }
+        if matches!(node.kind, Some(NodeKind::Agent(_))) {
+            parts.push(self.answer_box(node));
+        }
+        if let Some(digest) = &node.digest {
+            parts.push(widget::divider::horizontal::default().into());
+            parts.push(widget::text(digest.clone()).into());
+        }
+        for run in self.agents.runs(&node.id) {
+            parts.push(widget::divider::horizontal::default().into());
+            parts.push(
+                widget::Row::with_children(vec![
+                    dot(run.state),
+                    widget::text(run.name.clone().unwrap_or_else(|| "unnamed".into()))
+                        .font(cosmic::font::bold())
+                        .into(),
+                    widget::text(room_agents::kind(run)).class(dim()).into(),
+                ])
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
+            );
+            if let Some(doing) = &run.doing {
+                parts.push(widget::text(doing.clone()).class(dim()).into());
+            }
+            if let Some(digest) = &run.digest {
+                parts.push(widget::text(digest.clone()).into());
+            }
+        }
+        widget::scrollable(
+            widget::Column::with_children(parts)
+                .spacing(8)
+                .padding([16, 12]),
+        )
+        .width(Length::Fixed(width))
         .height(Length::Fill)
         .into()
     }
@@ -429,10 +781,12 @@ impl Room {
                     widget::text(name.clone())
                         .width(Length::Fixed(180.0))
                         .into(),
-                    widget::checkbox(shown).label("shown")
+                    widget::checkbox(shown)
+                        .label("shown")
                         .on_toggle(name_for(RoomMessage::Shown, name))
                         .into(),
-                    widget::checkbox(read).label("metrics")
+                    widget::checkbox(read)
+                        .label("metrics")
                         .on_toggle(name_for(RoomMessage::Metrics, name))
                         .into(),
                     up.into(),
@@ -471,7 +825,8 @@ impl Room {
         let show = self.arrangement.show;
         let toggle =
             |label: &'static str, on: bool, set: fn(&mut Show, bool)| -> Element<'_, Message> {
-                widget::checkbox(on).label(label)
+                widget::checkbox(on)
+                    .label(label)
                     .on_toggle(move |on| {
                         let mut next = show;
                         set(&mut next, on);
@@ -542,6 +897,54 @@ impl Room {
     }
 }
 
+/// A dot in a node state's colour.
+fn dot<'a>(shown: Option<NodeState>) -> Element<'a, Message> {
+    let colour = match state_tint(shown) {
+        room_agents::Tint::Rgb(rgb) => super::room_map::rgb(rgb),
+        room_agents::Tint::Warn => warning(),
+        room_agents::Tint::Error => danger(),
+        _ => dim_color(),
+    };
+    widget::text("●")
+        .class(cosmic::theme::Text::Color(colour))
+        .into()
+}
+
+fn legend<'a>() -> Element<'a, Message> {
+    let mut parts: Vec<Element<Message>> = Vec::new();
+    for shown in LEGEND {
+        parts.push(dot(Some(shown)));
+        parts.push(widget::text(state(Some(shown))).class(dim()).into());
+    }
+    parts.push(
+        widget::text("round: Claude, square: Codex, diamond: dibs job.")
+            .class(dim())
+            .into(),
+    );
+    for (word, tint) in legend_kinds() {
+        parts.push(
+            widget::text(word)
+                .class(cosmic::theme::Text::Color(super::room_map::rgb(tint)))
+                .into(),
+        );
+    }
+    parts.push(
+        widget::text("around an agent: filled and turning while it runs, hollow while it waits. Click one for details.")
+            .class(dim())
+            .into(),
+    );
+    widget::flex_row(parts)
+        .spacing(6)
+        .align_items(Alignment::Center)
+        .into()
+}
+
+fn link<'a>(label: String, url: &str) -> Element<'a, Message> {
+    widget::button::link(label)
+        .on_press(Message::Link(url.to_string()))
+        .into()
+}
+
 /// The machine's name, its state, and the calls about the whole machine.
 fn header(machine: &DibsMachine) -> Element<'_, Message> {
     let mut parts: Vec<Element<Message>> = vec![widget::text::title4(machine.name.clone()).into()];
@@ -578,7 +981,6 @@ fn header(machine: &DibsMachine) -> Element<'_, Message> {
         }
         None => parts.push(widget::text("connecting…").class(dim()).into()),
     }
-    parts.push(widget::space::horizontal().into());
     for (label, call) in [
         ("log", Call::Log),
         ("gpu", Call::Gpu),
@@ -594,9 +996,9 @@ fn header(machine: &DibsMachine) -> Element<'_, Message> {
                 .into(),
         );
     }
-    widget::Row::with_children(parts)
+    widget::flex_row(parts)
         .spacing(8)
-        .align_y(Alignment::Center)
+        .align_items(Alignment::Center)
         .into()
 }
 
@@ -693,11 +1095,15 @@ fn meters<'a>(
 /// its power, clock and what holds it down, and the job on it.
 fn panel<'a>(gpu: &GpuMetrics, points: Vec<f32>, jobs: &[Item], zoom: f32) -> Element<'a, Message> {
     let on = running_on(gpu, jobs);
-    let mut name = widget::text(card_name(gpu)).font(cosmic::font::bold());
+    let mut name = widget::text(card_name(gpu))
+        .font(cosmic::font::bold())
+        .width(Length::Fill)
+        .wrapping(cosmic::iced::widget::text::Wrapping::None)
+        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
     if !on.is_empty() {
         name = name.class(cosmic::theme::Text::Color(warning()));
     }
-    let mut top: Vec<Element<Message>> = vec![name.into(), widget::space::horizontal().into()];
+    let mut top: Vec<Element<Message>> = vec![name.into()];
     if let Some(temp) = gpu.temp_c {
         top.push(
             widget::text(format!("{temp}°C"))

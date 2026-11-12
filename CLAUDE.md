@@ -488,9 +488,12 @@ wrote it.
   its `Failed` back to the tab that asked.
 - **The room in COSMIC** (`cosmic/src/app/room.rs`): a page, opened by Room under the sidebar,
   that links to the daemon's room socket once a window shows it (`connect_room`, the host
-  `--on` names or this computer). Its machines are drawn like the page's, from
-  `claudo-room` (`crates/room`), the toolkit-free crate both frontends share for what the
-  room shows: arrangement, traces, metric wording and colours.
+  `--on` names or this computer). Its agents (the cards of those waiting on the person, the
+  map on a canvas in `room_map.rs`, a picked node's details) and its machines are drawn like
+  the page's, from `claudo-room` (`crates/room`), the toolkit-free crate both frontends share
+  for what the room shows: the agents' clusters and map layout, the machines' arrangement and
+  traces, and the wording and colours of both. The canvas cannot measure text, so the map's
+  captions are cut and centred by an estimate of their width.
 - **The whole room for apps**: the daemon also serves on `$XDG_RUNTIME_DIR/claudo-room.sock`
   (mode 0600) what a page hears, each line a `Command` in or a `ServerEvent` out, and
   `claudo-daemon --room-bridge` joins it to stdin and stdout, so `transport::connect_room`
