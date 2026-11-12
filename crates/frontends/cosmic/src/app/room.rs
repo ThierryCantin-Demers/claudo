@@ -10,8 +10,8 @@ use claudo_protocol::{
     Action as Act, DIBS_POLL, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState,
 };
 use claudo_room::agents::{
-    self as room_agents, Agents, LEGEND, Map, ago, checks, fit, legend_kinds, open_prs,
-    reason, state, state_tint,
+    self as room_agents, Agents, LEGEND, Map, ago, checks, fit, legend_kinds, open_prs, reason,
+    state, state_tint,
 };
 use claudo_room::machines::{
     Arrangement, Cards, History, KEPT, Show, card_name, filled, gib, heat, held_by, level, memory,
@@ -66,6 +66,8 @@ pub struct Room {
     /// The poll the slider is set to while it moves.
     poll: Option<u64>,
     lost: Option<String>,
+    /// The room has said something since the link was made.
+    answered: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +124,7 @@ impl Room {
         match message {
             RoomMessage::Connected(commands) => self.commands = Some(commands),
             RoomMessage::Events(events) => {
+                self.answered = true;
                 for event in events {
                     self.heard(event);
                 }
@@ -288,6 +291,17 @@ impl Room {
     /// The room page, `width` by `height`: the agents, their details when one is picked,
     /// and the machines.
     pub fn view(&self, zoom: f32, width: f32, height: f32) -> Element<'_, Message> {
+        if !self.answered || (self.lost.is_some() && self.agents.nodes.is_empty()) {
+            let words = match &self.lost {
+                Some(lost) => format!(
+                    "Cannot reach the daemon's room ({lost}); trying again every few seconds."
+                ),
+                None => "Connecting to the daemon's room…".to_string(),
+            };
+            return widget::container(widget::text(words).class(dim()))
+                .center(Length::Fill)
+                .into();
+        }
         let details = self
             .picked
             .as_ref()

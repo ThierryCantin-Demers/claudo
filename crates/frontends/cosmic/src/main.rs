@@ -5000,6 +5000,8 @@ mod app {
                 restoring: false,
             };
             let mut app = app;
+            // A window reopened on the room links to it as one opened there would.
+            app.room.wanted = app.windows.values().any(|layout| layout.page == Page::Room);
             app.unsent_saved = app.unsent().1;
             for saved in &ui.windows {
                 let w = app.open_window(WindowLayout::restored(saved));

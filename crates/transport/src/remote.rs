@@ -29,7 +29,13 @@ const ROOM_BRIDGE: &str =
 /// The control room of the daemon on `host` as ssh names it, or on this computer, reached
 /// again whenever it is lost.
 pub fn connect_room(host: Option<String>) -> (Commands, Events) {
-    connect_with(move || match &host {
+    // A daemon on this computer comes back within seconds of an install, and starting the
+    // bridge costs nothing, so it is tried again often.
+    let longest = match host {
+        Some(_) => Duration::from_secs(30),
+        None => Duration::from_secs(3),
+    };
+    let bridge = move || match &host {
         Some(host) => {
             let mut ssh = Process::new("ssh");
             ssh.args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=10"])
@@ -42,7 +48,8 @@ pub fn connect_room(host: Option<String>) -> (Commands, Events) {
             sh.args(["-c", ROOM_BRIDGE]);
             sh
         }
-    })
+    };
+    reconnecting(bridge, longest)
 }
 
 /// Where this computer's claudo serves its backend.
@@ -181,6 +188,14 @@ pub fn connect_remote(host: String) -> (Commands, Events) {
 
 /// As `connect_remote`, through whatever `bridge` starts.
 pub fn connect_with(bridge: impl Fn() -> Process + Send + 'static) -> (Commands, Events) {
+    reconnecting(bridge, Duration::from_secs(30))
+}
+
+/// As `connect_with`, waiting at most `longest` between attempts.
+fn reconnecting(
+    bridge: impl Fn() -> Process + Send + 'static,
+    longest: Duration,
+) -> (Commands, Events) {
     let (commands, inputs) = channel();
     let (events, received) = unbounded_channel();
     let stdin: Link = Arc::default();
@@ -203,7 +218,7 @@ pub fn connect_with(bridge: impl Fn() -> Process + Send + 'static) -> (Commands,
             wait = if started.elapsed() > Duration::from_secs(60) {
                 Duration::from_secs(1)
             } else {
-                (wait * 2).min(Duration::from_secs(30))
+                (wait * 2).min(longest)
             };
             std::thread::sleep(wait);
         }
