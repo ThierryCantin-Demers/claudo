@@ -558,7 +558,8 @@ wrote it.
 - **Machines** (a tile beside the agents on the page's Room tab, which the person drags into
   a split or tabs, `egui_tiles`, laid out as eframe keeps it; inside it, one cell per
   machine in a grid of equal cells, which the Arrange menu on its tab bar orders, hides and
-  sets the columns of, kept with the page's storage): the dibs collector also sends every
+  sets the columns of, kept with the page's storage; each cell as tall as what it holds, the
+  pane scrolling as a whole): the dibs collector also sends every
   machine's status, and why one could not answer, as `ServerEvent::Dibs`. Each cell draws its
   machine's state, its CPU, memory and cards (`meters.rs`, from the `metrics` that
   `dibs --status --metrics` adds, read in dibs's runner from `/proc`, NVML and sysfs, so

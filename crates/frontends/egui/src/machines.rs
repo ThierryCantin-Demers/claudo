@@ -9,17 +9,15 @@ use dibstop_view::action::Action;
 use dibstop_view::dibs_format::{Label, Mode, Span};
 use dibstop_view::item::{Item, Progress as _};
 use dibstop_view::text::{Tone, agent_hue, cores, plain, state_words};
-use egui::{Color32, Key, Rect, RichText, Ui, vec2};
+use egui::{Color32, Key, RichText, Ui, vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::meters::{self, History};
 
 const KEY: &str = "machines";
 
-/// The narrowest a cell gets when the columns fit the width, and the shortest, below which
-/// the cells scroll instead.
+/// The narrowest a cell gets when the columns fit the width.
 const NARROWEST: f32 = 420.0;
-const SHORTEST: f32 = 260.0;
 const GAP: f32 = 8.0;
 
 #[derive(Default)]
@@ -117,40 +115,38 @@ impl Machines {
             ui.weak("Every machine is hidden: show one from Arrange.");
             return None;
         }
-        let width = ui.available_width();
-        let fit = ((width + GAP) / (NARROWEST + GAP)).floor() as usize;
-        let columns = self.arrangement.columns.unwrap_or(fit).clamp(1, shown.len());
-        let rows = shown.len().div_ceil(columns);
-        let gaps = |count: usize| GAP * count.saturating_sub(1) as f32;
-        let cell = vec2(
-            (width - gaps(columns)) / columns as f32,
-            ((ui.available_height() - gaps(rows)) / rows as f32).max(SHORTEST),
-        );
         let mut asked = None;
         egui::ScrollArea::vertical()
             .id_salt("machines")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let height = cell.y * rows as f32 + gaps(rows);
-                let (area, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
-                for (i, name) in shown.iter().enumerate() {
-                    let at = vec2((i % columns) as f32, (i / columns) as f32);
-                    let rect = Rect::from_min_size(area.min + at * (cell + vec2(GAP, GAP)), cell);
-                    ui.painter().rect_stroke(
-                        rect,
-                        4.0,
-                        ui.visuals().widgets.noninteractive.bg_stroke,
-                        egui::StrokeKind::Inside,
-                    );
-                    let inner = rect.shrink(6.0);
-                    let mut cell_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(inner)
-                            .id_salt(("machine", name))
-                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                    );
-                    cell_ui.set_clip_rect(inner.intersect(ui.clip_rect()));
-                    asked = asked.take().or(self.cell(&mut cell_ui, name));
+                let width = ui.available_width();
+                let fit = ((width + GAP) / (NARROWEST + GAP)).floor() as usize;
+                let columns = self.arrangement.columns.unwrap_or(fit).clamp(1, shown.len());
+                let cell = (width - GAP * (columns - 1) as f32) / columns as f32;
+                for row in shown.chunks(columns) {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = GAP;
+                        for name in row {
+                            let layout = egui::Layout::top_down(egui::Align::Min);
+                            ui.allocate_ui_with_layout(vec2(cell, 0.0), layout, |ui| {
+                                let framed = egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.push_id(name, |ui| self.cell(ui, name)).inner
+                                });
+                                asked = asked.take().or(framed.inner);
+                                let rect = framed.response.rect;
+                                let clicked = ui.input(|input| {
+                                    input.pointer.primary_pressed()
+                                        && input.pointer.interact_pos().is_some_and(|at| rect.contains(at))
+                                });
+                                if clicked {
+                                    self.active = Some(name.clone());
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(GAP);
                 }
             });
         asked
@@ -266,12 +262,7 @@ impl Machines {
             ui.weak("dibs no longer lists this machine.");
             return None;
         };
-        let rect = ui.max_rect();
-        let clicked = ui.input(|input| {
-            input.pointer.primary_pressed()
-                && input.pointer.interact_pos().is_some_and(|at| rect.contains(at))
-        });
-        if clicked || self.active.is_none() {
+        if self.active.is_none() {
             self.active = Some(name.to_string());
         }
         let keys = self.active.as_deref() == Some(name);
@@ -308,9 +299,7 @@ impl Tile {
             Some(status) => {
                 meters::ui(ui, status, history, &jobs);
                 ui.separator();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| asked = asked.take().or(self.jobs(ui, &jobs)));
+                asked = asked.take().or(self.jobs(ui, &jobs));
             }
             None => {
                 if let Some(trouble) = &machine.trouble {
@@ -424,29 +413,21 @@ impl Tile {
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(RichText::new(it.mode.to_string()).color(mode).strong());
-                    let frozen = it.holding && it.slot != "HOLDING";
-                    if frozen {
-                        ui.label(
-                            RichText::new(it.slot.to_lowercase()).color(ui.visuals().warn_fg_color),
-                        );
+                    if it.holding && it.slot != "HOLDING" {
+                        let frozen = it.slot.to_lowercase();
+                        ui.label(RichText::new(frozen).color(ui.visuals().warn_fg_color));
                     }
                     if !it.holding {
                         ui.weak(it.slot.replace("queued ", "#"));
                     }
-                    ui.add(
-                        egui::Label::new(RichText::new(it.label.as_str()).color(hue).strong())
-                            .truncate(),
-                    );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(RichText::new(it.label.as_str()).color(hue).strong());
                     ui.label(RichText::new(&it.agent).color(hue));
                     if let Some(device) = &it.device {
-                        ui.label(
-                            RichText::new(device.as_str()).color(Color32::from_rgb(200, 110, 200)),
-                        );
+                        let card = RichText::new(device.as_str()).color(Color32::from_rgb(200, 110, 200));
+                        ui.label(card);
                     }
                     if let Some(batch) = &it.batch {
                         ui.weak(batch.progress());
@@ -462,11 +443,9 @@ impl Tile {
                         false => ui.weak(format!("waited {time}")),
                     };
                 });
-                if !it.note.is_empty() && !selected {
-                    match it.alarm {
-                        true => ui.colored_label(ui.visuals().warn_fg_color, &it.note),
-                        false => ui.weak(&it.note),
-                    };
+                // A note that warns keeps its line; the others wait for a hover.
+                if it.alarm && !selected {
+                    ui.colored_label(ui.visuals().warn_fg_color, &it.note);
                 }
                 if selected {
                     asked = self.detail(ui, it);
@@ -477,7 +456,12 @@ impl Tile {
             let stripe = egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
             ui.painter().rect_filled(stripe, 2.0, mode);
         }
-        if card.response.interact(egui::Sense::click()).clicked() {
+        let response = card.response.interact(egui::Sense::click());
+        let response = match it.note.is_empty() || it.alarm || selected {
+            true => response,
+            false => response.on_hover_text(&it.note),
+        };
+        if response.clicked() {
             self.selected = (!selected).then_some(it.pid);
         }
         asked
