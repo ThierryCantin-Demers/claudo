@@ -249,6 +249,7 @@ impl Machines {
         ui.horizontal(|ui| {
             ui.checkbox(&mut show.cpu, "CPU graph");
             ui.checkbox(&mut show.memory, "memory");
+            ui.checkbox(&mut show.disks, "disks");
             ui.checkbox(&mut show.asleep, "sleeping cards");
         });
         ui.horizontal(|ui| {

@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use dibstop_view::dibs_format::status::{GpuMetrics, Metrics, Status};
+use dibstop_view::dibs_format::status::{Disk, DiskRole, GpuMetrics, Metrics, QuotaKind, Status};
 use dibstop_view::item::Item;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,7 @@ const ROW_BAR: f32 = 90.0;
 pub struct Show {
     pub cpu: bool,
     pub memory: bool,
+    pub disks: bool,
     pub cards: Cards,
     pub asleep: bool,
 }
@@ -34,6 +35,7 @@ impl Default for Show {
         Self {
             cpu: true,
             memory: true,
+            disks: true,
             cards: Cards::Graphs,
             asleep: true,
         }
@@ -115,6 +117,16 @@ pub fn ui(ui: &mut Ui, show: Show, status: &Status, history: &History, jobs: &[I
             &format!("Mem {}   {}", percent(share), gib(used, total)),
         );
     }
+    for disk in metrics.map_or(&[][..], |metrics| &metrics.disks[..]) {
+        if show.disks {
+            let (share, over) = filled(disk);
+            bar(ui, vec2(width, BAR), share, &over).on_hover_text(format!(
+                "{} on {}",
+                disk.mount,
+                disk.fstype.as_deref().unwrap_or("?")
+            ));
+        }
+    }
     let gpus = metrics.map_or(&[][..], |metrics| &metrics.gpus[..]);
     let (asleep, awake): (Vec<&GpuMetrics>, Vec<&GpuMetrics>) =
         gpus.iter().partition(|gpu| gpu.suspended);
@@ -146,6 +158,55 @@ pub fn ui(ui: &mut Ui, show: Show, status: &Status, history: &History, jobs: &[I
         let names: Vec<String> = asleep.iter().map(|gpu| name(gpu)).collect();
         ui.weak(format!("asleep: {}", names.join(", ")))
             .on_hover_text("A card the driver has put to sleep, which reading would wake.");
+    }
+}
+
+/// How full a filesystem is to this account, and what to write on its bar: its own free
+/// space, or a quota's room when that is less, since either stops a job the same way.
+fn filled(disk: &Disk) -> (f32, String) {
+    let role = match disk.role {
+        DiskRole::Scratch => "scratch",
+        DiskRole::Tmp => "tmp",
+        DiskRole::SystemTmp => "/tmp",
+    };
+    let disk_share = 1.0 - disk.free as f32 / disk.total.max(1) as f32;
+    let tightest = disk
+        .quotas
+        .iter()
+        .min_by_key(|quota| quota.limit.saturating_sub(quota.used));
+    match tightest {
+        Some(quota) if quota.limit.saturating_sub(quota.used) < disk.free => {
+            let share = quota.used as f32 / quota.limit.max(1) as f32;
+            let kind = match quota.kind {
+                QuotaKind::User => "user",
+                QuotaKind::Group => "group",
+                QuotaKind::Project => "project",
+            };
+            let over = format!(
+                "{role} {}   {} free of its {kind} quota of {}",
+                percent(share),
+                size(quota.limit.saturating_sub(quota.used)),
+                size(quota.limit)
+            );
+            (share.max(disk_share), over)
+        }
+        _ => {
+            let over = format!(
+                "{role} {}   {} free of {}",
+                percent(disk_share),
+                size(disk.free),
+                size(disk.total)
+            );
+            (disk_share, over)
+        }
+    }
+}
+
+fn size(bytes: u64) -> String {
+    const GIB: f64 = (1u64 << 30) as f64;
+    match bytes as f64 / GIB {
+        gib if gib >= 1024.0 => format!("{:.1} TiB", gib / 1024.0),
+        gib => format!("{gib:.0} GiB"),
     }
 }
 
@@ -351,14 +412,15 @@ fn graph(ui: &mut Ui, size: Vec2, points: &VecDeque<f32>, now: Option<f32>, over
 }
 
 /// How full it is, the colour of how full, with `over` written on it.
-fn bar(ui: &mut Ui, size: Vec2, share: f32, over: &str) {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+fn bar(ui: &mut Ui, size: Vec2, share: f32, over: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
     let width = rect.width() * share.clamp(0.0, 1.0);
     let full = Rect::from_min_size(rect.min, vec2(width, rect.height()));
     painter.rect_filled(full, 3.0, level(share).gamma_multiply(0.8));
     caption(&painter, rect, over);
+    response
 }
 
 /// Text over a graph, with a dark edge so it reads over any colour.
