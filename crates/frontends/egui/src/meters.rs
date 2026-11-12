@@ -128,66 +128,78 @@ fn card(ui: &mut Ui, width: f32, gpu: &GpuMetrics, points: Option<&VecDeque<f32>
         .inner_margin(4)
         .show(ui, |ui| {
             let inner = width - 8.0 - 2.0 * stroke.width;
-            ui.set_width(inner);
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.horizontal(|ui| {
-                let named = RichText::new(name(gpu)).strong();
-                ui.add(
-                    egui::Label::new(match on.is_empty() {
-                        true => named,
-                        false => named.color(busy),
-                    })
-                    .truncate(),
-                )
-                .on_hover_text(format!(
-                    "{}\n{}",
-                    gpu.name.as_deref().unwrap_or("no name from its driver"),
-                    gpu.pci
-                ));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(temp) = gpu.temp_c {
-                        let share = (temp as f32 - 30.0) / 60.0;
-                        ui.label(RichText::new(format!("{temp}°C")).color(level(share)));
-                    }
-                });
-            });
-            let util = gpu.util_pct.map(|util| util as f32 / 100.0);
-            let empty = VecDeque::new();
-            let over = util.map_or(String::new(), percent);
-            graph(
-                ui,
-                vec2(inner, CARD_GRAPH),
-                points.unwrap_or(&empty),
-                util,
-                &over,
-            );
-            if let (Some(used), Some(total)) = (gpu.mem_used, gpu.mem_total) {
-                let share = used as f32 / total.max(1) as f32;
-                bar(ui, vec2(inner, BAR - 2.0), share, &gib(used, total));
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if let Some(power) = gpu.power_mw {
-                    ui.weak(format!("{} W", power / 1000));
-                }
-                if let Some(clock) = gpu.clock_mhz {
-                    ui.weak(format!("{clock} MHz"));
-                }
-                for reason in gpu.throttle.iter().flatten() {
-                    if let Some((words, alarm)) = held_by(reason) {
-                        let colour = match alarm {
-                            true => ui.visuals().error_fg_color,
-                            false => busy,
-                        };
-                        ui.label(RichText::new(words).color(colour));
-                    }
-                }
-            });
-            for job in on {
-                let label = RichText::new(format!("← {}", job.label.as_str())).color(busy);
-                ui.add(egui::Label::new(label).truncate());
+            // The row the panel sits in lays out left to right, and a frame keeps its layout.
+            ui.vertical(|ui| panel(ui, inner, gpu, points, &on, busy));
+        });
+}
+
+fn panel(
+    ui: &mut Ui,
+    inner: f32,
+    gpu: &GpuMetrics,
+    points: Option<&VecDeque<f32>>,
+    on: &[&Item],
+    busy: Color32,
+) {
+    ui.set_width(inner);
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.horizontal(|ui| {
+        let named = RichText::new(name(gpu)).strong();
+        ui.add(
+            egui::Label::new(match on.is_empty() {
+                true => named,
+                false => named.color(busy),
+            })
+            .truncate(),
+        )
+        .on_hover_text(format!(
+            "{}\n{}",
+            gpu.name.as_deref().unwrap_or("no name from its driver"),
+            gpu.pci
+        ));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(temp) = gpu.temp_c {
+                let share = (temp as f32 - 30.0) / 60.0;
+                ui.label(RichText::new(format!("{temp}°C")).color(level(share)));
             }
         });
+    });
+    let util = gpu.util_pct.map(|util| util as f32 / 100.0);
+    let empty = VecDeque::new();
+    let over = util.map_or(String::new(), percent);
+    graph(
+        ui,
+        vec2(inner, CARD_GRAPH),
+        points.unwrap_or(&empty),
+        util,
+        &over,
+    );
+    if let (Some(used), Some(total)) = (gpu.mem_used, gpu.mem_total) {
+        let share = used as f32 / total.max(1) as f32;
+        bar(ui, vec2(inner, BAR - 2.0), share, &gib(used, total));
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if let Some(power) = gpu.power_mw {
+            ui.weak(format!("{} W", power / 1000));
+        }
+        if let Some(clock) = gpu.clock_mhz {
+            ui.weak(format!("{clock} MHz"));
+        }
+        for reason in gpu.throttle.iter().flatten() {
+            if let Some((words, alarm)) = held_by(reason) {
+                let colour = match alarm {
+                    true => ui.visuals().error_fg_color,
+                    false => busy,
+                };
+                ui.label(RichText::new(words).color(colour));
+            }
+        }
+    });
+    for job in on {
+        let label = RichText::new(format!("← {}", job.label.as_str())).color(busy);
+        ui.add(egui::Label::new(label).truncate());
+    }
 }
 
 /// What `--device` names it by, which a job's `device` is.

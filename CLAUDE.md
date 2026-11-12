@@ -556,7 +556,8 @@ wrote it.
   ends without waiting for one). A notification can follow a preamble of the harness's own,
   so `cli::notified_end` looks for the block anywhere in the message.
 - **Machines** (a tile beside the agents on the page's Room tab, which the person drags into
-  a split or tabs, `egui_tiles`, laid out as eframe keeps it; inside it, one cell per
+  a split or tabs, `egui_tiles`, laid out as eframe keeps it, each tile zoomed on its own from
+  its tab bar by drawing it on a layer egui scales, pointer included; inside it, one cell per
   machine in a grid of equal cells, which the Arrange menu on its tab bar orders, hides and
   sets the columns of, kept with the page's storage; each cell as tall as what it holds, the
   pane scrolling as a whole): the dibs collector also sends every
