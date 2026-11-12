@@ -18,6 +18,8 @@ const APPLET_BIN: &str = "claudo-applet";
 const DAEMON_BIN: &str = "claudo-daemon";
 const DAEMON_UNIT: &str = "claudo-daemon.service";
 const DAEMON_PORT: u16 = 8787;
+const TEAM_UNIT: &str = "claudo-team.service";
+const TEAM_PORT: u16 = 8790;
 const WEB_OUT: &str = "crates/frontends/egui/dist";
 
 #[derive(Parser)]
@@ -53,7 +55,19 @@ enum Task {
         #[arg(long)]
         no_dibs: bool,
     },
-    /// Remove what `install`, `install-applet` and `install-daemon` put in place.
+    /// Install the team page, `claudo-daemon --team`, as a systemd user service: the shared
+    /// dibs machines and the benchmarks, for anyone on the network to look at.
+    InstallTeam {
+        /// Publish the page as `<NAME>.local` over mDNS while it runs, so its link follows
+        /// whichever computer serves it. Never on two computers at once.
+        #[arg(long)]
+        name: Option<String>,
+        /// The dibs machines to show, comma separated; every one without it.
+        #[arg(long, value_name = "NAMES")]
+        machines: Option<String>,
+    },
+    /// Remove what `install`, `install-applet`, `install-daemon` and `install-team` put in
+    /// place.
     Uninstall,
     /// Run the COSMIC app.
     Cosmic {
@@ -125,6 +139,7 @@ impl Task {
             Task::Daemon => &[Need::WebBundle, Need::Claude],
             Task::Web => &[Need::WasmTarget, Need::WasmBindgen],
             Task::InstallDaemon { .. } => &[Need::WasmTarget, Need::WasmBindgen, Need::Claude],
+            Task::InstallTeam { .. } => &[Need::WasmTarget, Need::WasmBindgen],
             Task::Lint | Task::Test { .. } => &[Need::PkgConfig, Need::Xkbcommon],
             Task::Probe { name: Some(_) } => &[Need::Claude],
             Task::Setup | Task::Uninstall | Task::Probe { name: None } => &[],
@@ -139,6 +154,7 @@ fn run(task: Task) -> Result<(), String> {
         Task::Install { on } => install(on.as_deref()),
         Task::InstallApplet => install_applet(),
         Task::InstallDaemon { with, no_dibs } => install_daemon(&with, no_dibs),
+        Task::InstallTeam { name, machines } => install_team(name.as_deref(), machines),
         Task::Uninstall => uninstall(),
         Task::Cosmic { hot: true, .. } => hot(&["-p", COSMIC_BIN, "--features", "hot"], None),
         Task::Cosmic { release, .. } => {
@@ -292,19 +308,7 @@ fn install_daemon(others: &[String], no_dibs: bool) -> Result<(), String> {
     {
         return Err(format!("{host:?} is not a host ssh can reach"));
     }
-    web()?;
-    let web = installed_web()?;
-    if web.exists() {
-        fs::remove_dir_all(&web).map_err(|e| format!("cannot replace {}: {e}", web.display()))?;
-    }
-    fs::create_dir_all(&web).map_err(|e| format!("cannot create {}: {e}", web.display()))?;
-    for file in fs::read_dir(WEB_OUT).map_err(|e| format!("cannot read {WEB_OUT}: {e}"))? {
-        let file = file.map_err(|e| format!("cannot read {WEB_OUT}: {e}"))?;
-        fs::copy(file.path(), web.join(file.file_name()))
-            .map_err(|e| format!("cannot install {}: {e}", file.path().display()))?;
-    }
-    cargo_install("crates/daemon", &[])?;
-    let bin = cargo_bin_dir()?.join(DAEMON_BIN);
+    let (bin, web) = install_page()?;
     let token = daemon_token()?;
     let unit = daemon_unit()?;
     fs::create_dir_all(unit.parent().unwrap())
@@ -359,6 +363,94 @@ fn install_daemon(others: &[String], no_dibs: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The web bundle where the daemon finds it, and the daemon in cargo's bin directory.
+fn install_page() -> Result<(PathBuf, PathBuf), String> {
+    web()?;
+    let web = installed_web()?;
+    if web.exists() {
+        fs::remove_dir_all(&web).map_err(|e| format!("cannot replace {}: {e}", web.display()))?;
+    }
+    fs::create_dir_all(&web).map_err(|e| format!("cannot create {}: {e}", web.display()))?;
+    for file in fs::read_dir(WEB_OUT).map_err(|e| format!("cannot read {WEB_OUT}: {e}"))? {
+        let file = file.map_err(|e| format!("cannot read {WEB_OUT}: {e}"))?;
+        fs::copy(file.path(), web.join(file.file_name()))
+            .map_err(|e| format!("cannot install {}: {e}", file.path().display()))?;
+    }
+    cargo_install("crates/daemon", &[])?;
+    Ok((cargo_bin_dir()?.join(DAEMON_BIN), web))
+}
+
+/// The team page as a user service, publishing `name` over mDNS when given.
+fn install_team(name: Option<&str>, machines: Option<String>) -> Result<(), String> {
+    let name = name.map(|name| match name.ends_with(".local") {
+        true => name.to_string(),
+        false => format!("{name}.local"),
+    });
+    if let Some(name) = &name
+        && (name.contains(char::is_whitespace) || name.matches('.').count() != 1)
+    {
+        return Err(format!("{name:?} is not a name like team.local"));
+    }
+    let (bin, web) = install_page()?;
+    let unit = config_home()?.join(format!("systemd/user/{TEAM_UNIT}"));
+    fs::create_dir_all(unit.parent().unwrap())
+        .map_err(|e| format!("cannot create {}: {e}", unit.parent().unwrap().display()))?;
+    // dibs and parley are found on the installing shell's PATH, not systemd's.
+    let mut environment = vec![
+        format!("PATH={}", env::var("PATH").unwrap_or_default()),
+        format!("CLAUDO_PORT={TEAM_PORT}"),
+        format!("CLAUDO_STATIC_DIR={}", web.display()),
+    ];
+    let machines = machines.or_else(|| env::var("CLAUDO_TEAM_MACHINES").ok());
+    if let Some(machines) = machines {
+        environment.push(format!("CLAUDO_TEAM_MACHINES={machines}"));
+    }
+    for variable in ["CLAUDO_BENCHMARKS", "CLAUDO_PARLEY_ROOM", "SSH_AUTH_SOCK"] {
+        if let Ok(value) = env::var(variable) {
+            environment.push(format!("{variable}={value}"));
+        }
+    }
+    if let Some(name) = &name {
+        environment.push(format!("CLAUDO_TEAM_NAME={name}"));
+    }
+    let environment: String = environment
+        .iter()
+        .map(|variable| format!("Environment={}\n", unit_word(variable)))
+        .collect();
+    let service = format!(
+        "[Unit]\n\
+         Description=claudo's team page: the shared machines and the benchmarks\n\
+         \n\
+         [Service]\n\
+         ExecStart={bin} --team\n\
+         {environment}\
+         Restart=on-failure\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        bin = unit_word(&bin.display().to_string()),
+    );
+    fs::write(&unit, service).map_err(|e| format!("cannot write {}: {e}", unit.display()))?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", TEAM_UNIT])?;
+    systemctl(&["restart", TEAM_UNIT])?;
+    println!("installed {}", bin.display());
+    println!("service {}", unit.display());
+    if env::var("CLAUDO_BENCHMARKS").is_err() || env::var("CLAUDO_PARLEY_ROOM").is_err() {
+        println!("no benchmarks: set CLAUDO_BENCHMARKS and CLAUDO_PARLEY_ROOM and install again");
+    }
+    match &name {
+        Some(name) => println!("the team page: http://{name}:{TEAM_PORT}/"),
+        None => println!("the team page: port {TEAM_PORT} of this computer"),
+    }
+    println!(
+        "other computers reach it once the firewall lets them: \
+         sudo firewall-cmd --add-port={TEAM_PORT}/tcp --permanent; sudo firewall-cmd --reload"
+    );
+    println!("to keep it up while nobody is logged in: loginctl enable-linger");
+    Ok(())
+}
+
 /// One word of a unit file, whatever spaces, quotes or `%` it holds.
 fn unit_word(text: &str) -> String {
     let escaped = text
@@ -410,6 +502,10 @@ fn uninstall() -> Result<(), String> {
     if unit.exists() {
         systemctl(&["disable", "--now", DAEMON_UNIT])?;
     }
+    let team = config_home()?.join(format!("systemd/user/{TEAM_UNIT}"));
+    if team.exists() {
+        systemctl(&["disable", "--now", TEAM_UNIT])?;
+    }
     if cargo_bin_dir()?.join(DAEMON_BIN).exists() {
         cargo(&["uninstall", DAEMON_BIN])?;
     }
@@ -435,6 +531,7 @@ fn uninstall() -> Result<(), String> {
         applet_desktop_file(APPLET_ID)?,
         applet_desktop_file(CODEX_APPLET_ID)?,
         unit,
+        team,
     ]
     .into_iter()
     .chain(remote)

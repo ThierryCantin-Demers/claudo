@@ -34,6 +34,7 @@ cargo run -p claudo-egui --release           # native app
 cargo xtask web                              # wasm bundle -> crates/frontends/egui/dist
 cargo run -p claudo-daemon                   # serves bundle + WebSocket, prints token URL
 cargo xtask install-daemon                   # systemd user service, prints the page's link
+cargo xtask install-team --name team         # the team page as a service, at team.local
 cargo xtask egui --room [LINK] [--hot]       # the daemon's room in a native window, live patched
 
 cargo run -p claudo-cosmic --features cosmic --release   # COSMIC frontend
@@ -499,7 +500,10 @@ wrote it.
   token. It runs the dibs collector alone over `Hub::room_only`, a room with no backend, so
   no conversation, agent or queued message of this user can reach it; it says
   `ServerEvent::LookOnly` first, and drops whatever a page sends. The page then shows the
-  machines alone, without dibs's actions or keys.
+  machines alone, without dibs's actions or keys. `cargo xtask install-team [--name N]` runs it as the
+  `claudo-team` user service; with `CLAUDO_TEAM_NAME` (`N.local`) the daemon keeps
+  `avahi-publish -a -R` running for that name at its current address, so the link follows
+  whichever computer serves the page.
 - **Benchmarks** (`core/src/benchmarks.rs`): with `CLAUDO_BENCHMARKS` (Parley projects, each
   `project` or `project/slug-prefix`, comma separated) and `CLAUDO_PARLEY_ROOM` (the room's
   address) set, the daemon, team page included, reads `parley benchmarks list <project> --json`

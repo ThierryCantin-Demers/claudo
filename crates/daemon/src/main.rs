@@ -14,6 +14,9 @@
 //! `CLAUDO_TEAM_MACHINES` (all, without it) to anyone on the network, who can only look. It
 //! runs no other collector and no backend, takes no command, and needs no token, so nothing
 //! of this user's agents or conversations reaches it.
+//! `CLAUDO_TEAM_NAME` (`team.local`) is published
+//! over mDNS as this computer while it runs, so the page's link follows whichever computer
+//! serves it.
 //!
 //! Auth: a token, made on the first start and kept in claudo's config so the page's
 //! link survives restarts, must be presented as `?token=…` on the WS upgrade. The
@@ -44,6 +47,7 @@ use tower_http::services::ServeDir;
 use crate::machines::Machines;
 
 mod machines;
+mod name;
 
 #[derive(Clone)]
 struct AppState {
@@ -86,6 +90,9 @@ async fn serve_team() {
     let hub = Hub::room_only();
     claudo_core::dibs::spawn_team(hub.feed("dibs"), machines);
     benchmarks(&hub);
+    if let Ok(name) = std::env::var("CLAUDO_TEAM_NAME") {
+        name::publish(name);
+    }
     let app = Router::new()
         .route("/ws", get(team_socket))
         .fallback_service(
