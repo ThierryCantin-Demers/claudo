@@ -42,6 +42,8 @@ fn main() -> eframe::Result<()> {
 
 /// The daemon's room to show, from `--room <page link>` or `CLAUDO_ROOM`; without one, the
 /// window runs its own backend, which has no room.
+const TITLE_BAR_KEY: &str = "title-bar";
+
 /// What a window asks of its backend as it connects.
 fn first_asked() -> [Command; 4] {
     [
@@ -154,6 +156,9 @@ struct ClaudoApp {
     room: room::Room,
     machines: machines::Machines,
     desk: desk::Desk,
+    /// Whether a native window keeps its title bar, and what the window was last told.
+    title_bar: bool,
+    title_bar_told: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -205,6 +210,10 @@ impl ClaudoApp {
             page: first_page(),
             room: room::Room::default(),
             desk: desk::Desk::new(storage),
+            title_bar: storage
+                .and_then(|storage| eframe::get_value(storage, TITLE_BAR_KEY))
+                .unwrap_or(true),
+            title_bar_told: None,
             machines: machines::Machines::new(storage),
         }
     }
@@ -632,6 +641,7 @@ impl ClaudoApp {
 
 impl eframe::App for ClaudoApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, TITLE_BAR_KEY, &self.title_bar);
         self.desk.save(storage);
         self.machines.save(storage);
     }
@@ -645,6 +655,39 @@ impl eframe::App for ClaudoApp {
 }
 
 impl ClaudoApp {
+    /// A native window's title bar as the person set it from this bar's right-click menu, and,
+    /// without one, this bar standing in for it: dragged to move the window, double-clicked to
+    /// maximise it. The compositor draws the title bar, so a click on it never reaches here.
+    /// Called before the bar's widgets, which take the clicks that land on them.
+    fn window_bar(&mut self, ui: &mut egui::Ui) {
+        if self.title_bar_told != Some(self.title_bar) {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Decorations(self.title_bar));
+            self.title_bar_told = Some(self.title_bar);
+        }
+        let bar = ui.interact(
+            ui.max_rect(),
+            ui.id().with("window-bar"),
+            egui::Sense::click_and_drag(),
+        );
+        bar.context_menu(|ui| {
+            ui.checkbox(&mut self.title_bar, "Title bar");
+        });
+        if self.title_bar {
+            return;
+        }
+        if bar.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if bar.double_clicked() {
+            let maximized = ui
+                .ctx()
+                .input(|input| input.viewport().maximized.unwrap_or(false));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
+    }
+
     /// Everything drawn each frame, which a hot patch replaces.
     fn frame(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
@@ -684,6 +727,9 @@ impl ClaudoApp {
         }
 
         egui::Panel::top("pages").show(ui, |ui| {
+            if !cfg!(target_arch = "wasm32") {
+                self.window_bar(ui);
+            }
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Room, "Room");
                 ui.selectable_value(&mut self.page, Page::Chat, "Chat");
