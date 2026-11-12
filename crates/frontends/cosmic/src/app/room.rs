@@ -24,7 +24,7 @@ use dibstop_view::action::{Action, Call};
 use dibstop_view::dibs_format::status::{GpuMetrics, Status};
 use dibstop_view::dibs_format::{Label, Mode, Span};
 use dibstop_view::item::{Item, Progress as _};
-use dibstop_view::text::{Tone, agent_hue, cores, plain, state_words};
+use dibstop_view::text::{Tone, cores, plain, state_words};
 
 use super::*;
 
@@ -542,6 +542,7 @@ impl Room {
         let id = node.id.clone();
         let draft = self.drafts.get(&node.id).map_or("", String::as_str);
         let name = node.name.clone().unwrap_or_else(|| "unnamed".into());
+        let colour = super::room_map::rgb(room_agents::agent_colour(&name));
         let why = reason(node).unwrap_or_default().to_string();
         let mut parts: Vec<Element<Message>> = vec![
             widget::text("!")
@@ -551,7 +552,7 @@ impl Room {
             widget::mouse_area(
                 widget::text(name)
                     .font(cosmic::font::bold())
-                    .class(cosmic::theme::Text::Color(warning())),
+                    .class(cosmic::theme::Text::Color(colour)),
             )
             .on_press(Message::Room(RoomMessage::Pick(id.clone())))
             .into(),
@@ -1346,7 +1347,7 @@ fn throttles<'a>(gpu: &GpuMetrics) -> Vec<Element<'a, Message>> {
 /// One job on a line that wraps: how it holds the machine, its label, who, on which card,
 /// how far along and for how long; selected, what it runs and what can be done about it.
 fn job(it: &Item, selected: bool, zoom: f32) -> Element<'static, Message> {
-    let hue = xterm(agent_hue(&it.agent));
+    let hue = super::room_map::rgb(room_agents::agent_colour(&it.agent));
     let mode = match it.mode {
         Mode::Bench => danger(),
         _ => warning(),
@@ -1723,26 +1724,6 @@ fn warning() -> Color {
 
 fn danger() -> Color {
     Color::from(cosmic::theme::active().cosmic().destructive_color())
-}
-
-/// An xterm 256-colour index as the colour a terminal shows it in, as dibstop colours agents.
-fn xterm(index: u8) -> Color {
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    match index {
-        16..=231 => {
-            let cube = index - 16;
-            Color::from_rgb8(
-                LEVELS[usize::from(cube / 36)],
-                LEVELS[usize::from(cube / 6 % 6)],
-                LEVELS[usize::from(cube % 6)],
-            )
-        }
-        232.. => {
-            let grey = 8 + (index - 232) * 10;
-            Color::from_rgb8(grey, grey, grey)
-        }
-        _ => Color::from_rgb8(128, 128, 128),
-    }
 }
 
 /// The room, while a window shows it.

@@ -9,9 +9,9 @@ use claudo_protocol::{
     Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
 };
 use claudo_room::agents::{
-    AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, Shown, Tint, V, ago,
-    badges, checks, codex, dibs_job, fit, hue, kind, legend_kinds, made_by, open_prs, phase,
-    reason, short, started, started_word, state, state_tint, thousands,
+    AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, Shown, Tint, V,
+    agent_colour, ago, badges, checks, codex, dibs_job, fit, hue, kind, legend_kinds, made_by,
+    open_prs, phase, reason, short, started, started_word, state, state_tint, thousands,
 };
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, vec2};
@@ -632,16 +632,11 @@ fn caption(
 ) {
     let top = at + vec2(0.0, (AGENT + 6.0) * scale);
     let name = node.name.as_deref().unwrap_or("unnamed");
-    let name = lines(
-        painter,
-        name,
-        13.0 * scale,
-        visuals.strong_text_color(),
-        1,
-        scale,
-    );
+    // Written as dibs writes the agent's jobs, so they match beside the machines.
+    let colour = rgb(agent_colour(name));
+    let name = lines(painter, name, 13.0 * scale, colour, 1, scale);
     let below = top + vec2(0.0, name.size().y + 2.0 * scale);
-    painter.galley(top, name, visuals.strong_text_color());
+    painter.galley(top, name, colour);
     if let Some(doing) = &node.doing {
         let doing = lines(
             painter,

@@ -497,13 +497,8 @@ fn caption(
     let mut top = at.y + (AGENT + 6.0) * scale;
     let name = node.name.as_deref().unwrap_or("unnamed");
     let size = 13.0 * scale;
-    centred(
-        frame,
-        &[(cut(name, size, width), palette.strong)],
-        at.x,
-        top,
-        size,
-    );
+    let colour = rgb(claudo_room::agents::agent_colour(name));
+    centred(frame, &[(cut(name, size, width), colour)], at.x, top, size);
     top += size * 1.3 + 2.0 * scale;
     if let Some(doing) = &node.doing {
         let size = 11.0 * scale;

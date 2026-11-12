@@ -8,7 +8,7 @@ use claudo_protocol::{Command, DIBS_POLL, DibsMachine, DibsWatch};
 use dibstop_view::action::Action;
 use dibstop_view::dibs_format::{Label, Mode, Span};
 use dibstop_view::item::{Item, Progress as _};
-use dibstop_view::text::{Tone, agent_hue, cores, plain, state_words};
+use dibstop_view::text::{Tone, cores, plain, state_words};
 use egui::{Color32, Key, RichText, Ui, vec2};
 
 use claudo_room::machines::{Arrangement, Cards, History, Show};
@@ -396,7 +396,8 @@ impl Tile {
     /// and its note; selected, what it runs and what can be done about it.
     fn card(&mut self, ui: &mut Ui, it: &Item) -> Option<Action> {
         let selected = self.selected == Some(it.pid);
-        let hue = xterm(agent_hue(&it.agent));
+        let [r, g, b] = claudo_room::agents::agent_colour(&it.agent);
+        let hue = Color32::from_rgb(r, g, b);
         let mode = match it.mode {
             Mode::Bench => ui.visuals().error_fg_color,
             _ => ui.visuals().warn_fg_color,
@@ -619,25 +620,5 @@ fn green(ui: &Ui) -> Color32 {
     match ui.visuals().dark_mode {
         true => Color32::from_rgb(90, 190, 110),
         false => Color32::from_rgb(40, 140, 60),
-    }
-}
-
-/// An xterm 256-colour index as the colour a terminal shows it in, as dibstop colours agents.
-fn xterm(index: u8) -> Color32 {
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    match index {
-        16..=231 => {
-            let cube = index - 16;
-            Color32::from_rgb(
-                LEVELS[usize::from(cube / 36)],
-                LEVELS[usize::from(cube / 6 % 6)],
-                LEVELS[usize::from(cube % 6)],
-            )
-        }
-        232.. => {
-            let grey = 8 + (index - 232) * 10;
-            Color32::from_rgb(grey, grey, grey)
-        }
-        _ => Color32::GRAY,
     }
 }

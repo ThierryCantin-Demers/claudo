@@ -645,6 +645,32 @@ pub fn legend_kinds() -> [(&'static str, [u8; 3]); 3] {
     ]
 }
 
+/// The colour an agent's name is written in everywhere: dibstop's, from its name, so a dibs
+/// job and the agent that started it match at a glance.
+pub fn agent_colour(name: &str) -> [u8; 3] {
+    xterm(dibstop_view::text::agent_hue(name))
+}
+
+/// An xterm 256-colour index as the colour a terminal shows it in.
+fn xterm(index: u8) -> [u8; 3] {
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    match index {
+        16..=231 => {
+            let cube = index - 16;
+            [
+                LEVELS[usize::from(cube / 36)],
+                LEVELS[usize::from(cube / 6 % 6)],
+                LEVELS[usize::from(cube % 6)],
+            ]
+        }
+        232.. => {
+            let grey = 8 + (index - 232) * 10;
+            [grey, grey, grey]
+        }
+        _ => [128, 128, 128],
+    }
+}
+
 /// A repository's own colour, the same on every page.
 pub fn hue(repo: &str, dark: bool) -> [u8; 3] {
     let h = repo
@@ -945,6 +971,13 @@ mod tests {
                 "1 subagent running"
             ]
         );
+    }
+
+    #[test]
+    fn an_agent_is_written_in_the_colour_its_terminal_shows() {
+        assert_eq!(xterm(33), [0, 135, 255]);
+        assert_eq!(xterm(205), [255, 95, 175]);
+        assert_eq!(agent_colour("orion"), agent_colour("orion"));
     }
 
     #[test]
