@@ -244,13 +244,15 @@ pub const CHILD: f32 = 7.5;
 pub const CAPTION_REACH: f32 = 72.0;
 /// Under an agent, a row each: its name, what it is doing, its badges, and what it started.
 const CAPTION: f32 = 62.0;
+/// The size of an agent's badges, written under it.
+pub const BADGE_SIZE: f32 = 10.0;
 /// The size of what an agent started, written under it, and how far apart its rows are.
 pub const STARTED_SIZE: f32 = 10.5;
 pub const STARTED_ROW: f32 = 13.0;
 /// Between two parts on one row of what an agent started.
 pub const STARTED_GAP: &str = "  ·  ";
 /// An agent that started at most this many has each one named on the map.
-pub const LABELLED: usize = 3;
+const LABELLED: usize = 3;
 const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
 /// Above an agent that started nothing.
 const HEADROOM: f32 = 10.0;
@@ -347,6 +349,17 @@ impl<'a> Island<'a> {
         self.placed
             .iter()
             .filter(move |child| child.parent == Some(parent))
+    }
+
+    /// Whether `placed` has its kind written over it: one of the few its agent started,
+    /// which started nothing itself, whose own would sit where the word goes.
+    pub fn labelled(&self, placed: &Placed) -> bool {
+        let siblings = self
+            .placed
+            .iter()
+            .filter(|other| other.parent == placed.parent)
+            .count();
+        placed.depth == 1 && siblings <= LABELLED && self.children(&placed.node.id).next().is_none()
     }
 
     /// The agent on this island that started `id`, however deep under it, or `id` itself.
@@ -544,6 +557,10 @@ pub fn badges(node: &Node) -> Vec<Badge<'_>> {
                 link: Some(pr.link),
             });
         }
+    }
+    let width: f32 = parts.iter().map(|part| wide(&part.text, BADGE_SIZE)).sum();
+    if let (Some(tokens), true) = (node.context, width > 2.0 * CAPTION_REACH) {
+        parts[0].text = format!("{} ctx", thousands(tokens));
     }
     parts
 }

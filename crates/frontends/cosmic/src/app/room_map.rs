@@ -5,8 +5,8 @@
 
 use claudo_protocol::{Node, NodeState};
 use claudo_room::agents::{
-    AGENT, CAPTION_REACH, CHILD, LABELLED, Map, PAD, STARTED_GAP, STARTED_ROW, STARTED_SIZE, Tint,
-    V, badges, codex, dibs_job, hue, made_by, phase, started, started_rows, started_word,
+    AGENT, BADGE_SIZE, CAPTION_REACH, CHILD, Map, PAD, STARTED_GAP, STARTED_ROW, STARTED_SIZE,
+    Tint, V, badges, codex, dibs_job, hue, made_by, phase, started, started_rows, started_word,
     state_tint, wide,
 };
 use cosmic::iced::widget::canvas::{self, Frame, Path, Stroke, path::Arc};
@@ -208,12 +208,7 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
                         scale,
                     );
                 } else {
-                    let siblings = island
-                        .placed
-                        .iter()
-                        .filter(|other| other.parent == placed.parent)
-                        .count();
-                    let label = placed.depth == 1 && siblings <= LABELLED;
+                    let label = island.labelled(placed);
                     started_body(
                         &mut frame,
                         &palette,
@@ -604,7 +599,7 @@ fn cut(text: &str, size: f32, width: f32) -> String {
 /// Where an agent at `at` has its badges written, and their size.
 fn badge_row(at: Point, scale: f32) -> (f32, f32) {
     let doing = at.y + (AGENT + 6.0) * scale + 13.0 * scale * 1.3 + 2.0 * scale;
-    (doing + 15.0 * scale, 10.0 * scale)
+    (doing + 15.0 * scale, BADGE_SIZE * scale)
 }
 
 /// Where each of `texts` starts when they are written on one row centred on `x`.

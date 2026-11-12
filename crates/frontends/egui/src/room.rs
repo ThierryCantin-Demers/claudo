@@ -9,7 +9,7 @@ use claudo_protocol::{
     Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
 };
 use claudo_room::agents::{
-    AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, STARTED_GAP,
+    AGENT, Agents, BADGE_SIZE, CAPTION_REACH, CHILD, Island, LEGEND, Map, PAD, STARTED_GAP,
     STARTED_ROW, STARTED_SIZE, Shown, Tint, V, agent_colour, ago, badges, checks, codex, dibs_job,
     fit, hue, kind, legend_kinds, made_by, open_prs, phase, reason, short, started, started_rows,
     started_word, state, state_tint, thousands,
@@ -406,12 +406,7 @@ impl Room {
                 match placed.depth {
                     0 => body(&painter, &visuals, placed.node, here, radius, now, scale),
                     _ => {
-                        let siblings = island
-                            .placed
-                            .iter()
-                            .filter(|other| other.parent == placed.parent)
-                            .count();
-                        let label = placed.depth == 1 && siblings <= LABELLED;
+                        let label = island.labelled(placed);
                         started_body(
                             &painter,
                             &visuals,
@@ -658,7 +653,7 @@ fn caption<'a>(
             .iter()
             .map(|part| (part.text.clone(), tint(visuals, part.tint)))
             .collect();
-        let galley = row(painter, &coloured, 10.0 * scale, scale);
+        let galley = row(painter, &coloured, BADGE_SIZE * scale, scale);
         let at = below + vec2(0.0, 15.0 * scale);
         if let Some(placed) = galley.rows.first() {
             // One glyph a character, on the one row a badge line is cut to.
