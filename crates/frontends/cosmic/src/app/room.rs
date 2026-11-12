@@ -580,7 +580,7 @@ impl Room {
             used += 40.0 * zoom;
         }
         for node in self.agents.waiting() {
-            page.push(self.waiting_line(node, zoom));
+            page.push(self.waiting_line(node, zoom, width - 24.0));
             used += 46.0 * zoom;
         }
         let width = width - 24.0;
@@ -679,12 +679,17 @@ impl Room {
 
     /// An agent waiting on the person, on one line: its name, why, for how long, a box to
     /// answer it, and its terminal. The whole reason shows on hover and in its details.
-    fn waiting_line(&self, node: &Node, zoom: f32) -> Element<'_, Message> {
+    fn waiting_line(&self, node: &Node, zoom: f32, width: f32) -> Element<'_, Message> {
         let id = node.id.clone();
         let draft = self.drafts.get(&node.id).map_or("", String::as_str);
         let name = node.name.clone().unwrap_or_else(|| "unnamed".into());
         let colour = super::room_map::rgb(room_agents::agent_colour(&name));
         let why = reason(node).unwrap_or_default().to_string();
+        let held = self.agents.held(&node.id, self.time());
+        // The answer box takes its width before the reason gets any, and narrows only when
+        // the name and the buttons leave it less: the padding, gaps and buttons are 160.
+        let taken = room_agents::wide(&name, 14.0) * 1.1 + 160.0 + held.map_or(0.0, |_| 60.0);
+        let answer = (width - taken).clamp(0.0, 240.0 * zoom);
         let mut parts: Vec<Element<Message>> = vec![
             widget::text("!")
                 .font(cosmic::font::bold())
@@ -700,7 +705,7 @@ impl Room {
             widget::tooltip(
                 widget::text(why.clone())
                     .class(dim())
-                    .width(Length::FillPortion(3))
+                    .width(Length::Fill)
                     .wrapping(cosmic::iced::widget::text::Wrapping::None)
                     .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
                 widget::text(why),
@@ -708,7 +713,7 @@ impl Room {
             )
             .into(),
         ];
-        if let Some(held) = self.agents.held(&node.id, self.time()) {
+        if let Some(held) = held {
             parts.push(widget::text(ago(held)).size(12.0).class(dim()).into());
         }
         parts.push(
@@ -724,8 +729,7 @@ impl Room {
                     })
                     .width(Length::Fill),
             )
-            .width(Length::FillPortion(1))
-            .max_width(240.0 * zoom)
+            .width(Length::Fixed(answer))
             .into(),
         );
         parts.push(
