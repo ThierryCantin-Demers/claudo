@@ -28,6 +28,9 @@ const NARROW: f32 = 720.0;
 /// Wider than this, the bars and the chart sit side by side.
 const SIDE_BY_SIDE: f32 = 1000.0;
 const MOVERS: usize = 6;
+/// A benchmark not measured within this many nights of the newest has stopped, as when the
+/// team moves to another model; the overview leaves it out.
+const STOPPED: i64 = 3;
 
 #[derive(Default)]
 pub struct Benchmarks {
@@ -150,10 +153,15 @@ impl Benchmarks {
                 })
             })
             .collect();
+        let newest = seen.iter().map(|seen| seen.trend.night).max();
+        let seen: Vec<Seen> = seen
+            .into_iter()
+            .filter(|seen| Some(seen.trend.night + STOPPED) >= newest)
+            .collect();
         summary(ui, &seen);
         ui.add_space(12.0);
         for (group, point) in groups.iter().zip(&points) {
-            if let Some(quantity) = matrix(ui, group, *point) {
+            if let Some(quantity) = matrix(ui, group, *point, newest) {
                 let picked = self.picked.entry(group.name.clone()).or_default();
                 picked.quantity = Some(quantity);
                 self.shown = Some(group.name.clone());
@@ -271,7 +279,7 @@ fn summary(ui: &mut Ui, seen: &[Seen]) {
 
 /// A table's every benchmark measured and quantity, each cell tinted by how it moved since
 /// its night before, with a bar against its column. Gives back the quantity clicked.
-fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
+fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>, newest: Option<i64>) -> Option<String> {
     let rows: Vec<(&Row, Vec<Option<Trend>>)> = group
         .rows
         .iter()
@@ -283,7 +291,12 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
                 .collect();
             (row, trends)
         })
-        .filter(|(_, trends): &(_, Vec<Option<Trend>>)| trends.iter().any(Option::is_some))
+        .filter(|(_, trends): &(_, Vec<Option<Trend>>)| {
+            trends
+                .iter()
+                .flatten()
+                .any(|trend| Some(trend.night + STOPPED) >= newest)
+        })
         .collect();
     if rows.is_empty() {
         return None;
