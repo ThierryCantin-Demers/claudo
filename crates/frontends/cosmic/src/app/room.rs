@@ -700,7 +700,7 @@ impl Room {
             widget::tooltip(
                 widget::text(why.clone())
                     .class(dim())
-                    .width(Length::Fill)
+                    .width(Length::FillPortion(3))
                     .wrapping(cosmic::iced::widget::text::Wrapping::None)
                     .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
                 widget::text(why),
@@ -712,17 +712,21 @@ impl Room {
             parts.push(widget::text(ago(held)).size(12.0).class(dim()).into());
         }
         parts.push(
-            widget::text_input("Answer", draft)
-                .on_input({
-                    let id = id.clone();
-                    move |text| Message::Room(RoomMessage::Draft(id.clone(), text))
-                })
-                .on_submit({
-                    let id = id.clone();
-                    move |_| Message::Room(RoomMessage::Answer(id.clone()))
-                })
-                .width(Length::Fixed(240.0 * zoom))
-                .into(),
+            widget::container(
+                widget::text_input("Answer", draft)
+                    .on_input({
+                        let id = id.clone();
+                        move |text| Message::Room(RoomMessage::Draft(id.clone(), text))
+                    })
+                    .on_submit({
+                        let id = id.clone();
+                        move |_| Message::Room(RoomMessage::Answer(id.clone()))
+                    })
+                    .width(Length::Fill),
+            )
+            .width(Length::FillPortion(1))
+            .max_width(240.0 * zoom)
+            .into(),
         );
         parts.push(
             widget::tooltip(
