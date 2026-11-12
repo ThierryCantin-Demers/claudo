@@ -486,9 +486,13 @@ impl Room {
         let mut lines: Vec<Element<Message>> = room_agents::about(node, held)
             .into_iter()
             .enumerate()
-            .map(|(i, line)| match i {
-                0 => widget::text(line).font(cosmic::font::bold()).into(),
-                _ => widget::text(line).size(13.0).into(),
+            .map(|(i, line)| {
+                // A job's label can be one long word, which would run out of the card.
+                let line = widget::text(line).wrapping(text::Wrapping::WordOrGlyph);
+                match i {
+                    0 => line.font(cosmic::font::bold()).into(),
+                    _ => line.size(13.0).into(),
+                }
             })
             .collect();
         let hint = match node.kind {
