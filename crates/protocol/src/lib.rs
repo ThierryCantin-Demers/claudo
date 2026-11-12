@@ -208,7 +208,9 @@ impl QuotaWindow {
         let even = allowed as f32 / total as f32;
         // A turn or two in a window's first minutes says nothing yet of its pace.
         let judged = used >= 0.1 || even >= 0.1;
-        let out_in = (judged && allowed > 0 && used > 0.0 && used < 1.0)
+        // Behind the even pace it lasts the window, though a calendar handing the last
+        // day a whole share past the reset could place a run out before it.
+        let out_in = (judged && allowed > 0 && used > even && used < 1.0)
             .then(|| {
                 let more = ((1.0 - used) / used * allowed as f32) as u64;
                 calendar.after(now, more).saturating_sub(now)

@@ -306,6 +306,21 @@ mod tests {
     }
 
     #[test]
+    fn a_week_behind_its_pace_does_not_run_out() {
+        let window = QuotaWindow {
+            used: 0.38,
+            resets_at: at("2026-11-17T13:30:00Z"),
+        };
+        let thursday = window.standing_by(
+            7 * DAY,
+            at("2026-11-12T09:30:00Z"),
+            &utc(Some("2026-11-12T09:21:00Z")),
+        );
+        assert!(thursday.even.unwrap() > 0.38);
+        assert_eq!(thursday.out_in, None);
+    }
+
+    #[test]
     fn a_day_begins_at_the_first_activity_after_four() {
         let zone = TimeZone::UTC;
         let today = at("2026-11-10T09:00:00Z");
