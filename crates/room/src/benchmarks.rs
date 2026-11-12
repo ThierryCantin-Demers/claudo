@@ -204,6 +204,131 @@ pub fn commits(measurement: &Measurement) -> String {
         .join(", ")
 }
 
+/// The colours of a table's variants, told apart in light and dark themes.
+pub const SERIES: [[u8; 3]; 8] = [
+    [66, 133, 244],
+    [245, 140, 50],
+    [60, 175, 110],
+    [225, 80, 140],
+    [150, 110, 230],
+    [40, 175, 190],
+    [215, 175, 40],
+    [205, 75, 65],
+];
+
+/// A row's label as what it runs and how: "model · 4 cards, TP" is the variant "4 cards, TP"
+/// of the family "model". A label without the dot is a variant alone.
+pub fn split(label: &str) -> (Option<&str>, &str) {
+    match label.split_once(" · ") {
+        Some((family, variant)) => (Some(family), variant),
+        None => (None, label),
+    }
+}
+
+/// The families and variants of a table's rows, each once, in the rows' order.
+pub fn families_and_variants<'a>(group: &'a Group) -> (Vec<Option<&'a str>>, Vec<&'a str>) {
+    let mut families = Vec::new();
+    let mut variants = Vec::new();
+    for row in &group.rows {
+        let (family, variant) = split(&row.label);
+        if !families.contains(&family) {
+            families.push(family);
+        }
+        if !variants.contains(&variant) {
+            variants.push(variant);
+        }
+    }
+    (families, variants)
+}
+
+/// `quantity` at `point` in each measurement that has it, oldest first, at its time in days
+/// since 1970.
+pub fn history<'a>(
+    benchmark: &'a Benchmark,
+    quantity: &str,
+    point: Option<f64>,
+) -> Vec<(f64, f64, &'a Measurement)> {
+    let mut found: Vec<(f64, f64, &Measurement)> = benchmark
+        .measurements
+        .iter()
+        .filter_map(|measurement| {
+            Some((
+                days(&measurement.at)?,
+                value(measurement, quantity, point)?,
+                measurement,
+            ))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found
+}
+
+/// The days a table's benchmarks were measured on, newest first: "2026-01-02".
+pub fn measured_days<'a>(group: &'a Group) -> Vec<&'a str> {
+    let mut found: Vec<&str> = group
+        .rows
+        .iter()
+        .flat_map(|row| &row.benchmark.measurements)
+        .filter_map(|measurement| measurement.at.get(..10))
+        .collect();
+    found.sort_unstable_by(|a, b| b.cmp(a));
+    found.dedup();
+    found
+}
+
+/// `quantity` at `point` as the newest measurement on `day` had it.
+pub fn on_day(benchmark: &Benchmark, quantity: &str, point: Option<f64>, day: &str) -> Option<f64> {
+    benchmark
+        .measurements
+        .iter()
+        .filter(|measurement| measurement.at.starts_with(day))
+        .find_map(|measurement| value(measurement, quantity, point))
+}
+
+/// How far `now` moved from `then`, in percent, and whether for the better.
+pub fn moved(now: f64, then: f64, quantity: &Quantity) -> Option<(f64, bool)> {
+    (then != 0.0).then(|| {
+        let percent = (now - then) / then.abs() * 100.0;
+        (percent, (percent > 0.0) == quantity.higher_is_better)
+    })
+}
+
+/// An RFC 3339 time in UTC as days since 1970.
+pub fn days(at: &str) -> Option<f64> {
+    let number = |range: std::ops::Range<usize>| at.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    // Howard Hinnant's days_from_civil.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year - era * 400;
+    let of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    let whole = era * 146_097 + of_cycle - 719_468;
+    Some(whole as f64 + (hour * 3600 + minute * 60 + second) as f64 / 86_400.0)
+}
+
+/// Days since 1970 as a date a person reads: "Jan 2".
+pub fn date(days: f64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // Howard Hinnant's civil_from_days.
+    let z = days.floor() as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let of_era = z - era * 146_097;
+    let of_cycle = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * of_cycle + of_cycle / 4 - of_cycle / 100);
+    let shifted = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    format!("{} {day}", MONTHS[(month - 1) as usize])
+}
+
 /// Text order, except that runs of digits compare as numbers: 2 before 10.
 fn natural(a: &str, b: &str) -> Ordering {
     let (mut a, mut b) = (a, b);
@@ -360,5 +485,33 @@ mod tests {
         assert_eq!(number(0.26), "0.26");
         assert_eq!(when("2026-01-02T18:28:28Z"), "2026-01-02 18:28 UTC");
         assert_eq!(natural("b-2", "b-10"), Ordering::Less);
+    }
+
+    #[test]
+    fn a_time_is_counted_in_days_and_read_back_as_a_date() {
+        assert_eq!(days("1970-01-02T12:00:00Z"), Some(1.5));
+        let leap = days("2024-02-29T00:00:00Z").unwrap();
+        assert_eq!(date(leap), "Feb 29");
+        assert_eq!(date(leap + 1.0), "Mar 1");
+        assert_eq!(split("apples · 2 baskets"), (Some("apples"), "2 baskets"));
+        assert_eq!(split("apples"), (None, "apples"));
+    }
+
+    #[test]
+    fn a_day_compares_with_another() {
+        let picking = benchmark(
+            "pick",
+            "picking",
+            None,
+            vec![
+                measured("2026-01-03T05:00:00Z", &[("rate", None, 12.0)]),
+                measured("2026-01-01T05:00:00Z", &[("rate", None, 10.0)]),
+            ],
+        );
+        let group = &groups(std::slice::from_ref(&picking))[0];
+        assert_eq!(measured_days(group), ["2026-01-03", "2026-01-01"]);
+        assert_eq!(on_day(&picking, "rate", None, "2026-01-01"), Some(10.0));
+        let history = history(&picking, "rate", None);
+        assert!(history[0].0 < history[1].0 && history[1].1 == 12.0);
     }
 }

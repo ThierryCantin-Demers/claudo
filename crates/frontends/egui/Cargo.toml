@@ -16,6 +16,7 @@ dibstop-view = { workspace = true, features = ["egui"] }
 eframe = { version = "=0.36.2", features = ["persistence"] }
 egui = "=0.36.2"
 egui_commonmark = "0.25.0"
+egui_plot = "0.37.0"
 egui_tiles = "0.17.1"
 serde.workspace = true
 
