@@ -194,14 +194,7 @@ impl Agents {
     pub fn clusters(&self) -> Vec<Cluster<'_>> {
         let mut children: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         let mut roots: BTreeMap<Option<&str>, Vec<&Node>> = BTreeMap::new();
-        let shown = |node: &&Node| {
-            !finished(node)
-                || node
-                    .parent
-                    .as_ref()
-                    .is_none_or(|p| !self.nodes.contains_key(p))
-        };
-        for node in self.nodes.values().filter(shown) {
+        for node in self.nodes.values().filter(|node| !finished(node)) {
             match node.parent.as_deref() {
                 Some(parent) if self.nodes.contains_key(parent) => {
                     children.entry(parent).or_default().push(node)
@@ -231,9 +224,9 @@ impl Agents {
     }
 }
 
-/// A run that ended well, or what it fanned out to. The map leaves it out under its agent,
-/// where it reads as still going; a finished review stays for its digest, which its agent's
-/// details show, or its own once its agent has left.
+/// A run that ended well, or what it fanned out to, which the map leaves out: under its
+/// agent it would read as still going, and alone it outstays the agent the person closed. A
+/// finished review stays in the room for its digest, which its agent's details show.
 pub fn finished(node: &Node) -> bool {
     matches!(node.kind, Some(NodeKind::Run(_) | NodeKind::Subagent))
         && node.state == Some(NodeState::Done)
@@ -1007,11 +1000,7 @@ mod tests {
             .iter()
             .map(|tree| tree.node.id.as_str())
             .collect();
-        assert_eq!(
-            roots,
-            ["done", "going"],
-            "its agent left, so it is the way to its digest"
-        );
+        assert_eq!(roots, ["going"], "nor once its agent is gone");
     }
 
     #[test]
