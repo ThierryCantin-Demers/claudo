@@ -8,17 +8,19 @@ use std::time::Duration;
 use claudo_protocol::{
     Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
 };
+use claudo_room::agents::{
+    AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, Shown, Tint, V, ago,
+    badges, checks, codex, dibs_job, fit, hue, kind, legend_kinds, made_by, open_prs, phase, short,
+    started, started_word, state, state_tint, thousands,
+};
 use egui::epaint::QuadraticBezierShape;
-use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, pos2, vec2};
+use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 #[derive(Default)]
 pub struct Room {
-    nodes: BTreeMap<NodeId, Node>,
-    /// The state each node was last drawn in, and since when in `Context::time`. A state a
-    /// node already had when the page first saw it has no start.
-    since: BTreeMap<NodeId, (Option<NodeState>, Option<f64>)>,
-    primed: bool,
+    /// Every node, each state timed by `Context::time`.
+    agents: Agents,
     /// Answers being typed to the agents waiting on the person.
     drafts: BTreeMap<NodeId, String>,
     /// The last action that failed, and why.
@@ -32,35 +34,10 @@ pub struct Room {
     markdown: CommonMarkCache,
 }
 
-/// A repository's agents, each with what it started.
-#[derive(Debug, PartialEq)]
-struct Cluster<'a> {
-    repo: Option<&'a str>,
-    trees: Vec<Tree<'a>>,
-}
-
-#[derive(Debug, PartialEq)]
-struct Tree<'a> {
-    node: &'a Node,
-    children: Vec<Tree<'a>>,
-}
-
 impl Room {
     pub fn apply(&mut self, event: RoomEvent) {
-        match event {
-            RoomEvent::Snapshot(nodes) => {
-                self.nodes = nodes
-                    .into_iter()
-                    .map(|node| (node.id.clone(), node))
-                    .collect();
-            }
-            RoomEvent::Upserted(node) => {
-                self.nodes.insert(node.id.clone(), *node);
-            }
-            RoomEvent::Removed(id) => {
-                self.nodes.remove(&id);
-            }
-            RoomEvent::Failed { node, detail, .. } => self.failed = Some((node, detail)),
+        if let Some(failed) = self.agents.apply(event) {
+            self.failed = Some(failed);
         }
     }
 
@@ -69,79 +46,11 @@ impl Room {
         std::mem::take(&mut self.sent)
     }
 
-    fn stamp(&mut self, now: f64) {
-        self.since.retain(|id, _| self.nodes.contains_key(id));
-        for (id, node) in &self.nodes {
-            match self.since.get_mut(id) {
-                Some((state, at)) if *state != node.state => {
-                    *state = node.state;
-                    *at = Some(now);
-                }
-                Some(_) => {}
-                None => {
-                    let at = self.primed.then_some(now);
-                    self.since.insert(id.clone(), (node.state, at));
-                }
-            }
-        }
-        self.primed |= !self.nodes.is_empty();
-    }
-
-    /// How long a node has been in its state, when the page saw it change.
-    fn held(&self, id: &str, now: f64) -> Option<f64> {
-        self.since.get(id)?.1.map(|at| now - at)
-    }
-
-    fn waiting(&self) -> impl Iterator<Item = &Node> {
-        self.nodes
-            .values()
-            .filter(|node| node.state == Some(NodeState::Blocked))
-    }
-
-    /// Repositories by name, then the agents in none. A node whose parent is gone is a root.
-    fn clusters(&self) -> Vec<Cluster<'_>> {
-        let mut children: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
-        let mut roots: BTreeMap<Option<&str>, Vec<&Node>> = BTreeMap::new();
-        let shown = |node: &&Node| {
-            !finished(node)
-                || node
-                    .parent
-                    .as_ref()
-                    .is_none_or(|p| !self.nodes.contains_key(p))
-        };
-        for node in self.nodes.values().filter(shown) {
-            match node.parent.as_deref() {
-                Some(parent) if self.nodes.contains_key(parent) => {
-                    children.entry(parent).or_default().push(node)
-                }
-                _ => roots.entry(node.repo.as_deref()).or_default().push(node),
-            }
-        }
-        fn tree<'a>(node: &'a Node, children: &BTreeMap<&str, Vec<&'a Node>>) -> Tree<'a> {
-            let below = children.get(node.id.as_str()).into_iter().flatten();
-            Tree {
-                node,
-                children: below.map(|child| tree(child, children)).collect(),
-            }
-        }
-        let mut clusters: Vec<Cluster> = roots
-            .into_iter()
-            .map(|(repo, nodes)| Cluster {
-                repo,
-                trees: nodes
-                    .into_iter()
-                    .map(|node| tree(node, &children))
-                    .collect(),
-            })
-            .collect();
-        clusters.sort_by_key(|cluster| (cluster.repo.is_none(), cluster.repo.map(short)));
-        clusters
-    }
-
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let now = ui.ctx().time();
-        self.stamp(now);
+        self.agents.stamp(now);
         let moving = self
+            .agents
             .nodes
             .values()
             .any(|node| matches!(node.state, Some(NodeState::Working | NodeState::Blocked)));
@@ -151,7 +60,7 @@ impl Room {
         self.selected = self
             .selected
             .take()
-            .filter(|id| self.nodes.contains_key(id));
+            .filter(|id| self.agents.nodes.contains_key(id));
         if let Some(id) = self.selected.clone() {
             // Leaves the map at least half its tile, a narrow one too.
             let room = ui.available_width() / 2.0;
@@ -187,7 +96,7 @@ impl Room {
                 let picked = self.map(ui, width, left, now);
                 if double {
                     let agent = self.clicked.take().filter(|(id, at)| {
-                        let node = self.nodes.get(id);
+                        let node = self.agents.nodes.get(id);
                         now - at < DOUBLE_CLICK
                             && node
                                 .is_some_and(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
@@ -215,6 +124,7 @@ impl Room {
     /// Every open pull request an agent here has, with the agent's name.
     fn pull_requests(&self, ui: &mut egui::Ui) {
         let mut open: Vec<(&Node, Shown)> = self
+            .agents
             .nodes
             .values()
             .flat_map(|node| open_prs(node).into_iter().map(move |pr| (node, pr)))
@@ -241,6 +151,7 @@ impl Room {
             return;
         };
         let name = self
+            .agents
             .nodes
             .get(node)
             .and_then(|node| node.name.as_deref())
@@ -258,12 +169,14 @@ impl Room {
 
     fn summary(&self, ui: &mut egui::Ui) {
         let count = |state| {
-            self.nodes
+            self.agents
+                .nodes
                 .values()
                 .filter(|node| node.state == Some(state))
                 .count()
         };
         let agents = self
+            .agents
             .nodes
             .values()
             .filter(|node| matches!(node.kind, Some(NodeKind::Agent(_))))
@@ -285,7 +198,7 @@ impl Room {
                 ui.label(RichText::new(format!("{n} {word}")).size(15.0));
             }
         }
-        if self.waiting().next().is_none() {
+        if self.agents.waiting().next().is_none() {
             ui.add_space(10.0);
             dot(ui, color(ui.visuals(), Some(NodeState::Working)));
             ui.label(RichText::new("nobody is waiting on you").size(15.0));
@@ -295,10 +208,11 @@ impl Room {
     /// The selected node: what the hover says, a box to answer an agent, its digest when it
     /// is a finished review, and the runs an agent started with theirs.
     fn details(&mut self, ui: &mut egui::Ui, id: &str, now: f64) {
-        let Some(node) = self.nodes.get(id).cloned() else {
+        let Some(node) = self.agents.nodes.get(id).cloned() else {
             return;
         };
         let mut runs: Vec<Node> = self
+            .agents
             .nodes
             .values()
             .filter(|run| run.parent.as_deref() == Some(id))
@@ -308,6 +222,7 @@ impl Room {
         // Run folders begin with when they started.
         runs.sort_by(|a, b| b.id.cmp(&a.id));
         let agent = self
+            .agents
             .nodes
             .get(node.parent.as_deref().unwrap_or_default())
             .filter(|parent| matches!(parent.kind, Some(NodeKind::Agent(_))))
@@ -327,7 +242,7 @@ impl Room {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                about(ui, &node, self.held(id, now));
+                about(ui, &node, self.agents.held(id, now));
                 if let Some((parent, name)) = agent {
                     let name = name.unwrap_or_else(|| "its agent".to_string());
                     if ui.link(format!("Started by {name}")).clicked() {
@@ -383,8 +298,9 @@ impl Room {
 
     fn tiles(&mut self, ui: &mut egui::Ui, width: f32, now: f64) {
         let waiting: Vec<(Node, Option<f64>)> = self
+            .agents
             .waiting()
-            .map(|node| (node.clone(), self.held(&node.id, now)))
+            .map(|node| (node.clone(), self.agents.held(&node.id, now)))
             .collect();
         let selected = self.selected.clone();
         self.drafts.retain(|id, _| {
@@ -414,7 +330,7 @@ impl Room {
     /// Clicking a node opens its details, and double-clicking an agent brings its terminal
     /// forward.
     fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Picked> {
-        let clusters = self.clusters();
+        let clusters = self.agents.clusters();
         let scale = fit(&clusters, width, screen);
         let map = Map::lay_out(&clusters, width / scale);
         let (response, painter) =
@@ -437,13 +353,13 @@ impl Room {
         let mut drawn: Vec<(&Node, Pos2, f32)> = Vec::new();
         for island in &map.islands {
             let key = island.repo.unwrap_or("");
-            let corner = glide(&format!("island:{key}"), island.top.to_vec2());
+            let corner = glide(&format!("island:{key}"), spot(island.top));
             shore(&painter, &visuals, island, corner, scale);
             let at: BTreeMap<&str, Pos2> = island
                 .placed
                 .iter()
                 .map(|p| {
-                    let here = glide(&p.node.id, island.top.to_vec2() + p.at);
+                    let here = glide(&p.node.id, spot(island.top) + spot(p.at));
                     (p.node.id.as_str(), here)
                 })
                 .collect();
@@ -495,7 +411,10 @@ impl Room {
                         .iter()
                         .filter(|child| child.parent == Some(placed.node.id.as_str()))
                         .map(|child| child.node);
-                    let started = started(children);
+                    let started: Vec<(String, Color32)> = started(children)
+                        .into_iter()
+                        .map(|(text, tint)| (text, rgb(tint)))
+                        .collect();
                     caption(&painter, &visuals, placed.node, &started, here, scale);
                 }
                 drawn.push((placed.node, here, radius));
@@ -520,7 +439,7 @@ impl Room {
         let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         let picked = response.clicked().then(|| Picked::Node(node.id.clone()));
-        let held = self.held(&node.id, now);
+        let held = self.agents.held(&node.id, now);
         response.on_hover_ui_at_pointer(|ui| {
             about(ui, node, held);
             ui.weak(match agent {
@@ -542,205 +461,9 @@ enum Picked {
 /// longer than egui's own double-click delay.
 const DOUBLE_CLICK: f64 = 0.6;
 
-/// A run that ended well, or what it fanned out to. The map leaves it out under its agent,
-/// where it reads as still going; a finished review stays for its digest, which its agent's
-/// details show, or its own once its agent has left.
-fn finished(node: &Node) -> bool {
-    matches!(node.kind, Some(NodeKind::Run(_) | NodeKind::Subagent))
-        && node.state == Some(NodeState::Done)
-}
-
 const TILE_WIDTH: f32 = 250.0;
 const TILE_MARGIN: f32 = 14.0;
 const TILE_GAP: f32 = 12.0;
-
-const AGENT: f32 = 17.0;
-const CHILD: f32 = 7.5;
-/// How far an agent's caption reaches to either side.
-const CAPTION_REACH: f32 = 88.0;
-/// Under an agent: its name on up to two rows, what it is doing, its badges, and what it
-/// started.
-const CAPTION: f32 = 84.0;
-/// An agent that started at most this many has each one named on the map.
-const LABELLED: usize = 3;
-const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
-/// Above an agent that started nothing.
-const HEADROOM: f32 = 10.0;
-/// What an agent started sits on arcs above it, this many to an arc.
-const FAN: usize = 7;
-const FAN_NEAR: f32 = 34.0;
-const FAN_STEP: f32 = 18.0;
-/// An island's name above its agents, and the margin around them.
-const TITLE: f32 = 28.0;
-const PAD: f32 = 10.0;
-const ISLAND_GAP: f32 = 16.0;
-/// The smallest the map is drawn to fit the screen; below it names are too small to read.
-const MIN_SCALE: f32 = 0.7;
-
-#[derive(Debug)]
-struct Placed<'a> {
-    node: &'a Node,
-    /// From the island's top left corner.
-    at: Vec2,
-    parent: Option<&'a str>,
-    depth: usize,
-}
-
-#[derive(Debug)]
-struct Island<'a> {
-    repo: Option<&'a str>,
-    top: Pos2,
-    size: Vec2,
-    placed: Vec<Placed<'a>>,
-}
-
-struct Map<'a> {
-    islands: Vec<Island<'a>>,
-    height: f32,
-}
-
-impl<'a> Map<'a> {
-    fn lay_out(clusters: &[Cluster<'a>], width: f32) -> Self {
-        let mut islands: Vec<Island> = clusters
-            .iter()
-            .map(|cluster| Island::of(cluster, width))
-            .collect();
-        let height = pack(&mut islands, width);
-        Map { islands, height }
-    }
-}
-
-impl<'a> Island<'a> {
-    /// The agents in a grid, as square as fits `width`, each with what it started above it.
-    fn of(cluster: &Cluster<'a>, width: f32) -> Self {
-        let n = cluster.trees.len().max(1);
-        let most = (((width - 2.0 * PAD - ISLAND_GAP) / CELL_WIDTH).floor() as usize).max(1);
-        let cols = n.min((n as f32).sqrt().ceil().max(3.0) as usize).min(most);
-        let rows = n.div_ceil(cols);
-        let fan = cluster
-            .trees
-            .iter()
-            .map(|tree| tree.children.len())
-            .max()
-            .unwrap_or(0);
-        let above = match fan {
-            0 => HEADROOM,
-            _ => FAN_NEAR + (fan.div_ceil(FAN) - 1) as f32 * FAN_STEP + CHILD * 2.0,
-        };
-        let cell = above + AGENT * 2.0 + CAPTION;
-        let mut placed = Vec::new();
-        for (i, tree) in cluster.trees.iter().enumerate() {
-            let at = vec2(
-                PAD + (i % cols) as f32 * CELL_WIDTH + CELL_WIDTH / 2.0,
-                TITLE + (i / cols) as f32 * cell + above + AGENT,
-            );
-            place(tree, at, None, None, 0, &mut placed);
-        }
-        Island {
-            repo: cluster.repo,
-            top: Pos2::ZERO,
-            size: vec2(
-                2.0 * PAD + cols as f32 * CELL_WIDTH,
-                TITLE + rows as f32 * cell + PAD,
-            ),
-            placed,
-        }
-    }
-}
-
-fn place<'a>(
-    tree: &Tree<'a>,
-    at: Vec2,
-    parent: Option<&'a str>,
-    outward: Option<f32>,
-    depth: usize,
-    placed: &mut Vec<Placed<'a>>,
-) {
-    placed.push(Placed {
-        node: tree.node,
-        at,
-        parent,
-        depth,
-    });
-    let k = tree.children.len();
-    for (j, child) in tree.children.iter().enumerate() {
-        let (angle, distance) = match outward {
-            // An agent's caption is under it, so what it started fans out above.
-            None => {
-                let arc = j / FAN;
-                let on_arc = (k - arc * FAN).min(FAN);
-                let margin = 0.3;
-                let angle = if on_arc == 1 {
-                    -PI / 2.0
-                } else {
-                    -PI + margin + (PI - 2.0 * margin) * (j % FAN) as f32 / (on_arc - 1) as f32
-                };
-                (angle, FAN_NEAR + arc as f32 * FAN_STEP)
-            }
-            Some(angle) => (angle + (j as f32 - (k - 1) as f32 / 2.0) * 0.6, CHILD * 2.6),
-        };
-        let here = at + Vec2::angled(angle) * distance;
-        place(
-            child,
-            here,
-            Some(&tree.node.id),
-            Some(angle),
-            depth + 1,
-            placed,
-        );
-    }
-}
-
-/// The largest scale, down to `MIN_SCALE`, at which the map laid out across the width it
-/// would then have fits `screen` in height.
-fn fit(clusters: &[Cluster], width: f32, screen: f32) -> f32 {
-    let height = |scale: f32| Map::lay_out(clusters, width / scale).height * scale;
-    if height(1.0) <= screen {
-        return 1.0;
-    }
-    if height(MIN_SCALE) > screen {
-        return MIN_SCALE;
-    }
-    let (mut low, mut high) = (MIN_SCALE, 1.0);
-    for _ in 0..12 {
-        let middle = (low + high) / 2.0;
-        if height(middle) <= screen {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-    low
-}
-
-/// Places islands in rows across `width`, each row centred, and says the height it takes.
-fn pack(islands: &mut [Island], width: f32) -> f32 {
-    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
-    let mut used = 0.0;
-    for (i, island) in islands.iter().enumerate() {
-        let size = island.size.x + ISLAND_GAP;
-        let row = rows.last_mut().expect("rows starts with one");
-        if !row.is_empty() && used + size > width {
-            rows.push(vec![i]);
-            used = size;
-        } else {
-            row.push(i);
-            used += size;
-        }
-    }
-    let mut top = ISLAND_GAP / 2.0;
-    for row in rows.iter().filter(|row| !row.is_empty()) {
-        let wide: f32 = row.iter().map(|&i| islands[i].size.x + ISLAND_GAP).sum();
-        let tall = row.iter().map(|&i| islands[i].size.y).fold(0.0, f32::max);
-        let mut left = ((width - wide) / 2.0).max(0.0) + ISLAND_GAP / 2.0;
-        for &i in row {
-            islands[i].top = pos2(left, top);
-            left += islands[i].size.x + ISLAND_GAP;
-        }
-        top += tall + ISLAND_GAP;
-    }
-    top - ISLAND_GAP / 2.0
-}
 
 fn shore(
     painter: &egui::Painter,
@@ -749,9 +472,9 @@ fn shore(
     corner: Pos2,
     scale: f32,
 ) {
-    let rect = egui::Rect::from_min_size(corner, island.size * scale);
+    let rect = egui::Rect::from_min_size(corner, spot(island.size) * scale);
     let round = 16.0 * scale;
-    let sea = hue(island.repo.unwrap_or(""), visuals.dark_mode);
+    let sea = rgb(hue(island.repo.unwrap_or(""), visuals.dark_mode));
     for (grow, alpha) in [(8.0, 0.05), (4.0, 0.08)] {
         let grow = grow * scale;
         painter.rect_filled(rect.expand(grow), round + grow, sea.gamma_multiply(alpha));
@@ -784,7 +507,7 @@ fn edge(
     scale: f32,
 ) {
     let _ = visuals;
-    let tint = made_by(node);
+    let tint = rgb(made_by(node));
     let bend = (to - from).rot90().normalized() * 10.0 * scale;
     let curve = QuadraticBezierShape::from_points_stroke(
         [from, from + (to - from) / 2.0 + bend, to],
@@ -827,9 +550,7 @@ fn body(
     }
     let rim = Stroke::new(2.0, visuals.extreme_bg_color);
     let fill = tint.gamma_multiply(0.9);
-    let codex = matches!(node.kind, Some(NodeKind::Agent(Provider::Codex)))
-        || node.provider == Some(Provider::Codex);
-    if codex {
+    if codex(node) {
         let square = egui::Rect::from_center_size(at, Vec2::splat(radius * 1.8));
         painter.rect_filled(square, radius * 0.4, fill);
         painter.rect_stroke(square, radius * 0.4, rim, egui::StrokeKind::Outside);
@@ -894,7 +615,10 @@ fn caption(
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
-    let badges = badges(node, visuals);
+    let badges: Vec<(String, Color32)> = badges(node)
+        .into_iter()
+        .map(|(text, shade)| (text, tint(visuals, shade)))
+        .collect();
     if !badges.is_empty() {
         let badges = row(painter, &badges, 10.0 * scale, scale);
         painter.galley(
@@ -945,80 +669,9 @@ fn row(
     painter.layout_job(job)
 }
 
-/// How a pull request's CI stands, in words and in its colour.
-fn checks(checks: Checks) -> (&'static str, Color32) {
-    match checks {
-        Checks::Passing => ("CI passing", Color32::from_rgb(80, 190, 120)),
-        Checks::Failing => ("CI failing", Color32::from_rgb(230, 85, 75)),
-        Checks::Running => ("CI running", Color32::from_rgb(230, 170, 60)),
-    }
-}
-
 fn ci(ui: &mut egui::Ui, state: Option<Checks>) {
-    if let Some((words, tint)) = state.map(checks) {
-        ui.label(RichText::new(words).color(tint).small());
-    }
-}
-
-/// What an agent carries: its context, and its open pull requests, each in the colour of
-/// its CI.
-fn badges(node: &Node, visuals: &egui::Visuals) -> Vec<(String, Color32)> {
-    let text = visuals.text_color();
-    let mut parts = Vec::new();
-    if let Some(tokens) = node.context {
-        parts.push((format!("{} context", thousands(tokens)), text));
-    }
-    let prs = open_prs(node);
-    if !prs.is_empty() {
-        if !parts.is_empty() {
-            parts.push(("  ·  ".to_string(), visuals.weak_text_color()));
-        }
-        parts.push(("PR".to_string(), text));
-        for pr in prs {
-            let tint = pr.checks.map_or(text, |state| checks(state).1);
-            parts.push((format!(" #{}", pr.number), tint));
-        }
-    }
-    parts
-}
-
-/// What an agent started, counted by kind and by whether it runs, each in its kind's
-/// colour: "1 subagent running", "2 Codex reviews waiting".
-fn started<'a>(children: impl Iterator<Item = &'a Node>) -> Vec<(String, Color32)> {
-    let mut counted: BTreeMap<(String, &str), (usize, Color32)> = BTreeMap::new();
-    for child in children {
-        let what = match &child.kind {
-            Some(NodeKind::Subagent) if child.provider != Some(Provider::Codex) => {
-                "subagent".to_string()
-            }
-            _ => kind(child),
-        };
-        let how = match child.state {
-            Some(NodeState::Working) => "running",
-            Some(NodeState::Failed) => "failed",
-            Some(NodeState::Done) => "done",
-            _ => "waiting",
-        };
-        counted.entry((what, how)).or_insert((0, made_by(child))).0 += 1;
-    }
-    counted
-        .into_iter()
-        .map(|((what, how), (count, tint))| match count {
-            1 => (format!("1 {what} {how}"), tint),
-            _ => (format!("{count} {what}s {how}"), tint),
-        })
-        .collect()
-}
-
-/// The colour of what an agent started, by what runs it: a Claude subagent, a Codex run or
-/// reviewer, a dibs job.
-fn made_by(node: &Node) -> Color32 {
-    if dibs_job(node) {
-        Color32::from_rgb(175, 125, 245)
-    } else if node.provider == Some(Provider::Codex) {
-        Color32::from_rgb(70, 150, 245)
-    } else {
-        Color32::from_rgb(225, 125, 85)
+    if let Some((words, shade)) = state.map(checks) {
+        ui.label(RichText::new(words).color(rgb(shade)).small());
     }
 }
 
@@ -1035,7 +688,7 @@ fn started_body(
     scale: f32,
     label: bool,
 ) {
-    let tint = made_by(node);
+    let tint = rgb(made_by(node));
     let running = node.state == Some(NodeState::Working);
     let (fill, rim) = match node.state {
         Some(NodeState::Working) => (tint, Stroke::new(1.5, visuals.extreme_bg_color)),
@@ -1074,11 +727,7 @@ fn started_body(
         painter.add(egui::Shape::line(arc, stroke));
     }
     if label {
-        let word = match &node.kind {
-            _ if dibs_job(node) => "dibs",
-            Some(NodeKind::Run(kind)) => kind.as_str(),
-            _ => "subagent",
-        };
+        let word = started_word(node);
         painter.text(
             at - vec2(0.0, radius + 6.0 * scale),
             Align2::CENTER_BOTTOM,
@@ -1086,59 +735,6 @@ fn started_body(
             FontId::proportional(9.5 * scale),
             tint,
         );
-    }
-}
-
-/// A pull request as the page shows it.
-struct Shown<'a> {
-    number: &'a str,
-    /// Its repository, number, whether it is a draft, and title.
-    about: String,
-    link: &'a str,
-    checks: Option<Checks>,
-}
-
-fn number(link: &str) -> &str {
-    link.rsplit('/').next().unwrap_or_default()
-}
-
-/// The open pull requests an agent opened, and the one its board note waits on.
-fn open_prs(node: &Node) -> Vec<Shown<'_>> {
-    let mut shown: Vec<Shown> = node
-        .prs
-        .iter()
-        .map(|pr| {
-            let draft = if pr.draft { " (draft)" } else { "" };
-            Shown {
-                number: number(&pr.url),
-                about: format!("{}#{}{draft}: {}", short(&pr.repo), pr.number, pr.title),
-                link: &pr.url,
-                checks: pr.checks,
-            }
-        })
-        .collect();
-    if let Some(link) = node.note.as_ref().and_then(|note| note.pr.as_deref())
-        && !shown.iter().any(|pr| pr.link == link)
-    {
-        shown.push(Shown {
-            number: number(link),
-            about: link.trim_start_matches("https://github.com/").to_string(),
-            link,
-            checks: None,
-        });
-    }
-    shown
-}
-
-fn dibs_job(node: &Node) -> bool {
-    matches!(&node.kind, Some(NodeKind::Run(kind)) if kind == "dibs")
-}
-
-fn thousands(tokens: u64) -> String {
-    match tokens {
-        0..1000 => tokens.to_string(),
-        1000..1_000_000 => format!("{}k", tokens / 1000),
-        _ => format!("{:.1}M", tokens as f64 / 1e6),
     }
 }
 
@@ -1278,13 +874,7 @@ fn about(ui: &mut egui::Ui, node: &Node, held: Option<f64>) {
 }
 
 fn legend(ui: &mut egui::Ui) {
-    for shown in [
-        NodeState::Working,
-        NodeState::Blocked,
-        NodeState::Idle,
-        NodeState::Done,
-        NodeState::Failed,
-    ] {
+    for shown in LEGEND {
         dot(ui, color(ui.visuals(), Some(shown)));
         ui.weak(state(Some(shown)));
         ui.add_space(6.0);
@@ -1292,24 +882,8 @@ fn legend(ui: &mut egui::Ui) {
     ui.add_space(10.0);
     ui.weak("round: Claude, square: Codex, diamond: dibs job.");
     ui.add_space(6.0);
-    for (word, tint) in [
-        ("Claude subagent", made_by(&Node::default())),
-        (
-            "Codex run",
-            made_by(&Node {
-                provider: Some(Provider::Codex),
-                ..Node::default()
-            }),
-        ),
-        (
-            "dibs job",
-            made_by(&Node {
-                kind: Some(NodeKind::Run("dibs".to_string())),
-                ..Node::default()
-            }),
-        ),
-    ] {
-        ui.label(RichText::new(word).color(tint));
+    for (word, shade) in legend_kinds() {
+        ui.label(RichText::new(word).color(rgb(shade)));
     }
     ui.weak("around an agent: filled and turning while it runs, hollow while it waits.");
     ui.add_space(10.0);
@@ -1321,283 +895,25 @@ fn dot(ui: &mut egui::Ui, tint: Color32) {
     ui.painter().circle_filled(rect.center(), 5.0, tint);
 }
 
-/// What a node is, as a person says it: "Claude", "Codex review", "dibs job".
-fn kind(node: &Node) -> String {
-    let by = node.provider.as_ref().map(provider);
-    match (&node.kind, by) {
-        (Some(NodeKind::Agent(agent)), _) => provider(agent),
-        (Some(NodeKind::Run(_)), _) if dibs_job(node) => "dibs job".to_string(),
-        (Some(NodeKind::Run(kind)), Some(by)) => format!("{by} {kind}"),
-        (Some(NodeKind::Run(kind)), None) => kind.clone(),
-        (Some(NodeKind::Subagent), Some(by)) => format!("{by} subagent"),
-        (Some(NodeKind::Subagent), None) => "subagent".to_string(),
-        (None, _) => String::new(),
-    }
-}
-
-fn provider(provider: &Provider) -> String {
-    match provider {
-        Provider::Claude => "Claude".to_string(),
-        Provider::Codex => "Codex".to_string(),
-        Provider::Other(name) => name.clone(),
-    }
-}
-
-fn state(state: Option<NodeState>) -> &'static str {
-    match state {
-        Some(NodeState::Working) => "Working",
-        Some(NodeState::Blocked) => "Blocked",
-        Some(NodeState::Idle) => "Idle",
-        Some(NodeState::Done) => "Done",
-        Some(NodeState::Failed) => "Failed",
-        Some(NodeState::Unknown) | None => "Unknown",
-    }
-}
-
 fn color(visuals: &egui::Visuals, state: Option<NodeState>) -> Color32 {
-    match state {
-        Some(NodeState::Working) => Color32::from_rgb(80, 190, 120),
-        Some(NodeState::Blocked) => visuals.warn_fg_color,
-        Some(NodeState::Failed) => visuals.error_fg_color,
-        Some(NodeState::Done) => Color32::from_rgb(90, 140, 230),
-        Some(NodeState::Idle) | Some(NodeState::Unknown) | None => visuals.weak_text_color(),
+    tint(visuals, state_tint(state))
+}
+
+fn tint(visuals: &egui::Visuals, tint: Tint) -> Color32 {
+    match tint {
+        Tint::Text => visuals.text_color(),
+        Tint::Weak => visuals.weak_text_color(),
+        Tint::Warn => visuals.warn_fg_color,
+        Tint::Error => visuals.error_fg_color,
+        Tint::Rgb(rgb) => self::rgb(rgb),
     }
 }
 
-/// A repository's own colour, the same on every page.
-fn hue(repo: &str, dark: bool) -> Color32 {
-    let h = repo
-        .bytes()
-        .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
-    let (s, v) = if dark { (0.45, 0.75) } else { (0.5, 0.8) };
-    egui::ecolor::Hsva::new((h % 360) as f32 / 360.0, s, v, 1.0).into()
+fn rgb([r, g, b]: [u8; 3]) -> Color32 {
+    Color32::from_rgb(r, g, b)
 }
 
-/// Where in its pulse a node starts, so neighbours do not beat together.
-fn phase(id: &str) -> f64 {
-    id.bytes().map(u64::from).sum::<u64>() as f64 % 97.0 / 97.0
-}
-
-fn ago(seconds: f64) -> String {
-    let seconds = seconds.max(0.0) as u64;
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m", seconds / 60),
-        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
-    }
-}
-
-/// The last part of a path: a repository's folder name.
-fn short(repo: &str) -> &str {
-    repo.rsplit('/').next().unwrap_or(repo)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn node(id: &str, repo: Option<&str>, parent: Option<&str>) -> Node {
-        Node {
-            id: id.to_string(),
-            repo: repo.map(str::to_string),
-            parent: parent.map(str::to_string),
-            ..Node::default()
-        }
-    }
-
-    #[test]
-    fn agents_cluster_by_repo_with_what_they_started_under_them() {
-        let mut room = Room::default();
-        room.apply(RoomEvent::Snapshot(vec![
-            node("a", Some("/src/zeta"), None),
-            node("b", Some("/src/alpha"), None),
-            node("review", Some("/src/alpha"), Some("b")),
-            node("c", None, None),
-            node("orphan", Some("/src/zeta"), Some("gone")),
-        ]));
-        let clusters = room.clusters();
-        let names: Vec<_> = clusters.iter().map(|cluster| cluster.repo).collect();
-        assert_eq!(names, [Some("/src/alpha"), Some("/src/zeta"), None]);
-        let alpha = &clusters[0].trees;
-        assert_eq!(alpha.len(), 1, "the review sits under its agent");
-        assert_eq!(alpha[0].children[0].node.id, "review");
-        assert_eq!(
-            clusters[1].trees.len(),
-            2,
-            "a node whose parent left stays shown"
-        );
-    }
-
-    #[test]
-    fn a_finished_review_leaves_the_map_but_not_the_room() {
-        let mut room = Room::default();
-        let run = |id: &str, state| Node {
-            kind: Some(NodeKind::Run("review".to_string())),
-            state: Some(state),
-            ..node(id, Some("/src/alpha"), Some("a"))
-        };
-        room.apply(RoomEvent::Snapshot(vec![
-            node("a", Some("/src/alpha"), None),
-            run("done", NodeState::Done),
-            run("going", NodeState::Working),
-        ]));
-        let clusters = room.clusters();
-        let shown: Vec<_> = clusters[0].trees[0]
-            .children
-            .iter()
-            .map(|child| child.node.id.as_str())
-            .collect();
-        assert_eq!(shown, ["going"]);
-        assert!(room.nodes.contains_key("done"));
-        room.apply(RoomEvent::Removed("a".to_string()));
-        let roots: Vec<_> = room.clusters()[0]
-            .trees
-            .iter()
-            .map(|tree| tree.node.id.as_str())
-            .collect();
-        assert_eq!(
-            roots,
-            ["done", "going"],
-            "its agent left, so it is the way to its digest"
-        );
-    }
-
-    #[test]
-    fn changes_apply_by_id() {
-        let mut room = Room::default();
-        room.apply(RoomEvent::Snapshot(vec![node("a", None, None)]));
-        room.apply(RoomEvent::Upserted(Box::new(Node {
-            state: Some(NodeState::Blocked),
-            ..node("a", None, None)
-        })));
-        room.apply(RoomEvent::Upserted(Box::new(node("b", None, None))));
-        room.apply(RoomEvent::Removed("b".to_string()));
-        assert_eq!(
-            room.waiting().map(|node| &node.id).collect::<Vec<_>>(),
-            ["a"]
-        );
-        assert_eq!(room.nodes.len(), 1);
-    }
-
-    #[test]
-    fn a_state_is_timed_from_the_change_the_page_saw() {
-        let mut room = Room::default();
-        room.apply(RoomEvent::Snapshot(vec![node("a", None, None)]));
-        room.stamp(10.0);
-        assert_eq!(
-            room.held("a", 50.0),
-            None,
-            "already so when the page opened"
-        );
-        room.apply(RoomEvent::Upserted(Box::new(Node {
-            state: Some(NodeState::Blocked),
-            ..node("a", None, None)
-        })));
-        room.apply(RoomEvent::Upserted(Box::new(node("b", None, None))));
-        room.stamp(20.0);
-        room.stamp(30.0);
-        assert_eq!(room.held("a", 50.0), Some(30.0));
-        assert_eq!(room.held("b", 50.0), Some(30.0), "arrived while watching");
-    }
-
-    #[test]
-    fn islands_hold_their_nodes_and_never_overlap() {
-        let mut room = Room::default();
-        let mut nodes = vec![node("lone", Some("/src/beta"), None)];
-        for i in 0..5 {
-            nodes.push(node(&format!("agent-{i}"), Some("/src/alpha"), None));
-            for j in 0..9 {
-                let parent = format!("agent-{i}");
-                nodes.push(node(
-                    &format!("sub-{i}-{j}"),
-                    Some("/src/alpha"),
-                    Some(&parent),
-                ));
-            }
-        }
-        room.apply(RoomEvent::Snapshot(nodes));
-        let width = 900.0;
-        let map = Map::lay_out(&room.clusters(), width);
-        for island in &map.islands {
-            let rect = egui::Rect::from_min_size(Pos2::ZERO, island.size);
-            for placed in &island.placed {
-                let reach = if placed.depth == 0 { AGENT } else { CHILD };
-                let node =
-                    egui::Rect::from_center_size(placed.at.to_pos2(), Vec2::splat(2.0 * reach));
-                assert!(rect.contains_rect(node), "{placed:?} outside {rect:?}");
-            }
-            assert!(island.top.x >= 0.0 && island.top.x + island.size.x <= width);
-        }
-        let [alpha, beta] = &map.islands[..] else {
-            panic!("two islands");
-        };
-        let alpha = egui::Rect::from_min_size(alpha.top, alpha.size);
-        let beta = egui::Rect::from_min_size(beta.top, beta.size);
-        assert!(!alpha.intersects(beta));
-        assert!(map.height >= alpha.bottom().max(beta.bottom()));
-    }
-
-    #[test]
-    fn the_map_shrinks_to_fit_the_screen_while_it_stays_readable() {
-        let mut room = Room::default();
-        let nodes = (0..20)
-            .map(|i| node(&format!("agent-{i}"), Some(&format!("/src/repo-{i}")), None))
-            .collect();
-        room.apply(RoomEvent::Snapshot(nodes));
-        let clusters = room.clusters();
-        let width = 1400.0;
-        let tall = Map::lay_out(&clusters, width).height;
-        assert_eq!(fit(&clusters, width, tall + 1.0), 1.0);
-        let scale = fit(&clusters, width, tall * 0.8);
-        assert!((MIN_SCALE..1.0).contains(&scale));
-        assert!(Map::lay_out(&clusters, width / scale).height * scale <= tall * 0.8);
-        assert_eq!(fit(&clusters, width, 10.0), MIN_SCALE);
-    }
-
-    #[test]
-    fn what_an_agent_started_says_who_runs_it() {
-        let review = Node {
-            kind: Some(NodeKind::Run("review".into())),
-            provider: Some(Provider::Codex),
-            ..node("r", None, None)
-        };
-        let reviewer = Node {
-            kind: Some(NodeKind::Subagent),
-            provider: Some(Provider::Codex),
-            ..node("s", None, None)
-        };
-        let job = Node {
-            kind: Some(NodeKind::Run("dibs".into())),
-            ..node("j", None, None)
-        };
-        assert_eq!(kind(&review), "Codex review");
-        assert_eq!(kind(&reviewer), "Codex subagent");
-        assert_eq!(kind(&job), "dibs job");
-        let waiting = Node {
-            state: Some(NodeState::Idle),
-            ..review.clone()
-        };
-        let running = Node {
-            state: Some(NodeState::Working),
-            ..job.clone()
-        };
-        let subagent = Node {
-            kind: Some(NodeKind::Subagent),
-            provider: Some(Provider::Claude),
-            state: Some(NodeState::Working),
-            ..node("c", None, None)
-        };
-        let started: Vec<String> = started([&waiting, &waiting, &running, &subagent].into_iter())
-            .into_iter()
-            .map(|(text, _)| text)
-            .collect();
-        assert_eq!(
-            started,
-            [
-                "2 Codex reviews waiting",
-                "1 dibs job running",
-                "1 subagent running"
-            ]
-        );
-    }
+/// A map position as egui places it.
+fn spot(position: V) -> Vec2 {
+    vec2(position.x, position.y)
 }

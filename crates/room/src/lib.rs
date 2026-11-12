@@ -2,4 +2,5 @@
 //! COSMIC alike: which machines show and how, what their metrics say, and the map of agents.
 //! Nothing here knows a toolkit; colours are plain RGB.
 
+pub mod agents;
 pub mod machines;

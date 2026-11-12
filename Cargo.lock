@@ -1137,7 +1137,9 @@ name = "claudo-cosmic"
 version = "0.1.0"
 dependencies = [
  "claudo-protocol",
+ "claudo-room",
  "claudo-transport",
+ "dibstop-view",
  "iced",
  "iced_core",
  "iced_debug",
@@ -1171,6 +1173,7 @@ version = "0.1.0"
 dependencies = [
  "cargo-hot-protocol",
  "claudo-protocol",
+ "claudo-room",
  "claudo-transport",
  "dibstop-view",
  "eframe",
@@ -1188,6 +1191,15 @@ name = "claudo-protocol"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "dibstop-view",
+ "serde",
+]
+
+[[package]]
+name = "claudo-room"
+version = "0.1.0"
+dependencies = [
+ "claudo-protocol",
  "dibstop-view",
  "serde",
 ]
