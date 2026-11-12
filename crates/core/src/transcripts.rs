@@ -748,6 +748,14 @@ mod tests {
                 "a pull request for branch \"fix\" already exists:\nhttps://github.com/acme/widgets/pull/7",
                 true,
             ),
+            call(
+                "g",
+                "cd ../w && git push -q -u origin feat 2>&1 | tail -2; gh pr create -R acme/widgets --draft --base main --head feat --title \"feat(x): time the stream's wait\" --body-file /tmp/body.md",
+            ),
+            result(
+                "g",
+                "remote:      https://github.com/acme/widgets/pull/new/feat        \nremote: \nhttps://github.com/acme/widgets/pull/45",
+            ),
         ]
         .join("\n")
             + "\n";
@@ -765,6 +773,7 @@ mod tests {
             pr("acme/widgets", 43),
             pr("acme/widgets", 44),
             pr("acme/widgets", 7),
+            pr("acme/widgets", 45),
         ]
         .into_iter()
         .map(|pr| (pr.url.clone(), pr))
@@ -773,7 +782,7 @@ mod tests {
         let shown: Vec<_> = nodes[0].prs.iter().map(|pr| pr.number).collect();
         assert_eq!(
             shown,
-            [42, 43, 44],
+            [42, 43, 44, 45],
             "7 it only looked at or found already open, 9 it opened but is merged"
         );
         std::fs::remove_dir_all(projects).unwrap();

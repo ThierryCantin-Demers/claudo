@@ -1,7 +1,10 @@
 //! The person's open pull requests, from `gh`. All of its shapes stay in this file.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use claudo_protocol::{Checks, PullRequest};
 use serde_json::Value;
@@ -14,19 +17,36 @@ const OPEN: &str = "query($endCursor: String) { search(query: \
     nodes { ... on PullRequest { number title url isDraft repository { nameWithOwner } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
 
+/// How long GitHub is given to answer.
+const LIMIT: Duration = Duration::from_secs(60);
+
 /// Every open pull request the person authored, by its link. None when `gh` cannot say.
 pub fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
-    let output = Command::new("gh")
+    let mut child = Command::new("gh")
         .args(["api", "graphql", "--paginate", "--slurp", "-f"])
         .arg(format!("query={OPEN}"))
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    let mut stdout = child.stdout.take()?;
+    let (done, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        let _ = done.send(bytes);
+    });
+    // A call that never returns would leave every pull request as it was for good.
+    let Ok(bytes) = read.recv_timeout(LIMIT) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    if !child.wait().ok()?.success() {
         return None;
     }
-    let pages: Vec<Value> = serde_json::from_slice(&output.stdout).ok()?;
+    let pages: Vec<Value> = serde_json::from_slice(&bytes).ok()?;
     Some(
         pages
             .iter()
