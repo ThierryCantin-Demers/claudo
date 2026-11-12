@@ -909,7 +909,7 @@ impl Room {
                     zoom,
                 ));
                 parts.push(widget::divider::horizontal::default().into());
-                parts.push(self.jobs(&machine.name, jobs, zoom));
+                parts.push(self.jobs(&machine.name, jobs));
             }
             None => {
                 if let Some(trouble) = &machine.trouble {
@@ -929,7 +929,7 @@ impl Room {
             .into()
     }
 
-    fn jobs(&self, machine: &str, jobs: Vec<Item>, zoom: f32) -> Element<'_, Message> {
+    fn jobs(&self, machine: &str, jobs: Vec<Item>) -> Element<'_, Message> {
         if jobs.is_empty() {
             return widget::text("nothing holding it, nothing queued")
                 .class(cosmic::theme::Text::Color(green()))
@@ -951,7 +951,7 @@ impl Room {
             });
             for it in group {
                 let selected = self.selected.get(machine) == Some(&it.pid);
-                parts.push(job(it, selected, zoom));
+                parts.push(job(it, selected));
             }
         }
         widget::Column::with_children(parts).spacing(6).into()
@@ -1546,7 +1546,7 @@ fn throttles<'a>(gpu: &GpuMetrics) -> Vec<Element<'a, Message>> {
 
 /// One job on a line that wraps: how it holds the machine, its label, who, on which card,
 /// how far along and for how long; selected, what it runs and what can be done about it.
-fn job(it: &Item, selected: bool, zoom: f32) -> Element<'static, Message> {
+fn job(it: &Item, selected: bool) -> Element<'static, Message> {
     let hue = super::room_map::rgb(room_agents::agent_colour(&it.agent));
     let mode = match it.mode {
         Mode::Bench => danger(),
@@ -1628,7 +1628,7 @@ fn job(it: &Item, selected: bool, zoom: f32) -> Element<'static, Message> {
         );
     }
     if selected {
-        parts.extend(detail(it, zoom));
+        parts.extend(detail(it));
     }
     // The stripe says how it holds the machine, or that it waits.
     let stripe = if it.holding { mode } else { dim_color() };
@@ -1690,11 +1690,11 @@ fn job(it: &Item, selected: bool, zoom: f32) -> Element<'static, Message> {
     }
 }
 
-fn detail(it: &Item, zoom: f32) -> Vec<Element<'static, Message>> {
+fn detail(it: &Item) -> Vec<Element<'static, Message>> {
     let mut parts: Vec<Element<Message>> = vec![
         widget::text(it.cmd.clone())
             .font(cosmic::font::mono())
-            .size(12.0 * zoom)
+            .size(12.0)
             .into(),
     ];
     let mut facts: Vec<Element<Message>> =
