@@ -18,7 +18,7 @@ use egui_plot::{
 const STEADY: f64 = 2.0;
 /// A change this large, in percent, is tinted as strongly as a tint goes.
 const LOUD: f64 = 20.0;
-const CELL: egui::Vec2 = vec2(124.0, 36.0);
+const CELL: egui::Vec2 = vec2(144.0, 38.0);
 const BAR_ROW: f32 = 22.0;
 const BARS: f32 = 640.0;
 const NAME: f32 = 150.0;
@@ -296,8 +296,12 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
             for quantity in group.quantities {
                 ui.add_sized(
                     vec2(CELL.x, 0.0),
-                    egui::Label::new(RichText::new(heading(quantity)).small()).wrap(),
-                );
+                    egui::Label::new(RichText::new(bare(quantity)).size(14.0)).wrap(),
+                )
+                .on_hover_text(match quantity.higher_is_better {
+                    true => format!("{}, higher is better", quantity.unit),
+                    false => format!("{}, lower is better", quantity.unit),
+                });
             }
             ui.end_row();
             let mut family = None;
@@ -378,7 +382,7 @@ fn tile(ui: &mut Ui, trend: Option<&Trend>, quantity: &Quantity, shown: Shown) -
             egui::StrokeKind::Inside,
         );
     }
-    painter.text(
+    let value = painter.text(
         rect.left_top() + vec2(8.0, 4.0),
         Align2::LEFT_TOP,
         number(trend.now),
@@ -387,6 +391,13 @@ fn tile(ui: &mut Ui, trend: Option<&Trend>, quantity: &Quantity, shown: Shown) -
             true => visuals.strong_text_color(),
             false => visuals.text_color(),
         },
+    );
+    painter.text(
+        value.right_bottom() + vec2(3.0, -2.0),
+        Align2::LEFT_BOTTOM,
+        &quantity.unit,
+        FontId::proportional(11.0),
+        visuals.weak_text_color(),
     );
     if let Some((percent, better)) = change {
         painter.text(
@@ -726,12 +737,14 @@ fn shade(ui: &Ui, percent: f64, better: bool) -> Color32 {
     }
 }
 
-/// A quantity's name, with its unit when the name does not already end with it.
-fn heading(quantity: &Quantity) -> String {
-    match quantity.unit.is_empty() || quantity.name.ends_with(&quantity.unit) {
-        true => quantity.name.clone(),
-        false => format!("{} ({})", quantity.name, quantity.unit),
-    }
+/// A quantity's name without the unit it ends with, which its cells carry.
+fn bare(quantity: &Quantity) -> &str {
+    quantity
+        .name
+        .strip_suffix(&quantity.unit)
+        .and_then(|name| name.strip_suffix(' '))
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&quantity.name)
 }
 
 fn signed(percent: f64) -> String {
