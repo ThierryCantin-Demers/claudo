@@ -70,7 +70,7 @@ fn group<'a>(members: Vec<&'a Benchmark>, first: &'a Benchmark) -> Group<'a> {
                 .iter()
                 .all(|parts| parts.is_some_and(|(_, other)| other == *name))
         });
-    let rows = members
+    let mut rows: Vec<Row> = members
         .iter()
         .zip(&split)
         .map(|(benchmark, parts)| Row {
@@ -81,6 +81,7 @@ fn group<'a>(members: Vec<&'a Benchmark>, first: &'a Benchmark) -> Group<'a> {
             benchmark,
         })
         .collect();
+    rows.sort_by(|a, b| natural(&a.label, &b.label));
     let mut points: Vec<f64> = members
         .iter()
         .flat_map(|benchmark| &benchmark.measurements)
@@ -204,6 +205,19 @@ pub fn commits(measurement: &Measurement) -> String {
         .join(", ")
 }
 
+/// A variant's colour, lighter for the first of several families and darker for the last,
+/// so the same variant of two families reads as related but apart.
+pub fn series_colour(variant: usize, family: usize, families: usize) -> [u8; 3] {
+    let base = SERIES[variant % SERIES.len()];
+    if families < 2 {
+        return base;
+    }
+    let along = family as f32 / (families - 1) as f32 - 0.5;
+    let towards = if along < 0.0 { 255.0 } else { 0.0 };
+    let amount = along.abs() * 0.8;
+    base.map(|channel| (channel as f32 + (towards - channel as f32) * amount).round() as u8)
+}
+
 /// The colours of a table's variants, told apart in light and dark themes.
 pub const SERIES: [[u8; 3]; 8] = [
     [66, 133, 244],
@@ -241,48 +255,83 @@ pub fn families_and_variants<'a>(group: &'a Group) -> (Vec<Option<&'a str>>, Vec
     (families, variants)
 }
 
-/// `quantity` at `point` in each measurement that has it, oldest first, at its time in days
-/// since 1970.
+/// `quantity` at `point` on each night it was measured, oldest first, the newest
+/// measurement of a night standing for it.
 pub fn history<'a>(
     benchmark: &'a Benchmark,
     quantity: &str,
     point: Option<f64>,
-) -> Vec<(f64, f64, &'a Measurement)> {
-    let mut found: Vec<(f64, f64, &Measurement)> = benchmark
-        .measurements
-        .iter()
-        .filter_map(|measurement| {
-            Some((
-                days(&measurement.at)?,
-                value(measurement, quantity, point)?,
-                measurement,
-            ))
-        })
-        .collect();
-    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+) -> Vec<(i64, f64, &'a Measurement)> {
+    let mut found: Vec<(i64, f64, &Measurement)> = Vec::new();
+    // Newest first, so the first of each night is the one kept.
+    for measurement in &benchmark.measurements {
+        let (Some(night), Some(value)) =
+            (night(&measurement.at), value(measurement, quantity, point))
+        else {
+            continue;
+        };
+        if !found.iter().any(|(other, ..)| *other == night) {
+            found.push((night, value, measurement));
+        }
+    }
+    found.reverse();
     found
 }
 
-/// The days a table's benchmarks were measured on, newest first: "2026-01-02".
-pub fn measured_days<'a>(group: &'a Group) -> Vec<&'a str> {
-    let mut found: Vec<&str> = group
+/// The nights a table's benchmarks were measured on, newest first.
+pub fn nights(group: &Group) -> Vec<i64> {
+    let mut found: Vec<i64> = group
         .rows
         .iter()
         .flat_map(|row| &row.benchmark.measurements)
-        .filter_map(|measurement| measurement.at.get(..10))
+        .filter_map(|measurement| night(&measurement.at))
         .collect();
     found.sort_unstable_by(|a, b| b.cmp(a));
     found.dedup();
     found
 }
 
-/// `quantity` at `point` as the newest measurement on `day` had it.
-pub fn on_day(benchmark: &Benchmark, quantity: &str, point: Option<f64>, day: &str) -> Option<f64> {
+/// `quantity` at `point` as the newest measurement of `night` had it.
+pub fn on_night(
+    benchmark: &Benchmark,
+    quantity: &str,
+    point: Option<f64>,
+    night: i64,
+) -> Option<f64> {
     benchmark
         .measurements
         .iter()
-        .filter(|measurement| measurement.at.starts_with(day))
+        .filter(|measurement| self::night(&measurement.at) == Some(night))
         .find_map(|measurement| value(measurement, quantity, point))
+}
+
+/// The night a measurement belongs to, as the day it began, in days since 1970: from noon
+/// UTC to noon the next day, so one run's benchmarks share a night across midnight.
+pub fn night(at: &str) -> Option<i64> {
+    Some((days(at)? - 0.5).floor() as i64)
+}
+
+/// A quantity's newest night and the night before it, of one benchmark.
+pub struct Trend<'a> {
+    pub now: f64,
+    pub night: i64,
+    pub before: Option<(f64, i64)>,
+    pub measurement: &'a Measurement,
+}
+
+pub fn trend<'a>(
+    benchmark: &'a Benchmark,
+    quantity: &str,
+    point: Option<f64>,
+) -> Option<Trend<'a>> {
+    let mut nights = history(benchmark, quantity, point).into_iter().rev();
+    let (night, now, measurement) = nights.next()?;
+    Some(Trend {
+        now,
+        night,
+        before: nights.next().map(|(night, value, _)| (value, night)),
+        measurement,
+    })
 }
 
 /// How far `now` moved from `then`, in percent, and whether for the better.
@@ -488,6 +537,14 @@ mod tests {
     }
 
     #[test]
+    fn a_run_across_midnight_is_one_night() {
+        assert_eq!(night("2026-01-02T23:50:00Z"), night("2026-01-03T04:10:00Z"));
+        assert_ne!(night("2026-01-02T11:00:00Z"), night("2026-01-02T13:00:00Z"));
+        assert_eq!(series_colour(0, 0, 1), SERIES[0]);
+        assert_ne!(series_colour(0, 0, 3), series_colour(0, 2, 3));
+    }
+
+    #[test]
     fn a_time_is_counted_in_days_and_read_back_as_a_date() {
         assert_eq!(days("1970-01-02T12:00:00Z"), Some(1.5));
         let leap = days("2024-02-29T00:00:00Z").unwrap();
@@ -509,8 +566,9 @@ mod tests {
             ],
         );
         let group = &groups(std::slice::from_ref(&picking))[0];
-        assert_eq!(measured_days(group), ["2026-01-03", "2026-01-01"]);
-        assert_eq!(on_day(&picking, "rate", None, "2026-01-01"), Some(10.0));
+        let nights = nights(group);
+        assert_eq!(nights.len(), 2);
+        assert_eq!(on_night(&picking, "rate", None, nights[1]), Some(10.0));
         let history = history(&picking, "rate", None);
         assert!(history[0].0 < history[1].0 && history[1].1 == 12.0);
     }

@@ -1,30 +1,35 @@
-//! The team's benchmarks, compared one quantity at a time: the latest night of every
-//! benchmark that measures it side by side, each against a night the person picks, and
-//! each benchmark's nights on a chart.
+//! The team's benchmarks: an overview of how fast each is and how it moved since its night
+//! before, and for one quantity at a time, every benchmark side by side and over the nights.
 
 use std::collections::BTreeMap;
 
-use claudo_protocol::{Benchmark, Quantity};
+use claudo_protocol::Quantity;
 use claudo_room::benchmarks::{
-    Group, SERIES, cell, commits, date, families_and_variants, groups, history, measured_days,
-    moved, number, on_day, split, when,
+    Group, Row, Trend, cell, commits, date, families_and_variants, groups, history, moved, nights,
+    number, on_night, series_colour, split, trend, when,
 };
 use egui::{Align2, Color32, FontId, RichText, Sense, Ui, vec2};
 use egui_plot::{
     Corner, HoverPosition, Legend, Line, LineStyle, MarkerShape, Plot, PlotPoints, Points,
+    uniform_grid_spacer,
 };
 
 /// A change smaller than this, in percent, is noise between two nights.
-const STEADY: f64 = 1.0;
+const STEADY: f64 = 2.0;
+/// A change this large, in percent, is tinted as strongly as a tint goes.
+const LOUD: f64 = 20.0;
+const CELL: egui::Vec2 = vec2(124.0, 36.0);
 const BAR_ROW: f32 = 22.0;
+const BARS: f32 = 640.0;
 const NAME: f32 = 150.0;
 /// Wider than this, the bars and the chart sit side by side.
-const SIDE_BY_SIDE: f32 = 900.0;
+const SIDE_BY_SIDE: f32 = 1000.0;
+const MOVERS: usize = 6;
 
 #[derive(Default)]
 pub struct Benchmarks {
-    list: Vec<Benchmark>,
-    /// The table shown, by name.
+    list: Vec<claudo_protocol::Benchmark>,
+    /// The table compared, by name, or the overview.
     shown: Option<String>,
     /// What the person picked in each table, by its name.
     picked: BTreeMap<String, Picked>,
@@ -34,12 +39,38 @@ pub struct Benchmarks {
 struct Picked {
     quantity: Option<String>,
     point: Option<f64>,
-    /// The day the latest values are compared with.
-    against: Option<String>,
+    /// The night the latest values are compared with.
+    against: Option<i64>,
+}
+
+impl Picked {
+    /// Along the axis, the point picked, or the last, which loads the most.
+    fn point(&self, group: &Group) -> Option<f64> {
+        self.point
+            .filter(|point| group.points.contains(point))
+            .or_else(|| group.points.last().copied())
+    }
+}
+
+/// One quantity of one benchmark, as the overview counts it.
+struct Seen<'a> {
+    group: &'a str,
+    row: &'a Row<'a>,
+    quantity: &'a Quantity,
+    point: Option<f64>,
+    axis: Option<&'a str>,
+    trend: Trend<'a>,
+}
+
+impl Seen<'_> {
+    fn change(&self) -> Option<(f64, bool)> {
+        let (before, _) = self.trend.before?;
+        moved(self.trend.now, before, self.quantity)
+    }
 }
 
 impl Benchmarks {
-    pub fn heard(&mut self, list: Vec<Benchmark>) {
+    pub fn heard(&mut self, list: Vec<claudo_protocol::Benchmark>) {
         self.list = list;
     }
 
@@ -52,29 +83,284 @@ impl Benchmarks {
             ui.weak("No benchmarks recorded yet.");
             return;
         }
-        let groups = groups(&self.list);
+        let list = std::mem::take(&mut self.list);
+        let groups = groups(&list);
         let shown = self
             .shown
             .as_ref()
-            .and_then(|name| groups.iter().find(|group| group.name == *name))
-            .unwrap_or(&groups[0]);
+            .and_then(|name| groups.iter().find(|group| group.name == *name));
         ui.horizontal_wrapped(|ui| {
+            let tab = |text: &str| RichText::new(text).size(15.0);
+            if ui
+                .selectable_label(shown.is_none(), tab("Overview"))
+                .clicked()
+            {
+                self.shown = None;
+            }
+            ui.separator();
             for group in &groups {
-                let label = RichText::new(&group.name).size(15.0);
-                if ui
-                    .selectable_label(group.name == shown.name, label)
-                    .clicked()
-                {
+                let on = shown.is_some_and(|shown| shown.name == group.name);
+                if ui.selectable_label(on, tab(&group.name)).clicked() {
                     self.shown = Some(group.name.clone());
                 }
             }
         });
         ui.separator();
-        let picked = self.picked.entry(shown.name.clone()).or_default();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
-            .show(ui, |ui| compare(ui, shown, picked));
+            .show(ui, |ui| match shown {
+                None => self.overview(ui, &groups),
+                Some(group) => {
+                    let picked = self.picked.entry(group.name.clone()).or_default();
+                    compare(ui, group, picked);
+                }
+            });
+        self.list = list;
     }
+
+    fn overview(&mut self, ui: &mut Ui, groups: &[Group]) {
+        let points: Vec<Option<f64>> = groups
+            .iter()
+            .map(|group| {
+                self.picked
+                    .get(&group.name)
+                    .cloned()
+                    .unwrap_or_default()
+                    .point(group)
+            })
+            .collect();
+        let seen: Vec<Seen> = groups
+            .iter()
+            .zip(&points)
+            .flat_map(|(group, point)| {
+                group.rows.iter().flat_map(move |row| {
+                    group.quantities.iter().filter_map(move |quantity| {
+                        Some(Seen {
+                            group: &group.name,
+                            row,
+                            quantity,
+                            point: *point,
+                            axis: group.axis,
+                            trend: trend(row.benchmark, &quantity.name, *point)?,
+                        })
+                    })
+                })
+            })
+            .collect();
+        summary(ui, &seen);
+        ui.add_space(12.0);
+        for (group, point) in groups.iter().zip(&points) {
+            if let Some(quantity) = matrix(ui, group, *point) {
+                let picked = self.picked.entry(group.name.clone()).or_default();
+                picked.quantity = Some(quantity);
+                self.shown = Some(group.name.clone());
+            }
+            ui.add_space(14.0);
+        }
+    }
+}
+
+/// The newest night, how many values moved since their night before, and the most moved.
+fn summary(ui: &mut Ui, seen: &[Seen]) {
+    let Some(newest) = seen.iter().map(|seen| seen.trend.night).max() else {
+        return;
+    };
+    let mut better: Vec<(&Seen, f64)> = Vec::new();
+    let mut worse: Vec<(&Seen, f64)> = Vec::new();
+    let (mut steady, mut new) = (0, 0);
+    for each in seen {
+        match each.change() {
+            None => new += 1,
+            Some((percent, _)) if percent.abs() < STEADY => steady += 1,
+            Some((percent, true)) => better.push((each, percent)),
+            Some((percent, false)) => worse.push((each, percent)),
+        }
+    }
+    for list in [&mut better, &mut worse] {
+        list.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(format!("Night of {}", date(newest as f64)))
+                .size(18.0)
+                .strong(),
+        );
+        ui.add_space(12.0);
+        let weak = ui.visuals().weak_text_color();
+        let count = |ui: &mut Ui, n: usize, words: &str, colour: Color32| {
+            ui.label(
+                RichText::new(format!("{n} {words}"))
+                    .size(16.0)
+                    .color(colour),
+            );
+            ui.add_space(10.0);
+        };
+        count(ui, worse.len(), "regressed", RED);
+        count(ui, better.len(), "improved", GREEN);
+        count(ui, steady, "steady", weak);
+        if new > 0 {
+            count(ui, new, "without a night before", weak);
+        }
+    });
+    ui.weak(format!(
+        "Each value against the same benchmark's night before; under {STEADY:.0}% is steady."
+    ));
+    if better.is_empty() && worse.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        for (title, list, colour) in [
+            ("Regressed most", &worse, RED),
+            ("Improved most", &better, GREEN),
+        ] {
+            if list.is_empty() {
+                continue;
+            }
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).strong().color(colour));
+                egui::Grid::new(("movers", title))
+                    .spacing(vec2(12.0, 2.0))
+                    .show(ui, |ui| {
+                        for (seen, percent) in list.iter().take(MOVERS) {
+                            ui.label(&seen.row.label);
+                            let mut what = seen.quantity.name.clone();
+                            if let (Some(axis), Some(point)) = (seen.axis, seen.point) {
+                                what.push_str(&format!(" at {} {axis}", plain(point)));
+                            }
+                            ui.weak(what).on_hover_text(seen.group);
+                            ui.label(number(seen.trend.now));
+                            ui.label(RichText::new(signed(*percent)).color(colour));
+                            ui.end_row();
+                        }
+                    });
+            });
+            ui.add_space(32.0);
+        }
+    });
+}
+
+/// A table's every benchmark and quantity, each cell tinted by how it moved since its night
+/// before. Gives back the quantity whose cell was clicked.
+fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&group.name).size(15.0).strong());
+        if let (Some(axis), Some(point)) = (group.axis, point) {
+            ui.weak(format!("at {} {axis}", plain(point)));
+        }
+    });
+    egui::Grid::new(("overview", &group.name))
+        .spacing(vec2(6.0, 4.0))
+        .show(ui, |ui| {
+            ui.label("");
+            for quantity in group.quantities {
+                ui.add_sized(
+                    vec2(CELL.x, 0.0),
+                    egui::Label::new(RichText::new(heading(quantity)).small().weak()).wrap(),
+                );
+            }
+            ui.end_row();
+            let mut family = None;
+            for row in &group.rows {
+                let (this, variant) = split(&row.label);
+                if this != family {
+                    family = this;
+                    if let Some(name) = this {
+                        ui.label(RichText::new(name).strong());
+                        ui.end_row();
+                    }
+                }
+                ui.horizontal(|ui| {
+                    swatch(ui, colour(group, &row.label));
+                    ui.label(variant);
+                });
+                for quantity in group.quantities {
+                    let trend = trend(row.benchmark, &quantity.name, point);
+                    if tile(ui, trend, quantity).clicked() {
+                        clicked = Some(quantity.name.clone());
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    clicked
+}
+
+/// A value, and how it moved since its night before, on a tint of that move.
+fn tile(ui: &mut Ui, trend: Option<Trend>, quantity: &Quantity) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(CELL, Sense::click());
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    let Some(trend) = trend else {
+        painter.rect_filled(rect, 4.0, visuals.faint_bg_color);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "·",
+            FontId::proportional(14.0),
+            visuals.weak_text_color(),
+        );
+        return response;
+    };
+    let change = trend
+        .before
+        .and_then(|(before, _)| moved(trend.now, before, quantity));
+    let ground = match change {
+        Some((percent, better)) if percent.abs() >= STEADY => {
+            let strength = (percent.abs() / LOUD).min(1.0) as f32;
+            let tint = if better { GREEN } else { RED };
+            tint.gamma_multiply(0.15 + 0.4 * strength)
+        }
+        _ => visuals.faint_bg_color,
+    };
+    painter.rect_filled(rect, 4.0, ground);
+    if response.hovered() {
+        painter.rect_stroke(
+            rect,
+            4.0,
+            visuals.widgets.hovered.fg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.text(
+        rect.left_top() + vec2(8.0, 3.0),
+        Align2::LEFT_TOP,
+        number(trend.now),
+        FontId::proportional(15.0),
+        visuals.strong_text_color(),
+    );
+    let (said, colour) = match change {
+        Some((percent, _)) if percent.abs() < STEADY => {
+            (signed(percent), visuals.weak_text_color())
+        }
+        Some((percent, better)) => (signed(percent), if better { GREEN } else { RED }),
+        None => ("first night".to_string(), visuals.weak_text_color()),
+    };
+    painter.text(
+        rect.left_bottom() + vec2(8.0, -3.0),
+        Align2::LEFT_BOTTOM,
+        said,
+        FontId::proportional(11.0),
+        colour,
+    );
+    response.on_hover_ui(|ui| {
+        ui.strong(format!("{} {}", number(trend.now), quantity.unit));
+        if let Some((before, night)) = trend.before {
+            ui.label(format!(
+                "{} {} on the night of {}",
+                number(before),
+                quantity.unit,
+                date(night as f64)
+            ));
+        }
+        ui.weak(when(&trend.measurement.at));
+        if let Some(machine) = &trend.measurement.machine {
+            ui.weak(machine);
+        }
+        ui.weak(commits(trend.measurement));
+        ui.weak("Click to compare this quantity across benchmarks and nights");
+    })
 }
 
 fn compare(ui: &mut Ui, group: &Group, picked: &mut Picked) {
@@ -83,16 +369,12 @@ fn compare(ui: &mut Ui, group: &Group, picked: &mut Picked) {
         .as_ref()
         .and_then(|name| group.quantities.iter().find(|q| q.name == *name))
         .unwrap_or(&group.quantities[0]);
-    let point = picked
-        .point
-        .filter(|point| group.points.contains(point))
-        .or_else(|| group.points.first().copied());
-    let days = measured_days(group);
+    let point = picked.point(group);
+    let nights = nights(group);
     let against = picked
         .against
-        .clone()
-        .filter(|day| days.contains(&day.as_str()))
-        .or_else(|| days.get(1).map(|day| day.to_string()));
+        .filter(|night| nights.contains(night))
+        .or_else(|| nights.get(1).copied());
 
     ui.horizontal_wrapped(|ui| {
         for each in group.quantities {
@@ -114,23 +396,21 @@ fn compare(ui: &mut Ui, group: &Group, picked: &mut Picked) {
             }
             ui.add_space(12.0);
         }
-        ui.weak("compared with");
-        let named = |day: &Option<String>| match day {
-            Some(day) => day.clone(),
-            None => "nothing".to_string(),
-        };
+        ui.weak("compared with the night of");
+        let named =
+            |night: Option<i64>| night.map_or("none".to_string(), |night| date(night as f64));
         egui::ComboBox::from_id_salt(("against", &group.name))
-            .selected_text(named(&against))
+            .selected_text(named(against))
             .show_ui(ui, |ui| {
-                for day in days.iter().skip(1) {
+                for &night in nights.iter().skip(1) {
                     if ui
-                        .selectable_label(against.as_deref() == Some(day), *day)
+                        .selectable_label(against == Some(night), named(Some(night)))
                         .clicked()
                     {
-                        picked.against = Some(day.to_string());
+                        picked.against = Some(night);
                     }
                 }
-                if days.len() < 2 {
+                if nights.len() < 2 {
                     ui.weak("One night so far");
                 }
             });
@@ -142,21 +422,23 @@ fn compare(ui: &mut Ui, group: &Group, picked: &mut Picked) {
     });
     ui.add_space(6.0);
 
+    if nights.len() < 2 {
+        bars(ui, group, quantity, point, against);
+        ui.add_space(8.0);
+        ui.weak("The chart over the nights starts with the second night.");
+        return;
+    }
     let width = ui.available_width();
     if width >= SIDE_BY_SIDE {
         ui.horizontal_top(|ui| {
-            let half = (width - ui.spacing().item_spacing.x) / 2.0;
             ui.vertical(|ui| {
-                ui.set_width(half);
-                bars(ui, group, quantity, point, against.as_deref());
+                ui.set_width(BARS);
+                bars(ui, group, quantity, point, against);
             });
-            ui.vertical(|ui| {
-                ui.set_width(half);
-                chart(ui, group, quantity, point);
-            });
+            ui.vertical(|ui| chart(ui, group, quantity, point));
         });
     } else {
-        bars(ui, group, quantity, point, against.as_deref());
+        bars(ui, group, quantity, point, against);
         ui.add_space(10.0);
         chart(ui, group, quantity, point);
     }
@@ -164,14 +446,7 @@ fn compare(ui: &mut Ui, group: &Group, picked: &mut Picked) {
 
 /// A row each, under its family: the variant's colour and name, its latest value as a bar
 /// from zero, and how it moved since `against`.
-fn bars(
-    ui: &mut Ui,
-    group: &Group,
-    quantity: &Quantity,
-    point: Option<f64>,
-    against: Option<&str>,
-) {
-    let (_, variants) = families_and_variants(group);
+fn bars(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>, against: Option<i64>) {
     let latest: Vec<_> = group
         .rows
         .iter()
@@ -200,9 +475,9 @@ fn bars(
                 ui.label(RichText::new(name).strong());
             }
         }
-        let colour = colour(&variants, variant);
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), BAR_ROW), Sense::hover());
+        let colour = colour(group, &row.label);
+        let width = ui.available_width().min(BARS);
+        let (rect, response) = ui.allocate_exact_size(vec2(width, BAR_ROW), Sense::hover());
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals();
         let swatch =
@@ -235,7 +510,7 @@ fn bars(
         };
         let mut filled = track;
         filled.set_width(track.width() * share.clamp(0.0, 1.0));
-        painter.rect_filled(filled, 3.0, colour.gamma_multiply(0.85));
+        painter.rect_filled(filled, 3.0, colour);
         let is_best = best == Some(latest.value);
         let value = painter.text(
             filled.right_center() + vec2(6.0, 0.0),
@@ -247,17 +522,13 @@ fn bars(
                 false => visuals.text_color(),
             },
         );
-        let then = against.and_then(|day| on_day(row.benchmark, &quantity.name, point, day));
+        let then = against.and_then(|night| on_night(row.benchmark, &quantity.name, point, night));
         let change = then.and_then(|then| moved(latest.value, then, quantity));
         if let Some((percent, better)) = change {
             painter.text(
                 value.right_center() + vec2(8.0, 0.0),
                 Align2::LEFT_CENTER,
-                format!(
-                    "{}{:.1}%",
-                    if percent >= 0.0 { "+" } else { "−" },
-                    percent.abs()
-                ),
+                signed(percent),
                 FontId::proportional(12.0),
                 shade(ui, percent, better),
             );
@@ -268,8 +539,13 @@ fn bars(
             if is_best {
                 ui.label("The best of these");
             }
-            if let (Some(then), Some(day)) = (then, against) {
-                ui.label(format!("{} {} on {day}", number(then), quantity.unit));
+            if let (Some(then), Some(night)) = (then, against) {
+                ui.label(format!(
+                    "{} {} on the night of {}",
+                    number(then),
+                    quantity.unit,
+                    date(night as f64)
+                ));
             }
             ui.weak(when(&latest.measurement.at));
             if let Some(machine) = &latest.measurement.machine {
@@ -284,20 +560,23 @@ fn bars(
     }
 }
 
-/// Each benchmark's nights, a line each: its variant's colour, and a dash for each family
-/// after the first.
+/// Each benchmark over the nights, a line each in its row's colour, dashed for the second
+/// family and dotted for the third.
 fn chart(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>) {
-    let (families, variants) = families_and_variants(group);
+    let (families, _) = families_and_variants(group);
     let unit = quantity.unit.clone();
-    let mut nights = 0;
     Plot::new(("over time", &group.name))
-        .height(320.0)
+        .height(340.0)
         .legend(
             Legend::default()
                 .position(Corner::LeftTop)
                 .follow_insertion_order(true),
         )
-        .x_axis_formatter(|mark, _| date(mark.value))
+        .x_grid_spacer(uniform_grid_spacer(|_| [1.0, 7.0, 28.0]))
+        .x_axis_formatter(|mark, _| match mark.value.fract() == 0.0 {
+            true => date(mark.value),
+            false => String::new(),
+        })
         .y_axis_formatter(|mark, _| number(mark.value))
         .label_formatter(move |hover| match hover {
             HoverPosition::NearDataPoint {
@@ -305,9 +584,9 @@ fn chart(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>) {
                 position,
                 ..
             } => Some(format!(
-                "{plot_name}\n{} {unit}\n{}",
+                "{plot_name}\n{} {unit}\nnight of {}",
                 number(position.y),
-                date(position.x)
+                date(position.x.round())
             )),
             HoverPosition::Elsewhere { .. } => None,
         })
@@ -315,18 +594,20 @@ fn chart(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>) {
         .show(ui, |plot| {
             for row in &group.rows {
                 let found = history(row.benchmark, &quantity.name, point);
-                nights = nights.max(found.len());
                 if found.is_empty() {
                     continue;
                 }
-                let (family, variant) = split(&row.label);
-                let colour = colour(&variants, variant);
+                let (family, _) = split(&row.label);
                 let style = match families.iter().position(|f| *f == family) {
                     Some(0) | None => LineStyle::Solid,
                     Some(1) => LineStyle::dashed_loose(),
                     _ => LineStyle::dotted_dense(),
                 };
-                let at: Vec<[f64; 2]> = found.iter().map(|(x, y, _)| [*x, *y]).collect();
+                let colour = colour(group, &row.label);
+                let at: Vec<[f64; 2]> = found
+                    .iter()
+                    .map(|(night, value, _)| [*night as f64, *value])
+                    .collect();
                 plot.line(
                     Line::new(row.label.clone(), PlotPoints::from(at.clone()))
                         .color(colour)
@@ -342,23 +623,50 @@ fn chart(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>) {
                 );
             }
         });
-    if nights < 2 {
-        ui.weak("One night so far: each line starts with the next.");
-    }
 }
 
-fn colour(variants: &[&str], variant: &str) -> Color32 {
-    let index = variants.iter().position(|v| *v == variant).unwrap_or(0);
-    let [r, g, b] = SERIES[index % SERIES.len()];
+const GREEN: Color32 = Color32::from_rgb(70, 180, 100);
+const RED: Color32 = Color32::from_rgb(225, 90, 80);
+
+/// A row's colour: its variant's, shaded by its family.
+fn colour(group: &Group, label: &str) -> Color32 {
+    let (families, variants) = families_and_variants(group);
+    let (family, variant) = split(label);
+    let [r, g, b] = series_colour(
+        variants.iter().position(|v| *v == variant).unwrap_or(0),
+        families.iter().position(|f| *f == family).unwrap_or(0),
+        families.len(),
+    );
     Color32::from_rgb(r, g, b)
+}
+
+fn swatch(ui: &mut Ui, colour: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, colour);
 }
 
 fn shade(ui: &Ui, percent: f64, better: bool) -> Color32 {
     match (percent.abs() < STEADY, better) {
         (true, _) => ui.visuals().weak_text_color(),
-        (false, true) => Color32::from_rgb(70, 180, 100),
-        (false, false) => Color32::from_rgb(225, 90, 80),
+        (false, true) => GREEN,
+        (false, false) => RED,
     }
+}
+
+/// A quantity's name, with its unit when the name does not already end with it.
+fn heading(quantity: &Quantity) -> String {
+    match quantity.unit.is_empty() || quantity.name.ends_with(&quantity.unit) {
+        true => quantity.name.clone(),
+        false => format!("{} ({})", quantity.name, quantity.unit),
+    }
+}
+
+fn signed(percent: f64) -> String {
+    format!(
+        "{}{:.1}%",
+        if percent >= 0.0 { "+" } else { "−" },
+        percent.abs()
+    )
 }
 
 fn plain(at: f64) -> String {
