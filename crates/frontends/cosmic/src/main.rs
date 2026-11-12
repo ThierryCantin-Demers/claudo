@@ -2788,7 +2788,8 @@ mod app {
                 .into()
         }
 
-        /// Update in the header bar while the sidebar that offers it is closed.
+        /// Update in the header bar while the sidebar that offers it is closed, after the
+        /// usage so that nothing moves when it comes.
         fn header_update(&self, w: window::Id) -> Option<Element<'_, Message>> {
             (self.update_ready && !self.window(w).sidebar_open).then(|| {
                 widget::tooltip(
@@ -5915,12 +5916,12 @@ mod app {
             );
             start.extend(self.remote_chip());
             start.extend(
-                self.header_update(main)
-                    .map(|update| update.map(move |message| Message::In(main, Box::new(message)))),
-            );
-            start.extend(
                 self.header_usage(main)
                     .map(|usage| usage.map(move |message| Message::In(main, Box::new(message)))),
+            );
+            start.extend(
+                self.header_update(main)
+                    .map(|update| update.map(move |message| Message::In(main, Box::new(message)))),
             );
             start
         }
@@ -5960,11 +5961,11 @@ mod app {
             if let Some(chip) = self.remote_chip() {
                 header = header.start(chip);
             }
-            if let Some(update) = self.header_update(id) {
-                header = header.start(update);
-            }
             if let Some(usage) = self.header_usage(id) {
                 header = header.start(usage);
+            }
+            if let Some(update) = self.header_update(id) {
+                header = header.start(update);
             }
             for element in self.header_center_of(id) {
                 header = header.center(element);
