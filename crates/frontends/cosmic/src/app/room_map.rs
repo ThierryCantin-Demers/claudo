@@ -5,9 +5,9 @@
 
 use claudo_protocol::{Node, NodeState};
 use claudo_room::agents::{
-    AGENT, BADGE_SIZE, CAPTION_REACH, CHILD, Map, PAD, STARTED_GAP, STARTED_ROW, STARTED_SIZE,
-    Tint, V, badges, codex, dibs_job, hue, made_by, phase, started, started_rows, started_word,
-    state_tint, wide,
+    AGENT, BADGE_ROW, BADGE_SIZE, CAPTION_REACH, CHILD, Map, PAD, STARTED_GAP, STARTED_ROW,
+    STARTED_SIZE, Tint, V, badges, codex, dibs_job, hue, made_by, phase, started, started_rows,
+    started_word, state_tint, wide,
 };
 use cosmic::iced::widget::canvas::{self, Frame, Path, Stroke, path::Arc};
 use cosmic::iced::{Radians, Rectangle, keyboard, mouse};
@@ -80,19 +80,20 @@ impl<'a> MapView<'a> {
             .into_iter()
             .filter(|drawn| drawn.agent)
             .flat_map(|drawn| {
-                let parts = badges(drawn.node);
-                let texts: Vec<&str> = parts.iter().map(|part| part.text.as_str()).collect();
-                let (y, size) = badge_row(drawn.at, scale);
-                let lefts = lefts(&texts, drawn.at.x, size);
-                parts
-                    .iter()
-                    .zip(lefts)
-                    .filter_map(|(part, left)| {
-                        let size = Size::new(wide(&part.text, size), size * 1.3);
-                        let at = Rectangle::new(Point::new(left, y), size);
-                        Some((at, part.link?, drawn.node.id.as_str()))
-                    })
-                    .collect::<Vec<_>>()
+                let (top, size) = badge_row(drawn.at, scale);
+                let mut found = Vec::new();
+                for (row, parts) in badges(drawn.node).into_iter().enumerate() {
+                    let y = top + row as f32 * BADGE_ROW * scale;
+                    let texts: Vec<&str> = parts.iter().map(|part| part.text.as_str()).collect();
+                    for (part, left) in parts.iter().zip(lefts(&texts, drawn.at.x, size)) {
+                        if let Some(link) = part.link {
+                            let area = Size::new(wide(&part.text, size), size * 1.3);
+                            let at = Rectangle::new(Point::new(left, y), area);
+                            found.push((at, link, drawn.node.id.as_str()));
+                        }
+                    }
+                }
+                found
             })
             .collect()
     }
@@ -567,14 +568,22 @@ fn caption(
             size,
         );
     }
-    let badges: Vec<(String, Color)> = badges(node)
-        .into_iter()
-        .map(|part| (part.text, palette.tint(part.tint)))
-        .collect();
-    if !badges.is_empty() {
-        let (y, size) = badge_row(at, scale);
-        centred(frame, &badges, at.x, y, size);
+    let rows = badges(node);
+    let (y, size) = badge_row(at, scale);
+    for (row, parts) in rows.iter().enumerate() {
+        let parts: Vec<(String, Color)> = parts
+            .iter()
+            .map(|part| (part.text.clone(), palette.tint(part.tint)))
+            .collect();
+        centred(
+            frame,
+            &parts,
+            at.x,
+            y + row as f32 * BADGE_ROW * scale,
+            size,
+        );
     }
+    let below = rows.len().saturating_sub(1) as f32 * BADGE_ROW;
     for (row, started) in started_rows(started).into_iter().enumerate() {
         let mut parts = Vec::new();
         for (i, (text, tint)) in started.into_iter().enumerate() {
@@ -583,7 +592,7 @@ fn caption(
             }
             parts.push((cut(&text, STARTED_SIZE * scale, width), rgb(tint)));
         }
-        let y = top + (29.0 + row as f32 * STARTED_ROW) * scale;
+        let y = top + (29.0 + below + row as f32 * STARTED_ROW) * scale;
         centred(frame, &parts, at.x, y, STARTED_SIZE * scale);
     }
 }

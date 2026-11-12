@@ -244,8 +244,9 @@ pub const CHILD: f32 = 7.5;
 pub const CAPTION_REACH: f32 = 72.0;
 /// Under an agent, a row each: its name, what it is doing, its badges, and what it started.
 const CAPTION: f32 = 62.0;
-/// The size of an agent's badges, written under it.
+/// The size of an agent's badges, written under it, and how far apart their rows are.
 pub const BADGE_SIZE: f32 = 10.0;
+pub const BADGE_ROW: f32 = 13.0;
 /// The size of what an agent started, written under it, and how far apart its rows are.
 pub const STARTED_SIZE: f32 = 10.5;
 pub const STARTED_ROW: f32 = 13.0;
@@ -320,10 +321,13 @@ impl<'a> Island<'a> {
         let more = cluster
             .trees
             .iter()
-            .map(|tree| started_rows(started(tree.children.iter().map(|child| child.node))).len())
+            .map(|tree| {
+                let started = started(tree.children.iter().map(|child| child.node));
+                started_rows(started).len().saturating_sub(1)
+                    + badges(tree.node).len().saturating_sub(1)
+            })
             .max()
-            .unwrap_or(0)
-            .saturating_sub(1);
+            .unwrap_or(0);
         let cell = above + AGENT * 2.0 + CAPTION + more as f32 * STARTED_ROW;
         let mut placed = Vec::new();
         for (i, tree) in cluster.trees.iter().enumerate() {
@@ -521,48 +525,103 @@ pub fn checks(checks: Checks) -> (&'static str, [u8; 3]) {
     }
 }
 
+/// "1 pull request", "7 pull requests".
+pub fn pull_requests(count: usize) -> String {
+    match count {
+        1 => "1 pull request".to_string(),
+        _ => format!("{count} pull requests"),
+    }
+}
+
+/// How many of `prs` have their CI failing and how many running, those there are.
+pub fn ci_counts(prs: &[(&Node, Shown)]) -> Vec<(Checks, usize)> {
+    [Checks::Failing, Checks::Running]
+        .into_iter()
+        .map(|state| {
+            let count = prs
+                .iter()
+                .filter(|(_, pr)| pr.checks == Some(state))
+                .count();
+            (state, count)
+        })
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
 /// A piece of an agent's badges, and the page it opens when clicked.
+#[derive(Clone)]
 pub struct Badge<'a> {
     pub text: String,
     pub tint: Tint,
     pub link: Option<&'a str>,
 }
 
-/// What an agent carries: its context, and its open pull requests, each in the colour of
-/// its CI and opening it.
-pub fn badges(node: &Node) -> Vec<Badge<'_>> {
-    let plain = |text: String, tint| Badge {
-        text,
+/// What an agent carries, a row at a time: its context, and its open pull requests, each in
+/// the colour of its CI and opening it. The pull requests get a row of their own when both
+/// do not fit on one, and as many as fit there, the rest counted.
+pub fn badges(node: &Node) -> Vec<Vec<Badge<'_>>> {
+    let plain = |text: &str, tint| Badge {
+        text: text.to_string(),
         tint,
         link: None,
     };
-    let mut parts = Vec::new();
-    if let Some(tokens) = node.context {
-        parts.push(plain(format!("{} context", thousands(tokens)), Tint::Text));
-    }
+    let width =
+        |parts: &[Badge]| -> f32 { parts.iter().map(|part| wide(&part.text, BADGE_SIZE)).sum() };
+    let room = 2.0 * CAPTION_REACH;
+    let context: Vec<Badge> = node
+        .context
+        .map(|tokens| plain(&format!("{} context", thousands(tokens)), Tint::Text))
+        .into_iter()
+        .collect();
     let prs = open_prs(node);
-    if !prs.is_empty() {
-        if !parts.is_empty() {
-            parts.push(plain("  ·  ".to_string(), Tint::Weak));
-        }
-        parts.push(plain("PR".to_string(), Tint::Text));
-        for pr in prs {
+    let numbers: Vec<[Badge; 2]> = prs
+        .iter()
+        .map(|pr| {
             let tint = pr
                 .checks
                 .map_or(Tint::Text, |state| Tint::Rgb(checks(state).1));
-            parts.push(plain(" ".to_string(), tint));
-            parts.push(Badge {
-                text: format!("#{}", pr.number),
-                tint,
-                link: Some(pr.link),
-            });
+            [
+                plain(" ", tint),
+                Badge {
+                    text: format!("#{}", pr.number),
+                    tint,
+                    link: Some(pr.link),
+                },
+            ]
+        })
+        .collect();
+    if numbers.is_empty() {
+        return [context]
+            .into_iter()
+            .filter(|row| !row.is_empty())
+            .collect();
+    }
+    let all: Vec<Badge> = std::iter::once(plain("PR", Tint::Text))
+        .chain(numbers.iter().flat_map(|pair| pair.iter().cloned()))
+        .collect();
+    let gap = plain("  ·  ", Tint::Weak);
+    if context.is_empty() || width(&context) + wide(&gap.text, BADGE_SIZE) + width(&all) <= room {
+        let mut row = context;
+        if !row.is_empty() {
+            row.push(gap);
         }
+        row.extend(all);
+        return vec![row];
     }
-    let width: f32 = parts.iter().map(|part| wide(&part.text, BADGE_SIZE)).sum();
-    if let (Some(tokens), true) = (node.context, width > 2.0 * CAPTION_REACH) {
-        parts[0].text = format!("{} ctx", thousands(tokens));
+    let mut row = vec![plain("PR", Tint::Text)];
+    for (i, pair) in numbers.iter().enumerate() {
+        let left = numbers.len() - i - 1;
+        let more = match left {
+            0 => 0.0,
+            _ => wide(&format!(" +{left}"), BADGE_SIZE),
+        };
+        if i > 0 && width(&row) + width(pair) + more > room {
+            row.push(plain(&format!(" +{}", numbers.len() - i), Tint::Weak));
+            break;
+        }
+        row.extend(pair.iter().cloned());
     }
-    parts
+    vec![context, row]
 }
 
 /// What an agent started, counted by kind and by whether it runs, each in its kind's
@@ -1061,6 +1120,43 @@ mod tests {
                 "1 subagent running"
             ]
         );
+    }
+
+    #[test]
+    fn pull_requests_that_do_not_fit_beside_the_context_get_a_line_and_a_count() {
+        let pr = |number: u64| claudo_protocol::PullRequest {
+            url: format!("https://example.com/acme/orchard/pull/{number}"),
+            number,
+            title: "t".into(),
+            repo: "acme/orchard".into(),
+            draft: false,
+            checks: None,
+        };
+        let agent = |prs: Vec<claudo_protocol::PullRequest>| Node {
+            context: Some(217_000),
+            prs,
+            ..node("a", None, None)
+        };
+        let text = |row: &[Badge]| {
+            row.iter()
+                .map(|part| part.text.as_str())
+                .collect::<String>()
+        };
+        let one = agent(vec![pr(12)]);
+        let one = badges(&one);
+        assert_eq!(one.len(), 1);
+        let three = agent(vec![pr(6504), pr(2180), pr(1173)]);
+        let three = badges(&three);
+        assert_eq!(three.len(), 2);
+        assert_eq!(text(&three[1]), "PR #6504 #2180 #1173");
+        let many = agent((1000..1012).map(pr).collect());
+        let many = badges(&many);
+        let line = text(&many[1]);
+        assert!(line.ends_with(&format!(
+            " +{}",
+            12 - many[1].iter().filter(|p| p.link.is_some()).count()
+        )));
+        assert!(wide(&line, BADGE_SIZE) <= 2.0 * CAPTION_REACH);
     }
 
     #[test]

@@ -9,10 +9,11 @@ use claudo_protocol::{
     Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
 };
 use claudo_room::agents::{
-    AGENT, Agents, BADGE_SIZE, CAPTION_REACH, CHILD, Island, LEGEND, Map, PAD, STARTED_GAP,
-    STARTED_ROW, STARTED_SIZE, Shown, Tint, V, agent_colour, ago, badges, checks, codex, dibs_job,
-    fit, hue, kind, legend_kinds, made_by, open_prs, phase, reason, short, started, started_rows,
-    started_word, state, state_tint, thousands,
+    AGENT, Agents, BADGE_ROW, BADGE_SIZE, CAPTION_REACH, CHILD, Island, LEGEND, Map, PAD,
+    STARTED_GAP, STARTED_ROW, STARTED_SIZE, Shown, Tint, V, agent_colour, ago, badges, checks,
+    ci_counts, codex, dibs_job, fit, hue, kind, legend_kinds, made_by, open_prs, phase,
+    pull_requests, reason, short, started, started_rows, started_word, state, state_tint,
+    thousands,
 };
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2, vec2};
@@ -30,6 +31,8 @@ pub struct Room {
     /// The node whose details are open beside the map.
     selected: Option<NodeId>,
     markdown: CommonMarkCache,
+    /// The open pull requests are listed under the summary.
+    prs_open: bool,
 }
 
 impl Room {
@@ -80,8 +83,11 @@ impl Room {
                     self.summary(ui);
                     ui.add_space(8.0);
                     ui.weak("?").on_hover_ui(legend);
-                    self.pull_requests(ui);
+                    self.pull_request_count(ui);
                 });
+                if self.prs_open {
+                    self.pull_requests(ui);
+                }
                 self.failure(ui);
                 ui.add_space(4.0);
                 self.waiting_lines(ui, width, now);
@@ -101,25 +107,52 @@ impl Room {
             });
     }
 
-    /// Every open pull request an agent here has, with the agent's name.
-    fn pull_requests(&mut self, ui: &mut egui::Ui) {
-        let mut open: Vec<(&Node, Shown)> = self
-            .agents
-            .nodes
-            .values()
-            .flat_map(|node| open_prs(node).into_iter().map(move |pr| (node, pr)))
-            .collect();
+    /// How many pull requests the agents here have open and how their CI stands, which
+    /// opens the list of them.
+    fn pull_request_count(&mut self, ui: &mut egui::Ui) {
+        let open = self.agents.pull_requests();
         if open.is_empty() {
             return;
         }
-        open.sort_by(|a, b| a.1.about.cmp(&b.1.about));
-        for (node, pr) in open {
-            ui.weak("·");
-            let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
-            pull_request(ui, repo, &pr, &node.id, &mut self.sent);
-            ci(ui, pr.checks);
-            ui.weak(node.name.as_deref().unwrap_or("unnamed"));
+        ui.weak("·");
+        let arrow = if self.prs_open { "▾" } else { "▸" };
+        let toggle = ui.selectable_label(
+            self.prs_open,
+            format!("{} {arrow}", pull_requests(open.len())),
+        );
+        for (state, count) in ci_counts(&open) {
+            let (words, shade) = checks(state);
+            ui.label(
+                RichText::new(format!("{count} {words}"))
+                    .color(rgb(shade))
+                    .small(),
+            );
         }
+        if toggle.clicked() {
+            self.prs_open = !self.prs_open;
+        }
+    }
+
+    /// Each open pull request on a line: its number, its title, its CI and the agent that
+    /// opened it.
+    fn pull_requests(&mut self, ui: &mut egui::Ui) {
+        let open = self.agents.pull_requests();
+        let mut sent = Vec::new();
+        egui::Grid::new("pull requests")
+            .spacing(vec2(14.0, 3.0))
+            .striped(true)
+            .show(ui, |ui| {
+                for (node, pr) in &open {
+                    let (name, title) = pr.about.split_once(": ").unwrap_or((&pr.about, ""));
+                    pull_request(ui, name.to_string(), pr, &node.id, &mut sent);
+                    ui.add(egui::Label::new(RichText::new(title).weak()).truncate());
+                    ci(ui, pr.checks);
+                    let agent = node.name.as_deref().unwrap_or("unnamed");
+                    ui.label(RichText::new(agent).color(rgb(agent_colour(agent))));
+                    ui.end_row();
+                }
+            });
+        self.sent.extend(sent);
     }
 
     fn failure(&mut self, ui: &mut egui::Ui) {
@@ -675,19 +708,19 @@ fn caption<'a>(
         );
         painter.galley(below, doing, visuals.weak_text_color());
     }
-    let parts = badges(node);
+    let rows = badges(node);
     let mut links = Vec::new();
-    if !parts.is_empty() {
+    for (i, parts) in rows.iter().enumerate() {
         let coloured: Vec<(String, Color32)> = parts
             .iter()
             .map(|part| (part.text.clone(), tint(visuals, part.tint)))
             .collect();
         let galley = row(painter, &coloured, BADGE_SIZE * scale, scale);
-        let at = below + vec2(0.0, 15.0 * scale);
+        let at = below + vec2(0.0, (15.0 + i as f32 * BADGE_ROW) * scale);
         if let Some(placed) = galley.rows.first() {
             // One glyph a character, on the one row a badge line is cut to.
             let mut first = 0;
-            for part in &parts {
+            for part in parts {
                 let count = part.text.chars().count();
                 let glyphs = placed.row.glyphs.get(first..first + count);
                 if let (Some(link), Some(glyphs)) = (part.link, glyphs) {
@@ -702,6 +735,7 @@ fn caption<'a>(
         }
         painter.galley(at, galley, visuals.text_color());
     }
+    let more = rows.len().saturating_sub(1) as f32 * BADGE_ROW;
     let dot = (STARTED_GAP.to_string(), visuals.weak_text_color());
     for (i, started) in started_rows(started.to_vec()).into_iter().enumerate() {
         let parts: Vec<(String, Color32)> = started
@@ -711,7 +745,7 @@ fn caption<'a>(
             .collect();
         let started = row(painter, &parts, STARTED_SIZE * scale, scale);
         painter.galley(
-            below + vec2(0.0, (29.0 + i as f32 * STARTED_ROW) * scale),
+            below + vec2(0.0, (29.0 + more + i as f32 * STARTED_ROW) * scale),
             started,
             visuals.text_color(),
         );

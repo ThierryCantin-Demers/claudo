@@ -70,11 +70,14 @@ pub struct Room {
     answered: bool,
     /// The node under the pointer on the map, and where it is drawn.
     hover: Option<(NodeId, f32, f32)>,
+    /// The open pull requests are listed under the summary.
+    prs_open: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum RoomMessage {
     Connected(Commands),
+    TogglePrs,
     /// A pull request's link: opens it, or with Shift brings forward the agent that opened it.
     PullRequest {
         link: String,
@@ -204,6 +207,7 @@ impl Room {
                 }
             }
             RoomMessage::Focus(id) => self.act(id, Act::Focus),
+            RoomMessage::TogglePrs => self.prs_open = !self.prs_open,
             // The app opens the link itself unless Shift is held.
             RoomMessage::PullRequest { agent, .. } => self.act(agent, Act::Focus),
             RoomMessage::Pick(id) => {
@@ -401,24 +405,24 @@ impl Room {
             )
             .into(),
         );
-        for (node, pr) in self.agents.pull_requests() {
+        let prs = self.agents.pull_requests();
+        if !prs.is_empty() {
             summary.push(widget::text("·").class(dim()).into());
-            let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
-            summary.push(pull_request(repo, pr.link, &node.id));
-            if let Some((words, tint)) = pr.checks.map(checks) {
+            let arrow = if self.prs_open { "▾" } else { "▸" };
+            summary.push(
+                widget::button::text(format!("{} {arrow}", room_agents::pull_requests(prs.len())))
+                    .on_press(Message::Room(RoomMessage::TogglePrs))
+                    .into(),
+            );
+            for (state, count) in room_agents::ci_counts(&prs) {
+                let (words, tint) = checks(state);
                 summary.push(
-                    widget::text(words)
-                        .size(11.0)
+                    widget::text(format!("{count} {words}"))
+                        .size(12.0)
                         .class(cosmic::theme::Text::Color(super::room_map::rgb(tint)))
                         .into(),
                 );
             }
-            summary.push(
-                widget::text(node.name.clone().unwrap_or_else(|| "unnamed".into()))
-                    .size(12.0)
-                    .class(dim())
-                    .into(),
-            );
         }
         page.push(
             widget::flex_row(summary)
@@ -427,6 +431,10 @@ impl Room {
                 .into(),
         );
         let mut used = 40.0 * zoom;
+        if self.prs_open {
+            page.push(pull_request_table(&prs));
+            used += 22.0 * prs.len() as f32 * zoom;
+        }
         if let Some((node, detail)) = &self.failed {
             let name = self
                 .agents
@@ -1065,6 +1073,54 @@ fn legend<'a>() -> Element<'a, Message> {
     widget::flex_row(parts)
         .spacing(6)
         .align_items(Alignment::Center)
+        .into()
+}
+
+/// Each open pull request on a line: its number, its title, its CI and the agent that
+/// opened it.
+fn pull_request_table<'a>(prs: &[(&Node, room_agents::Shown)]) -> Element<'a, Message> {
+    let lines = prs.iter().map(|(node, pr)| {
+        let (name, title) = pr.about.split_once(": ").unwrap_or((&pr.about, ""));
+        let ci: Element<Message> = match pr.checks.map(checks) {
+            Some((words, tint)) => widget::text(words)
+                .size(12.0)
+                .class(cosmic::theme::Text::Color(super::room_map::rgb(tint)))
+                .into(),
+            None => widget::space::horizontal().into(),
+        };
+        let agent = node.name.clone().unwrap_or_else(|| "unnamed".into());
+        let colour = super::room_map::rgb(room_agents::agent_colour(&agent));
+        widget::row::with_children(vec![
+            widget::container(pull_request(name.to_string(), pr.link, &node.id))
+                .width(Length::Fixed(200.0))
+                .into(),
+            widget::container(
+                widget::text(title.to_string())
+                    .size(13.0)
+                    .class(dim())
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true)
+            .into(),
+            widget::container(ci).width(Length::Fixed(90.0)).into(),
+            widget::container(
+                widget::text(agent)
+                    .size(13.0)
+                    .class(cosmic::theme::Text::Color(colour))
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(Length::Fixed(260.0))
+            .clip(true)
+            .into(),
+        ])
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into()
+    });
+    widget::Column::with_children(lines.collect::<Vec<_>>())
+        .spacing(2)
+        .padding([0, 8])
         .into()
 }
 
