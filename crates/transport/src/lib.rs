@@ -158,7 +158,6 @@ pub fn connect() -> Box<dyn Transport> {
     Box::new(InProc::spawn())
 }
 
-#[cfg(target_arch = "wasm32")]
 mod ws {
     use super::*;
     use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
@@ -231,8 +230,24 @@ mod ws {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 pub use ws::WsClient;
+
+/// Dials the daemon whose page is at `link`, as its own address with `?token=…` prints it.
+pub fn connect_to(link: &str) -> Box<dyn Transport> {
+    Box::new(ws::WsClient::connect(&websocket(link)))
+}
+
+/// The WebSocket beside the page at `link`: same host and query, `ws` for `http`.
+fn websocket(link: &str) -> String {
+    let (scheme, rest) = link.split_once("://").unwrap_or(("http", link));
+    let scheme = if scheme == "https" { "wss" } else { "ws" };
+    let (host, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let host = host.trim_end_matches('/');
+    match query {
+        "" => format!("{scheme}://{host}/ws"),
+        query => format!("{scheme}://{host}/ws?{query}"),
+    }
+}
 
 /// Connect a frontend to its backend. Wasm dials the daemon's WebSocket, reading
 /// host + `?token=…` from the page's own URL.
@@ -248,4 +263,22 @@ pub fn connect() -> Box<dyn Transport> {
     let search = location.search().unwrap_or_default(); // "?token=…"
     let url = format!("{scheme}://{host}/ws{search}");
     Box::new(ws::WsClient::connect(&url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::websocket;
+
+    #[test]
+    fn a_page_link_names_its_websocket() {
+        assert_eq!(
+            websocket("http://127.0.0.1:8787/?token=abc"),
+            "ws://127.0.0.1:8787/ws?token=abc"
+        );
+        assert_eq!(websocket("https://room.example/"), "wss://room.example/ws");
+        assert_eq!(
+            websocket("127.0.0.1:8788?token=t"),
+            "ws://127.0.0.1:8788/ws?token=t"
+        );
+    }
 }

@@ -34,6 +34,7 @@ cargo run -p claudo-egui --release           # native app
 cargo xtask web                              # wasm bundle -> crates/frontends/egui/dist
 cargo run -p claudo-daemon                   # serves bundle + WebSocket, prints token URL
 cargo xtask install-daemon                   # systemd user service, prints the page's link
+cargo xtask egui --room [LINK] [--hot]       # the daemon's room in a native window, live patched
 
 cargo run -p claudo-cosmic --features cosmic --release   # COSMIC frontend
 cargo build -p claudo-egui --target wasm32-unknown-unknown

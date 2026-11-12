@@ -30,7 +30,10 @@ pub fn spawn(feed: Feed) {
             let machines = look(&metrics(&watch, &names))
                 .map(|text| machines(&text))
                 .unwrap_or_default();
-            names = machines.iter().map(|machine| machine.name.clone()).collect();
+            names = machines
+                .iter()
+                .map(|machine| machine.name.clone())
+                .collect();
             feed.replace(jobs(&machines));
             feed.dibs(machines);
             let now = WATCH.lock().unwrap();

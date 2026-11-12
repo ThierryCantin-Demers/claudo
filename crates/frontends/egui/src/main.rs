@@ -28,9 +28,36 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             load_jp_font(&cc.egui_ctx);
+            #[cfg(feature = "hot")]
+            {
+                cargo_hot_protocol::connect();
+                let ctx = cc.egui_ctx.clone();
+                let repaint = move || ctx.request_repaint();
+                cargo_hot_protocol::subsecond::register_handler(std::sync::Arc::new(repaint));
+            }
             Ok(Box::new(ClaudoApp::new(cc.storage)))
         }),
     )
+}
+
+/// The daemon's room to show, from `--room <page link>` or `CLAUDO_ROOM`; without one, the
+/// window runs its own backend, which has no room.
+#[cfg(not(target_arch = "wasm32"))]
+fn transport() -> Box<dyn claudo_transport::Transport> {
+    let args: Vec<String> = std::env::args().collect();
+    let flag = args
+        .windows(2)
+        .find(|pair| pair[0] == "--room")
+        .map(|pair| pair[1].clone());
+    match flag.or_else(|| std::env::var("CLAUDO_ROOM").ok()) {
+        Some(link) => claudo_transport::connect_to(&link),
+        None => connect(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn transport() -> Box<dyn claudo_transport::Transport> {
+    connect()
 }
 
 /// Web entry: eframe drives the `<canvas id="claudo_canvas">` in index.html.
@@ -137,7 +164,7 @@ fn first_page() -> Page {
 
 impl ClaudoApp {
     fn new(storage: Option<&dyn eframe::Storage>) -> Self {
-        let mut transport = connect();
+        let mut transport = transport();
         transport.send(Command::GetStatus);
         transport.send(Command::GetSettings);
         transport.send(Command::GetCapabilities);
@@ -594,6 +621,16 @@ impl eframe::App for ClaudoApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "hot")]
+        cargo_hot_protocol::subsecond::call(|| self.frame(ui));
+        #[cfg(not(feature = "hot"))]
+        self.frame(ui);
+    }
+}
+
+impl ClaudoApp {
+    /// Everything drawn each frame, which a hot patch replaces.
+    fn frame(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
         self.handle_zoom(ui);
         let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.1);

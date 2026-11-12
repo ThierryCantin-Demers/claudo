@@ -64,8 +64,16 @@ enum Task {
         #[arg(long, conflicts_with = "release")]
         hot: bool,
     },
-    /// Run the egui app.
-    Egui,
+    /// Run the egui app: a window of its own, or, with `--room`, the daemon's control room.
+    Egui {
+        /// Show the room of the daemon whose page is at this link, or, alone, of the daemon
+        /// `install-daemon` set up on this computer.
+        #[arg(long, value_name = "LINK", num_args = 0..=1)]
+        room: Option<Option<String>>,
+        /// Run under cargo-hot, patching the window live as its sources change.
+        #[arg(long)]
+        hot: bool,
+    },
     /// Serve the web bundle and the backend over a WebSocket.
     Daemon,
     /// Build the web bundle into crates/frontends/egui/dist.
@@ -111,7 +119,9 @@ impl Task {
                 Need::CargoHot,
                 Need::Lld,
             ],
-            Task::Egui => &[Need::Claude],
+            Task::Egui { hot: true, .. } => &[Need::CargoHot, Need::Lld],
+            Task::Egui { room: Some(_), .. } => &[],
+            Task::Egui { .. } => &[Need::Claude],
             Task::Daemon => &[Need::WebBundle, Need::Claude],
             Task::Web => &[Need::WasmTarget, Need::WasmBindgen],
             Task::InstallDaemon { .. } => &[Need::WasmTarget, Need::WasmBindgen, Need::Claude],
@@ -130,7 +140,7 @@ fn run(task: Task) -> Result<(), String> {
         Task::InstallApplet => install_applet(),
         Task::InstallDaemon { with, no_dibs } => install_daemon(&with, no_dibs),
         Task::Uninstall => uninstall(),
-        Task::Cosmic { hot: true, .. } => hot(),
+        Task::Cosmic { hot: true, .. } => hot(&["-p", COSMIC_BIN, "--features", "hot"], None),
         Task::Cosmic { release, .. } => {
             let mut args = vec!["run", "-p", COSMIC_BIN, "--features", "cosmic"];
             if release {
@@ -138,7 +148,27 @@ fn run(task: Task) -> Result<(), String> {
             }
             cargo(&args)
         }
-        Task::Egui => cargo(&["run", "-p", "claudo-egui", "--release"]),
+        Task::Egui { room, hot: wanted } => {
+            let room = match room {
+                Some(Some(link)) => Some(link),
+                Some(None) => Some(format!(
+                    "http://127.0.0.1:{DAEMON_PORT}/?token={}",
+                    daemon_token()?
+                )),
+                None => None,
+            };
+            match wanted {
+                true => hot(&["-p", "claudo-egui", "--features", "hot"], room.as_deref()),
+                false => {
+                    let mut command = Command::new("cargo");
+                    command.args(["run", "-p", "claudo-egui", "--release"]);
+                    if let Some(room) = room {
+                        command.env("CLAUDO_ROOM", room);
+                    }
+                    status(&mut command)
+                }
+            }
+        }
         Task::Daemon => cargo(&["run", "-p", "claudo-daemon"]),
         Task::Web => web(),
         Task::Lint => cargo(&[
@@ -412,9 +442,13 @@ fn uninstall() -> Result<(), String> {
     Ok(())
 }
 
-fn hot() -> Result<(), String> {
+/// `cargo hot` with `args`, the app given `room` as its `CLAUDO_ROOM`.
+fn hot(args: &[&str], room: Option<&str>) -> Result<(), String> {
     let mut command = Command::new("cargo");
-    command.args(["hot", "-p", COSMIC_BIN, "--features", "hot"]);
+    command.arg("hot").args(args);
+    if let Some(room) = room {
+        command.env("CLAUDO_ROOM", room);
+    }
     // cargo-hot links patches with `cc -fuse-ld=lld` but drops the `-B` rustc passes to point
     // that at its own lld, so without this a system lld must be installed.
     if let Some(lld) = need::bundled_lld() {

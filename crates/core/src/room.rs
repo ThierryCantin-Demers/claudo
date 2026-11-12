@@ -8,7 +8,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
+use claudo_protocol::{
+    DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clients::{ClientId, Clients};
@@ -39,7 +41,8 @@ impl Room {
                 .to(client, ServerEvent::Dibs(self.dibs.clone()));
         }
         if let Some(watch) = &self.dibs_watch {
-            self.clients.to(client, ServerEvent::DibsWatch(watch.clone()));
+            self.clients
+                .to(client, ServerEvent::DibsWatch(watch.clone()));
         }
     }
 

@@ -18,9 +18,14 @@ egui_commonmark = "0.25.0"
 egui_tiles = "0.17.1"
 serde.workspace = true
 
+[features]
+# Patches the window live while running under `cargo hot` (`cargo xtask egui --hot`).
+hot = ["dep:cargo-hot-protocol"]
+
 # Native folder picker (browser can't pick the daemon's server-side folders).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.17.2"
+cargo-hot-protocol = { version = "0.1.1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
