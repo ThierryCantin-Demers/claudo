@@ -500,6 +500,13 @@ wrote it.
   no conversation, agent or queued message of this user can reach it; it says
   `ServerEvent::LookOnly` first, and drops whatever a page sends. The page then shows the
   machines alone, without dibs's actions or keys.
+- **Benchmarks** (`core/src/benchmarks.rs`): with `CLAUDO_BENCHMARKS` (Parley projects, each
+  `project` or `project/slug-prefix`, comma separated) and `CLAUDO_PARLEY_ROOM` (the room's
+  address) set, the daemon, team page included, reads `parley benchmarks list <project> --json`
+  every 5 minutes and sends `ServerEvent::Benchmarks`. `install-daemon` keeps both from the
+  shell that runs it. The page (`egui/src/benchmarks.rs`, a tab beside the machines) shows a
+  table for the benchmarks that measure the same quantities (`claudo_room::benchmarks`): each
+  newest value, a bar against its column's best and the change since the measurement before.
 - **The whole room for apps**: the daemon also serves on `$XDG_RUNTIME_DIR/claudo-room.sock`
   (mode 0600) what a page hears, each line a `Command` in or a `ServerEvent` out, and
   `claudo-daemon --room-bridge` joins it to stdin and stdout, so `transport::connect_room`

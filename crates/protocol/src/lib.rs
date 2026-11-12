@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
 /// cannot read. The backend sends it first, in `Hello`.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -855,6 +855,51 @@ impl Default for DibsWatch {
     }
 }
 
+/// A benchmark a team records in Parley, with its latest measurements.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Benchmark {
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+    /// What its values are measured along, such as users, when they are.
+    pub axis: Option<String>,
+    pub quantities: Vec<Quantity>,
+    /// Newest first.
+    pub measurements: Vec<Measurement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quantity {
+    pub name: String,
+    pub unit: String,
+    pub higher_is_better: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Measurement {
+    /// RFC 3339, in UTC.
+    pub at: String,
+    pub machine: Option<String>,
+    /// One arm, or one per side of a comparison measured together.
+    pub arms: Vec<Arm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Arm {
+    pub name: String,
+    /// Each repository's commit, as `owner/repo`.
+    pub revisions: Vec<(String, String)>,
+    pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Value {
+    pub quantity: String,
+    /// Where along the benchmark's axis.
+    pub point: Option<f64>,
+    pub value: f64,
+}
+
 /// A dibs machine as the daemon last heard of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DibsMachine {
@@ -885,6 +930,8 @@ pub enum ServerEvent {
     Dibs(Vec<DibsMachine>),
     /// How the daemon watches the dibs machines.
     DibsWatch(DibsWatch),
+    /// The team's benchmarks, each time a look at them says something new.
+    Benchmarks(Vec<Benchmark>),
     /// This page is for looking only, as a team daemon serves it: it shows the machines and
     /// sends nothing.
     LookOnly,

@@ -85,6 +85,7 @@ async fn serve_team() {
     let static_dir = static_dir();
     let hub = Hub::room_only();
     claudo_core::dibs::spawn_team(hub.feed("dibs"), machines);
+    benchmarks(&hub);
     let app = Router::new()
         .route("/ws", get(team_socket))
         .fallback_service(
@@ -101,6 +102,24 @@ async fn serve_team() {
     println!("claudo team page on port {port}, for anyone on the network to look at");
     println!("  serving bundle from: {}", static_dir.display());
     axum::serve(listener, app).await.expect("serve");
+}
+
+/// The benchmarks of the Parley projects in `CLAUDO_BENCHMARKS` (`project` or
+/// `project/slug-prefix`, comma separated), from the room at `CLAUDO_PARLEY_ROOM`.
+fn benchmarks(hub: &Hub) {
+    let (Ok(projects), Ok(room)) = (
+        std::env::var("CLAUDO_BENCHMARKS"),
+        std::env::var("CLAUDO_PARLEY_ROOM"),
+    ) else {
+        return;
+    };
+    let projects: Vec<String> = projects
+        .split(',')
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+        .map(str::to_string)
+        .collect();
+    claudo_core::benchmarks::spawn(hub.feed("benchmarks"), room, projects);
 }
 
 async fn team_socket(ws: WebSocketUpgrade, State(hub): State<Hub>) -> impl IntoResponse {
@@ -146,6 +165,7 @@ async fn serve() {
         claudo_core::dibs::spawn(hub.feed("dibs"));
     }
     claudo_core::transcripts::spawn(hub.notes("transcripts"), hub.feed("subagents"));
+    benchmarks(&hub);
     hub.serve(&machine_socket());
     let others = std::env::var("CLAUDO_MACHINES").unwrap_or_default();
     let others = others

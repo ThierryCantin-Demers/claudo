@@ -3,4 +3,5 @@
 //! Nothing here knows a toolkit; colours are plain RGB.
 
 pub mod agents;
+pub mod benchmarks;
 pub mod machines;

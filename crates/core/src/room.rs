@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
-    DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent,
+    Benchmark, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -28,6 +28,7 @@ pub struct Room {
     dibs: Vec<DibsMachine>,
     /// How they are watched.
     dibs_watch: Option<DibsWatch>,
+    benchmarks: Vec<Benchmark>,
 }
 
 impl Room {
@@ -43,6 +44,18 @@ impl Room {
         if let Some(watch) = &self.dibs_watch {
             self.clients
                 .to(client, ServerEvent::DibsWatch(watch.clone()));
+        }
+        if !self.benchmarks.is_empty() {
+            self.clients
+                .to(client, ServerEvent::Benchmarks(self.benchmarks.clone()));
+        }
+    }
+
+    fn set_benchmarks(&mut self, benchmarks: Vec<Benchmark>) {
+        if benchmarks != self.benchmarks {
+            self.clients
+                .send(ServerEvent::Benchmarks(benchmarks.clone()));
+            self.benchmarks = benchmarks;
         }
     }
 
@@ -246,6 +259,11 @@ impl Feed {
     /// The dibs machines as the last look found them.
     pub fn dibs(&self, machines: Vec<DibsMachine>) {
         self.room.lock().unwrap().set_dibs(machines);
+    }
+
+    /// The team's benchmarks as the last look found them.
+    pub fn benchmarks(&self, benchmarks: Vec<Benchmark>) {
+        self.room.lock().unwrap().set_benchmarks(benchmarks);
     }
 
     /// How the dibs machines are watched.

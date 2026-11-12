@@ -2371,6 +2371,7 @@ mod app {
                 ServerEvent::Room(_)
                 | ServerEvent::Dibs(_)
                 | ServerEvent::DibsWatch(_)
+                | ServerEvent::Benchmarks(_)
                 | ServerEvent::LookOnly
                 | ServerEvent::DibsAnswer { .. } => {}
                 ServerEvent::Hello { version } => {

@@ -9,6 +9,7 @@ use egui_tiles::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::benchmarks::Benchmarks;
 use crate::machines::Machines;
 use crate::room::Room;
 
@@ -22,6 +23,7 @@ const ZOOMS: std::ops::RangeInclusive<u8> = 5..=15;
 pub enum Pane {
     Agents,
     Machines,
+    Benchmarks,
 }
 
 pub struct Desk {
@@ -34,6 +36,12 @@ pub struct Desk {
 struct Zoom {
     agents: u8,
     machines: u8,
+    #[serde(default = "whole")]
+    benchmarks: u8,
+}
+
+fn whole() -> u8 {
+    10
 }
 
 impl Default for Zoom {
@@ -41,6 +49,7 @@ impl Default for Zoom {
         Self {
             agents: 10,
             machines: 10,
+            benchmarks: 10,
         }
     }
 }
@@ -50,6 +59,7 @@ impl Zoom {
         match pane {
             Pane::Agents => &mut self.agents,
             Pane::Machines => &mut self.machines,
+            Pane::Benchmarks => &mut self.benchmarks,
         }
     }
 }
@@ -63,6 +73,7 @@ impl Desk {
                     .iter()
                     .all(|pane| tree.tiles.find_pane(pane).is_some())
             })
+            .map(with_benchmarks)
             .unwrap_or_else(laid_out);
         let zoom = storage
             .and_then(|storage| eframe::get_value(storage, ZOOM_KEY))
@@ -81,10 +92,12 @@ impl Desk {
         ui: &mut egui::Ui,
         room: &mut Room,
         machines: &mut Machines,
+        benchmarks: &mut Benchmarks,
     ) -> Vec<Command> {
         let mut panes = Panes {
             room,
             machines,
+            benchmarks,
             zoom: &mut self.zoom,
             sent: Vec::new(),
         };
@@ -94,21 +107,37 @@ impl Desk {
     }
 }
 
-/// The agents on the left, wider, and the machines on the right.
+/// The agents on the left, wider, and the machines on the right, the benchmarks a tab
+/// beside them.
 fn laid_out() -> Tree<Pane> {
     let mut tiles = Tiles::default();
     let agents = tiles.insert_pane(Pane::Agents);
     let machines = tiles.insert_pane(Pane::Machines);
-    let mut linear = Linear::new(LinearDir::Horizontal, vec![agents, machines]);
+    let benchmarks = tiles.insert_pane(Pane::Benchmarks);
+    let right = tiles.insert_tab_tile(vec![machines, benchmarks]);
+    let mut linear = Linear::new(LinearDir::Horizontal, vec![agents, right]);
     linear.shares.set_share(agents, 3.0);
-    linear.shares.set_share(machines, 2.0);
+    linear.shares.set_share(right, 2.0);
     let root = tiles.insert_container(linear);
     Tree::new("desk", root, tiles)
+}
+
+/// A layout kept from before there were benchmarks, with them added beside its root.
+fn with_benchmarks(mut tree: Tree<Pane>) -> Tree<Pane> {
+    if tree.tiles.find_pane(&Pane::Benchmarks).is_some() {
+        return tree;
+    }
+    let benchmarks = tree.tiles.insert_pane(Pane::Benchmarks);
+    if let Some(Tile::Container(root)) = tree.root().and_then(|root| tree.tiles.get_mut(root)) {
+        root.add_child(benchmarks);
+    }
+    tree
 }
 
 struct Panes<'a> {
     room: &'a mut Room,
     machines: &'a mut Machines,
+    benchmarks: &'a mut Benchmarks,
     zoom: &'a mut Zoom,
     sent: Vec<Command>,
 }
@@ -118,6 +147,7 @@ impl Panes<'_> {
         match pane {
             Pane::Agents => self.room.ui(ui),
             Pane::Machines => self.sent.extend(self.machines.ui(ui)),
+            Pane::Benchmarks => self.benchmarks.ui(ui),
         }
     }
 }
@@ -188,6 +218,7 @@ impl Behavior<Pane> for Panes<'_> {
         match pane {
             Pane::Agents => "Agents".into(),
             Pane::Machines => "Machines".into(),
+            Pane::Benchmarks => "Benchmarks".into(),
         }
     }
 

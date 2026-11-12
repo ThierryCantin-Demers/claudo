@@ -319,6 +319,12 @@ fn install_daemon(others: &[String], no_dibs: bool) -> Result<(), String> {
     if no_dibs {
         environment.push("CLAUDO_DIBS=off".to_string());
     }
+    // Which benchmarks the page shows, as the installing shell says.
+    for name in ["CLAUDO_BENCHMARKS", "CLAUDO_PARLEY_ROOM"] {
+        if let Ok(value) = env::var(name) {
+            environment.push(format!("{name}={value}"));
+        }
+    }
     if !others.is_empty() {
         environment.push(format!("CLAUDO_MACHINES={}", others.join(",")));
         // ssh from the service reaches the other computers with the keys of this session's agent.

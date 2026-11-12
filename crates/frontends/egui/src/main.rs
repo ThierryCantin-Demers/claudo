@@ -11,6 +11,7 @@ use claudo_protocol::{
 };
 use claudo_transport::{Transport, connect};
 
+mod benchmarks;
 mod desk;
 mod machines;
 mod meters;
@@ -186,6 +187,9 @@ struct ClaudoApp {
     page: Page,
     room: room::Room,
     machines: machines::Machines,
+    benchmarks: benchmarks::Benchmarks,
+    /// On a page for looking only, the benchmarks rather than the machines.
+    team_benchmarks: bool,
     desk: desk::Desk,
     /// Whether a native window keeps its title bar, and what the window was last told.
     title_bar: bool,
@@ -253,6 +257,8 @@ impl ClaudoApp {
             look_only: false,
             nudge: 0,
             machines: machines::Machines::new(storage),
+            benchmarks: benchmarks::Benchmarks::default(),
+            team_benchmarks: false,
         }
     }
 
@@ -650,6 +656,7 @@ impl ClaudoApp {
                 ServerEvent::Room(event) => self.room.apply(event),
                 ServerEvent::Dibs(machines) => self.machines.heard(machines),
                 ServerEvent::DibsWatch(watch) => self.machines.watch = Some(watch),
+                ServerEvent::Benchmarks(list) => self.benchmarks.heard(list),
                 ServerEvent::LookOnly => {
                     self.look_only = true;
                     self.machines.look_only = true;
@@ -792,11 +799,21 @@ impl ClaudoApp {
             }
             if self.look_only {
                 ui.horizontal(|ui| {
-                    ui.strong("Shared machines");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Arranging them is this page's own; the daemon hears nothing of it.
-                        let _ = self.machines.menu(ui);
-                    });
+                    match self.benchmarks.any() {
+                        true => {
+                            ui.selectable_value(&mut self.team_benchmarks, false, "Machines");
+                            ui.selectable_value(&mut self.team_benchmarks, true, "Benchmarks");
+                        }
+                        false => {
+                            ui.strong("Shared machines");
+                        }
+                    }
+                    if !self.team_benchmarks {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Arranging them is this page's own; the daemon hears nothing of it.
+                            let _ = self.machines.menu(ui);
+                        });
+                    }
                 });
                 return;
             }
@@ -808,14 +825,20 @@ impl ClaudoApp {
         // A machine running only Codex agents never has Claude ready.
         if self.look_only {
             egui::CentralPanel::default().show(ui, |ui| {
-                let _ = self.machines.ui(ui);
+                match self.team_benchmarks && self.benchmarks.any() {
+                    true => self.benchmarks.ui(ui),
+                    false => {
+                        let _ = self.machines.ui(ui);
+                    }
+                }
             });
             return;
         }
         if self.page == Page::Room {
             let sent = egui::CentralPanel::default()
                 .show(ui, |ui| {
-                    self.desk.ui(ui, &mut self.room, &mut self.machines)
+                    self.desk
+                        .ui(ui, &mut self.room, &mut self.machines, &mut self.benchmarks)
                 })
                 .inner;
             for command in sent {
