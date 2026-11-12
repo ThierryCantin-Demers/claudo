@@ -486,6 +486,11 @@ wrote it.
   that watch each other echo nothing: dibs jobs, which both see, would otherwise outlive
   their end. An `Act` on a node another computer shows goes to that computer's daemon, and
   its `Failed` back to the tab that asked.
+- **The room in COSMIC** (`cosmic/src/app/room.rs`): a page, opened by Room under the sidebar,
+  that links to the daemon's room socket once a window shows it (`connect_room`, the host
+  `--on` names or this computer). Its machines are drawn like the page's, from
+  `claudo-room` (`crates/room`), the toolkit-free crate both frontends share for what the
+  room shows: arrangement, traces, metric wording and colours.
 - **The whole room for apps**: the daemon also serves on `$XDG_RUNTIME_DIR/claudo-room.sock`
   (mode 0600) what a page hears, each line a `Command` in or a `ServerEvent` out, and
   `claudo-daemon --room-bridge` joins it to stdin and stdout, so `transport::connect_room`

@@ -837,6 +837,8 @@ mod app {
         /// A conversation appears in at most one tile, so one view each is enough.
         views: HashMap<ConversationId, ConversationView>,
         windows: HashMap<window::Id, WindowLayout>,
+        /// The daemon's control room, linked once a window shows it.
+        room: room::Room,
         /// The window the message being handled came from; a message from no window, such
         /// as a backend event or a popup menu's, goes with the last one that sent any.
         current: window::Id,
@@ -924,6 +926,7 @@ mod app {
         Chat,
         Settings,
         Sessions,
+        Room,
     }
 
     pub struct Flags {
@@ -1068,6 +1071,7 @@ mod app {
         In(window::Id, Box<Message>),
         Connected(Commands),
         Events(Vec<ServerEvent>),
+        Room(room::RoomMessage),
         /// Animation frame while text is being revealed.
         Frame,
         /// Animation frame for the activity indicators.
@@ -2723,10 +2727,18 @@ mod app {
                     .into_iter()
                     .chain(self.usage())
                     .chain([widget::Row::with_children(
-                        [widget::button::text("Settings")
-                            .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
-                            .on_press(Message::SetPage(Page::Settings))
-                            .into()]
+                        [
+                            widget::button::text("Settings")
+                                .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
+                                .on_press(Message::SetPage(Page::Settings))
+                                .into(),
+                            widget::button::text("Room")
+                                .leading_icon(widget::icon::from_name(
+                                    "utilities-system-monitor-symbolic",
+                                ))
+                                .on_press(Message::SetPage(Page::Room))
+                                .into(),
+                        ]
                         .into_iter()
                         .chain(self.restart_button(w))
                         .collect::<Vec<_>>(),
@@ -4927,6 +4939,7 @@ mod app {
                 models: Vec::new(),
                 conversations: Vec::new(),
                 views: HashMap::new(),
+                room: room::Room::new(),
                 windows: HashMap::from([(
                     main,
                     WindowLayout {
@@ -5011,6 +5024,9 @@ mod app {
             ];
             #[cfg(feature = "hot")]
             subscriptions.push(named("hot-patches", hot_patches));
+            if self.room.wanted {
+                subscriptions.push(named("room", room::worker));
+            }
             let drag = self.dragging().map(|(_, drag)| drag);
             if matches!(drag, Some(Drag::Tile { .. }))
                 || self.selection.as_ref().is_some_and(|s| s.dragging)
@@ -5060,6 +5076,9 @@ mod app {
                         self.quota_asked = true;
                         self.cmd(Command::GetUsage);
                     }
+                }
+                Message::Room(message) => {
+                    self.room.update(message);
                 }
                 Message::Events(evs) => {
                     for ev in evs {
@@ -5691,6 +5710,7 @@ mod app {
                     self.new_conversation(placement);
                 }
                 Message::SetPage(page) => {
+                    self.room.wanted |= page == Page::Room;
                     self.layout_mut().page = page;
                     self.persist();
                 }
@@ -6029,6 +6049,7 @@ mod app {
             let title: Option<Element<Message>> = match layout.page {
                 Page::Settings => Some(widget::text::heading("Settings").into()),
                 Page::Sessions => Some(widget::text::heading("Claude Code sessions").into()),
+                Page::Room => Some(widget::text::heading("Control room").into()),
                 Page::Chat if layout.tiles.len() == 1 => self.focused(w).map(|id| {
                     if self.renaming(id, TitleAt::Header) {
                         self.rename_input(Length::Fixed(360.0))
@@ -6053,6 +6074,15 @@ mod app {
                 Page::Chat => self.tiles(w),
                 Page::Settings => self.settings_page(),
                 Page::Sessions => self.sessions_page(),
+                Page::Room => {
+                    let window = layout.size.map_or(1200.0, |(width, _)| width);
+                    let sidebar = if layout.sidebar_open {
+                        layout.sidebar_width
+                    } else {
+                        0.0
+                    };
+                    self.room.view(self.zoom, window - sidebar)
+                }
             };
             let mut columns = Vec::new();
             if layout.sidebar_open {
@@ -6302,6 +6332,7 @@ mod app {
     mod placement;
     pub mod remote;
     mod review;
+    mod room;
     mod scroll;
     mod selectable;
     mod sessions;

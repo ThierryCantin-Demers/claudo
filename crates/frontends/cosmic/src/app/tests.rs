@@ -2747,10 +2747,7 @@ impl Harness {
             }
         }
         self.frame(|ui, renderer| {
-            let mut find = Find {
-                text,
-                found: None,
-            };
+            let mut find = Find { text, found: None };
             ui.operate(renderer, &mut black_box(&mut find));
             find.found
         })
