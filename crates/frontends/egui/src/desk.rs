@@ -3,8 +3,7 @@
 
 use claudo_protocol::Command;
 use egui_tiles::{
-    Behavior, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId, Tiles, Tree,
-    UiResponse,
+    Behavior, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId, Tiles, Tree, UiResponse,
 };
 use serde::{Deserialize, Serialize};
 

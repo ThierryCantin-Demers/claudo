@@ -5,13 +5,16 @@ use std::collections::{HashMap, VecDeque};
 
 use dibstop_view::dibs_format::status::{GpuMetrics, Metrics, Status};
 use dibstop_view::item::Item;
-use egui::{Color32, Rect, RichText, Sense, Stroke, Ui, vec2};
+use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, Vec2, vec2};
 
 /// Looks kept for each trace: ten minutes at the default poll.
 const KEPT: usize = 60;
 
-const METER: f32 = 96.0;
-const ROW: f32 = 14.0;
+const CPU_GRAPH: f32 = 40.0;
+const BAR: f32 = 16.0;
+/// A card's panel, which several share a row in.
+const CARD: f32 = 210.0;
+const CARD_GRAPH: f32 = 30.0;
 
 /// One machine's last looks, for the traces.
 #[derive(Default)]
@@ -53,41 +56,47 @@ fn push(trace: &mut VecDeque<f32>, value: f32) {
     trace.push_back(value.clamp(0.0, 1.0));
 }
 
-/// The CPU, memory and each card awake, one row each in aligned columns, then the sleeping
-/// cards together. A card says which running jobs are on it.
+/// The CPU as a graph of its last looks and the memory as a bar across the cell, then a panel
+/// per card awake, each with its use as a graph, its memory as a bar and the job on it, as
+/// btop draws them; the sleeping cards together after.
 pub fn ui(ui: &mut Ui, status: &Status, history: &History, jobs: &[Item]) {
     let metrics = status.metrics.as_ref();
+    let width = ui.available_width();
+    let busy = metrics
+        .and_then(|metrics| metrics.cpu_busy_permille)
+        .map(|busy| busy as f32 / 1000.0);
+    let load = format!("load {:.1}/{}", status.load as f32 / 100.0, status.cores);
+    let over = match busy {
+        Some(busy) => format!("CPU {}   {load}", percent(busy)),
+        None => format!("CPU   {load}"),
+    };
+    graph(ui, vec2(width, CPU_GRAPH), &history.cpu, busy, &over);
+    if let Some((used, total)) = metrics.and_then(memory) {
+        let share = used as f32 / total.max(1) as f32;
+        bar(
+            ui,
+            vec2(width, BAR),
+            share,
+            &format!("Mem {}   {}", percent(share), gib(used, total)),
+        );
+    }
     let gpus = metrics.map_or(&[][..], |metrics| &metrics.gpus[..]);
     let (asleep, awake): (Vec<&GpuMetrics>, Vec<&GpuMetrics>) =
         gpus.iter().partition(|gpu| gpu.suspended);
-    egui::Grid::new("meters")
-        .num_columns(8)
-        .spacing(vec2(8.0, 3.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new("CPU").strong());
-            let busy = metrics
-                .and_then(|metrics| metrics.cpu_busy_permille)
-                .map(|busy| busy as f32 / 1000.0);
-            meter(ui, busy, Some(&history.cpu), accent(ui));
-            ui.label(busy.map_or(String::new(), percent));
-            ui.weak(format!(
-                "load {:.1}/{}",
-                status.load as f32 / 100.0,
-                status.cores
-            ));
-            ui.end_row();
-            if let Some((used, total)) = metrics.and_then(memory) {
-                let share = used as f32 / total.max(1) as f32;
-                ui.label(RichText::new("Mem").strong());
-                meter(ui, Some(share), None, filling(ui, share));
-                ui.label(percent(share));
-                ui.label(gib(used, total));
-                ui.end_row();
-            }
-            for gpu in awake {
-                card(ui, gpu, history.gpus.get(&gpu.pci), jobs);
-            }
-        });
+    if !awake.is_empty() {
+        ui.add_space(4.0);
+        // As many panels a row as fit, sharing its width evenly.
+        let gap = ui.spacing().item_spacing.x;
+        let per_row = (((width + gap) / (CARD + gap)).floor() as usize).clamp(1, awake.len());
+        let panel = (width - gap * (per_row - 1) as f32) / per_row as f32;
+        for row in awake.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                for gpu in row {
+                    card(ui, panel, gpu, history.gpus.get(&gpu.pci), jobs);
+                }
+            });
+        }
+    }
     if !asleep.is_empty() {
         let names: Vec<String> = asleep.iter().map(|gpu| name(gpu)).collect();
         ui.weak(format!("asleep: {}", names.join(", ")))
@@ -99,7 +108,7 @@ fn memory(metrics: &Metrics) -> Option<(u64, u64)> {
     Some((metrics.mem_used?, metrics.mem_total?))
 }
 
-fn card(ui: &mut Ui, gpu: &GpuMetrics, points: Option<&VecDeque<f32>>, jobs: &[Item]) {
+fn card(ui: &mut Ui, width: f32, gpu: &GpuMetrics, points: Option<&VecDeque<f32>>, jobs: &[Item]) {
     let on: Vec<&Item> = jobs
         .iter()
         .filter(|job| job.holding)
@@ -108,63 +117,77 @@ fn card(ui: &mut Ui, gpu: &GpuMetrics, points: Option<&VecDeque<f32>>, jobs: &[I
             alias(gpu).is_some_and(|alias| device == Some(alias))
         })
         .collect();
-    let named = RichText::new(name(gpu)).strong();
-    ui.label(match on.is_empty() {
-        true => named,
-        false => named.color(ui.visuals().warn_fg_color),
-    })
-    .on_hover_text(format!(
-        "{}\n{}",
-        gpu.name.as_deref().unwrap_or("no name from its driver"),
-        gpu.pci
-    ));
-    let util = gpu.util_pct.map(|util| util as f32 / 100.0);
-    meter(ui, util, points, accent(ui));
-    ui.label(util.map_or(String::new(), percent));
-    match (gpu.mem_used, gpu.mem_total) {
-        (Some(used), Some(total)) => {
-            let share = used as f32 / total.max(1) as f32;
-            let colour = match share {
-                s if s >= 0.85 => filling(ui, s),
-                _ => ui.visuals().text_color(),
-            };
-            ui.label(RichText::new(gib(used, total)).color(colour));
-        }
-        _ => {
-            ui.label("");
-        }
-    }
-    match gpu.temp_c {
-        Some(temp) => {
-            let colour = match temp {
-                t if t >= 90 => ui.visuals().error_fg_color,
-                t if t >= 80 => ui.visuals().warn_fg_color,
-                _ => ui.visuals().weak_text_color(),
-            };
-            ui.label(RichText::new(format!("{temp}°C")).color(colour));
-        }
-        None => {
-            ui.label("");
-        }
-    }
-    ui.weak(gpu.power_mw.map_or(String::new(), |power| format!("{} W", power / 1000)));
-    ui.weak(gpu.clock_mhz.map_or(String::new(), |clock| format!("{clock} MHz")));
-    ui.horizontal(|ui| {
-        for reason in gpu.throttle.iter().flatten() {
-            if let Some((words, alarm)) = held_by(reason) {
-                let colour = match alarm {
-                    true => ui.visuals().error_fg_color,
-                    false => ui.visuals().warn_fg_color,
-                };
-                ui.label(RichText::new(words).color(colour));
+    let busy = ui.visuals().warn_fg_color;
+    let stroke = match on.is_empty() {
+        true => ui.visuals().widgets.noninteractive.bg_stroke,
+        false => egui::Stroke::new(1.5, busy),
+    };
+    egui::Frame::new()
+        .stroke(stroke)
+        .corner_radius(4.0)
+        .inner_margin(4)
+        .show(ui, |ui| {
+            let inner = width - 8.0 - 2.0 * stroke.width;
+            ui.set_width(inner);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                let named = RichText::new(name(gpu)).strong();
+                ui.add(
+                    egui::Label::new(match on.is_empty() {
+                        true => named,
+                        false => named.color(busy),
+                    })
+                    .truncate(),
+                )
+                .on_hover_text(format!(
+                    "{}\n{}",
+                    gpu.name.as_deref().unwrap_or("no name from its driver"),
+                    gpu.pci
+                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(temp) = gpu.temp_c {
+                        let share = (temp as f32 - 30.0) / 60.0;
+                        ui.label(RichText::new(format!("{temp}°C")).color(level(share)));
+                    }
+                });
+            });
+            let util = gpu.util_pct.map(|util| util as f32 / 100.0);
+            let empty = VecDeque::new();
+            let over = util.map_or(String::new(), percent);
+            graph(
+                ui,
+                vec2(inner, CARD_GRAPH),
+                points.unwrap_or(&empty),
+                util,
+                &over,
+            );
+            if let (Some(used), Some(total)) = (gpu.mem_used, gpu.mem_total) {
+                let share = used as f32 / total.max(1) as f32;
+                bar(ui, vec2(inner, BAR - 2.0), share, &gib(used, total));
             }
-        }
-        for job in on {
-            let label = format!("← {}", job.label.as_str());
-            ui.label(RichText::new(label).color(ui.visuals().warn_fg_color));
-        }
-    });
-    ui.end_row();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if let Some(power) = gpu.power_mw {
+                    ui.weak(format!("{} W", power / 1000));
+                }
+                if let Some(clock) = gpu.clock_mhz {
+                    ui.weak(format!("{clock} MHz"));
+                }
+                for reason in gpu.throttle.iter().flatten() {
+                    if let Some((words, alarm)) = held_by(reason) {
+                        let colour = match alarm {
+                            true => ui.visuals().error_fg_color,
+                            false => busy,
+                        };
+                        ui.label(RichText::new(words).color(colour));
+                    }
+                }
+            });
+            for job in on {
+                let label = RichText::new(format!("← {}", job.label.as_str())).color(busy);
+                ui.add(egui::Label::new(label).truncate());
+            }
+        });
 }
 
 /// What `--device` names it by, which a job's `device` is.
@@ -183,7 +206,10 @@ fn name(gpu: &GpuMetrics) -> String {
             .trim_start_matches("GeForce ")
             .to_string(),
         None => {
-            let slot = gpu.pci.split_once(':').map_or(gpu.pci.as_str(), |(_, slot)| slot);
+            let slot = gpu
+                .pci
+                .split_once(':')
+                .map_or(gpu.pci.as_str(), |(_, slot)| slot);
             format!("{:?} {slot}", gpu.vendor).to_lowercase()
         }
     }
@@ -202,40 +228,61 @@ fn held_by(reason: &str) -> Option<(&'static str, bool)> {
     }
 }
 
-/// How full it is now, and the trace of the last looks drawn over it.
-fn meter(ui: &mut Ui, share: Option<f32>, points: Option<&VecDeque<f32>>, fill: Color32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(METER, ROW), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, ui.visuals().widgets.inactive.bg_fill);
-    if let Some(share) = share {
-        let width = rect.width() * share.clamp(0.0, 1.0);
-        let now = Rect::from_min_size(rect.min, vec2(width, ROW));
-        painter.rect_filled(now, 2.0, fill.gamma_multiply(0.55));
-    }
-    let Some(points) = points.filter(|points| points.len() >= 2) else {
-        return;
+/// The last looks as columns, each as tall and as hot as its value, with `over` written on
+/// top; `now` stands in until there are looks to draw.
+fn graph(ui: &mut Ui, size: Vec2, points: &VecDeque<f32>, now: Option<f32>, over: &str) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    let column = rect.width() / KEPT as f32;
+    let single = VecDeque::from_iter(now);
+    let points = match points.is_empty() {
+        true => &single,
+        false => points,
     };
-    let step = rect.width() / (KEPT - 1) as f32;
-    let start = rect.right() - step * (points.len() - 1) as f32;
-    let line: Vec<egui::Pos2> = points
-        .iter()
-        .enumerate()
-        .map(|(i, value)| {
-            egui::pos2(start + step * i as f32, rect.bottom() - 1.0 - value * (rect.height() - 2.0))
-        })
-        .collect();
-    painter.line(line, Stroke::new(1.5, ui.visuals().strong_text_color()));
+    for (i, value) in points.iter().rev().enumerate() {
+        let right = rect.right() - column * i as f32;
+        let height = (value * rect.height()).max(if *value > 0.0 { 1.0 } else { 0.0 });
+        let bar = Rect::from_min_max(
+            egui::pos2(right - column, rect.bottom() - height),
+            egui::pos2(right, rect.bottom()),
+        );
+        painter.rect_filled(bar, 0.0, level(*value));
+    }
+    caption(&painter, rect, over);
 }
 
-fn accent(ui: &Ui) -> Color32 {
-    ui.visuals().selection.bg_fill
+/// How full it is, the colour of how full, with `over` written on it.
+fn bar(ui: &mut Ui, size: Vec2, share: f32, over: &str) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    let width = rect.width() * share.clamp(0.0, 1.0);
+    let full = Rect::from_min_size(rect.min, vec2(width, rect.height()));
+    painter.rect_filled(full, 3.0, level(share).gamma_multiply(0.8));
+    caption(&painter, rect, over);
 }
 
-fn filling(ui: &Ui, share: f32) -> Color32 {
-    match share {
-        s if s >= 0.95 => ui.visuals().error_fg_color,
-        s if s >= 0.85 => ui.visuals().warn_fg_color,
-        _ => accent(ui),
+/// Text over a graph, with a dark edge so it reads over any colour.
+fn caption(painter: &egui::Painter, rect: Rect, text: &str) {
+    let font = FontId::proportional((rect.height() - 2.0).clamp(10.0, 13.0));
+    let at = rect.left_top() + vec2(5.0, 1.0);
+    let shadow = Color32::from_black_alpha(200);
+    for offset in [vec2(1.0, 1.0), vec2(-1.0, 0.0), vec2(0.0, -1.0)] {
+        painter.text(at + offset, Align2::LEFT_TOP, text, font.clone(), shadow);
+    }
+    painter.text(at, Align2::LEFT_TOP, text, font, Color32::WHITE);
+}
+
+/// btop's ramp: green when low, yellow halfway, red when full.
+fn level(share: f32) -> Color32 {
+    let green = Color32::from_rgb(70, 190, 100);
+    let yellow = Color32::from_rgb(225, 195, 60);
+    let red = Color32::from_rgb(225, 75, 65);
+    let share = share.clamp(0.0, 1.0);
+    match share < 0.5 {
+        true => green.lerp_to_gamma(yellow, share * 2.0),
+        false => yellow.lerp_to_gamma(red, (share - 0.5) * 2.0),
     }
 }
 

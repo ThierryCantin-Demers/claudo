@@ -94,7 +94,10 @@ impl Machines {
             .collect();
         let at = |name: &String| {
             let order = &self.arrangement.order;
-            order.iter().position(|other| other == name).unwrap_or(order.len())
+            order
+                .iter()
+                .position(|other| other == name)
+                .unwrap_or(order.len())
         };
         names.sort_by_key(at);
         names
@@ -122,7 +125,11 @@ impl Machines {
             .show(ui, |ui| {
                 let width = ui.available_width();
                 let fit = ((width + GAP) / (NARROWEST + GAP)).floor() as usize;
-                let columns = self.arrangement.columns.unwrap_or(fit).clamp(1, shown.len());
+                let columns = self
+                    .arrangement
+                    .columns
+                    .unwrap_or(fit)
+                    .clamp(1, shown.len());
                 let cell = (width - GAP * (columns - 1) as f32) / columns as f32;
                 for row in shown.chunks(columns) {
                     ui.horizontal_top(|ui| {
@@ -138,7 +145,10 @@ impl Machines {
                                 let rect = framed.response.rect;
                                 let clicked = ui.input(|input| {
                                     input.pointer.primary_pressed()
-                                        && input.pointer.interact_pos().is_some_and(|at| rect.contains(at))
+                                        && input
+                                            .pointer
+                                            .interact_pos()
+                                            .is_some_and(|at| rect.contains(at))
                                 });
                                 if clicked {
                                     self.active = Some(name.clone());
@@ -201,11 +211,17 @@ impl Machines {
                     }
                 }
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
+                    if ui
+                        .add_enabled(i > 0, egui::Button::new("↑").small())
+                        .clicked()
+                    {
                         moved = Some((i, i - 1));
                     }
                     let last = i + 1 < ordered.len();
-                    if ui.add_enabled(last, egui::Button::new("↓").small()).clicked() {
+                    if ui
+                        .add_enabled(last, egui::Button::new("↓").small())
+                        .clicked()
+                    {
                         moved = Some((i, i + 1));
                     }
                 });
@@ -426,7 +442,8 @@ impl Tile {
                     ui.label(RichText::new(it.label.as_str()).color(hue).strong());
                     ui.label(RichText::new(&it.agent).color(hue));
                     if let Some(device) = &it.device {
-                        let card = RichText::new(device.as_str()).color(Color32::from_rgb(200, 110, 200));
+                        let card =
+                            RichText::new(device.as_str()).color(Color32::from_rgb(200, 110, 200));
                         ui.label(card);
                     }
                     if let Some(batch) = &it.batch {
