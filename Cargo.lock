@@ -1874,7 +1874,7 @@ dependencies = [
 [[package]]
 name = "dibs-format"
 version = "0.1.0"
-source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#f9b3f16e92ca413ee27341e02711140b90f49a6a"
+source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#b9d48c48f0d4b3d87cbd0b343b185ef0a881177f"
 dependencies = [
  "libc",
  "serde",
@@ -1884,7 +1884,7 @@ dependencies = [
 [[package]]
 name = "dibstop-view"
 version = "0.1.0"
-source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#f9b3f16e92ca413ee27341e02711140b90f49a6a"
+source = "git+https://github.com/ThierryCantin-Demers/dibs?branch=master#b9d48c48f0d4b3d87cbd0b343b185ef0a881177f"
 dependencies = [
  "dibs-format",
  "egui",

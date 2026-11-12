@@ -108,8 +108,7 @@ impl Tile {
         asked = asked.or(self.header(ui, machine));
         match &machine.status {
             Some(status) => {
-                meters::host(ui, status, history);
-                meters::cards(ui, status, history, &jobs);
+                meters::ui(ui, status, history, &jobs);
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -237,17 +236,10 @@ impl Tile {
                     if !it.holding {
                         ui.weak(it.slot.replace("queued ", "#"));
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let time = Span(it.time).to_string();
-                        match it.holding {
-                            true => ui.label(format!("for {time}")),
-                            false => ui.weak(format!("waited {time}")),
-                        };
-                        ui.add(
-                            egui::Label::new(RichText::new(it.label.as_str()).color(hue).strong())
-                                .truncate(),
-                        );
-                    });
+                    ui.add(
+                        egui::Label::new(RichText::new(it.label.as_str()).color(hue).strong())
+                            .truncate(),
+                    );
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -265,6 +257,11 @@ impl Tile {
                     if let Some(rate) = it.rate {
                         ui.weak(format!("{} cpu", cores(rate)));
                     }
+                    let time = Span(it.time).to_string();
+                    match it.holding {
+                        true => ui.label(format!("for {time}")),
+                        false => ui.weak(format!("waited {time}")),
+                    };
                 });
                 if !it.note.is_empty() && !selected {
                     match it.alarm {

@@ -248,7 +248,12 @@ impl Behavior<Pane> for Panes<'_> {
         if !agents || self.names.is_empty() {
             return;
         }
-        ui.menu_button("Machines", |ui| self.menu(tiles, ui));
+        // Several boxes are ticked in one visit, so only a click outside closes it.
+        let config = egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        egui::containers::menu::MenuButton::new("Machines")
+            .config(config)
+            .ui(ui, |ui| self.menu(tiles, ui));
     }
 
     /// Every pane keeps its tab, which is what it is dragged by.
