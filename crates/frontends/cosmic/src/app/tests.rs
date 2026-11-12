@@ -2842,31 +2842,34 @@ fn messages_not_yet_taken_at_an_update_stay_queued_in_the_new_build() {
 }
 
 #[test]
-fn a_closed_sidebar_shows_an_update_is_ready_and_still_opens() {
+fn a_closed_sidebar_puts_update_in_the_header() {
     let mut app = two_tiles();
     app.layout_mut().sidebar_open = false;
     app.update_ready = true;
     let mut renderer = Harness::new(two_tiles()).renderer;
-    let header =
-        Element::from(widget::Row::with_children(app.header_start())).map(
-            |message| match message {
+    let mut clicked = |x: f32| {
+        let header = Element::from(widget::Row::with_children(app.header_start())).map(|message| {
+            match message {
                 Message::In(_, inner) => *inner,
                 other => other,
-            },
+            }
+        });
+        let mut ui = UserInterface::build(header, WINDOW, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &[button(true), button(false)],
+            mouse::Cursor::Available(Point::new(x, 12.0)),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
         );
-    let mut ui = UserInterface::build(header, WINDOW, Cache::default(), &mut renderer);
-    let mut messages = Vec::new();
-    let _ = ui.update(
-        &[button(true), button(false)],
-        mouse::Cursor::Available(Point::new(12.0, 12.0)),
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut messages,
-    );
-    assert!(
-        matches!(messages[..], [Message::ToggleSidebar]),
-        "the dot leaves the toggle clickable: {messages:?}"
-    );
+        messages
+    };
+    assert!(matches!(clicked(12.0)[..], [Message::ToggleSidebar]));
+    let restarts = (0..60)
+        .flat_map(|step| clicked(step as f32 * 8.0))
+        .any(|message| matches!(message, Message::Restart));
+    assert!(restarts, "no Update in the header");
 }
 
 /// 42% of the session and 86% of the week used, reported three minutes ago.
@@ -2952,7 +2955,7 @@ fn header_usage_snapshot() {
 
 #[test]
 #[ignore = "writes images; run with --ignored"]
-fn update_dot_snapshot() {
+fn update_in_header_snapshot() {
     let mut app = two_tiles();
     app.layout_mut().sidebar_open = false;
     app.update_ready = true;
@@ -2960,7 +2963,7 @@ fn update_dot_snapshot() {
     let header = widget::container(widget::Row::with_children(app.header_start()))
         .padding(8)
         .into();
-    render_alone(&mut renderer, header, "update-dot");
+    render_alone(&mut renderer, header, "update-in-header");
 }
 
 #[test]

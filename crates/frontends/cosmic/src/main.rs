@@ -2781,40 +2781,29 @@ mod app {
             })
         }
 
-        /// Marked while the sidebar it hides offers to update.
         fn sidebar_toggle(&self, w: window::Id) -> Element<'_, Message> {
-            let open = self.window(w).sidebar_open;
-            let toggle = widget::nav_bar_toggle()
-                .active(open)
-                .on_toggle(Message::ToggleSidebar);
-            if open || !self.update_ready {
-                return toggle.into();
-            }
-            let dot = widget::container(widget::space::horizontal())
-                .class(cosmic::theme::Container::custom(|theme| container::Style {
-                    background: Some(Color::from(theme.cosmic().accent_color()).into()),
-                    border: Border {
-                        radius: 4.0.into(),
-                        ..Border::default()
-                    },
-                    ..container::Style::default()
-                }))
-                .width(Length::Fixed(8.0))
-                .height(Length::Fixed(8.0));
-            widget::tooltip(
-                cosmic::iced::widget::Stack::with_children(vec![
-                    toggle.into(),
-                    // On the corner of the toggle's icon, which sits 16 by 8 inside it.
-                    widget::container(dot)
-                        .align_right(Length::Fill)
-                        .align_top(Length::Fill)
-                        .padding(cosmic::iced::Padding::ZERO.top(4).right(12))
-                        .into(),
-                ]),
-                widget::text("A new build of claudo is installed: Update is in the sidebar"),
-                widget::tooltip::Position::Bottom,
-            )
-            .into()
+            widget::nav_bar_toggle()
+                .active(self.window(w).sidebar_open)
+                .on_toggle(Message::ToggleSidebar)
+                .into()
+        }
+
+        /// Update in the header bar while the sidebar that offers it is closed.
+        fn header_update(&self, w: window::Id) -> Option<Element<'_, Message>> {
+            (self.update_ready && !self.window(w).sidebar_open).then(|| {
+                widget::tooltip(
+                    widget::button::suggested("Update")
+                        .leading_icon(widget::icon::from_name(
+                            "software-update-available-symbolic",
+                        ))
+                        .on_press(Message::Restart),
+                    widget::text(
+                        "A new build of claudo is installed. Restart into it: agents keep working.",
+                    ),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into()
+            })
         }
 
         /// "New chat", with Shift for a new tile, Alt for a new window and a menu for the rest.
@@ -5926,6 +5915,10 @@ mod app {
             );
             start.extend(self.remote_chip());
             start.extend(
+                self.header_update(main)
+                    .map(|update| update.map(move |message| Message::In(main, Box::new(message)))),
+            );
+            start.extend(
                 self.header_usage(main)
                     .map(|usage| usage.map(move |message| Message::In(main, Box::new(message)))),
             );
@@ -5966,6 +5959,9 @@ mod app {
             }
             if let Some(chip) = self.remote_chip() {
                 header = header.start(chip);
+            }
+            if let Some(update) = self.header_update(id) {
+                header = header.start(update);
             }
             if let Some(usage) = self.header_usage(id) {
                 header = header.start(usage);
