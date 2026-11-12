@@ -2,6 +2,7 @@
 //! how they cluster by repository with what each started under it, where each sits on the
 //! map, and what is said about each, in words and colour.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::f32::consts::PI;
 use std::ops::{Add, Div, Mul, Sub};
@@ -421,6 +422,42 @@ fn place<'a>(
             depth + 1,
             placed,
         );
+    }
+}
+
+/// The width the map was last laid out across, in map units, kept while the pane changes
+/// size so the islands stay where they are.
+#[derive(Default)]
+pub struct Steady {
+    across: Cell<Option<f32>>,
+}
+
+/// A kept layout is laid out again once a fresh one would draw this much larger.
+const LARGER: f32 = 1.25;
+/// Or once the pane is this much wider than the layout.
+const WIDER: f32 = 1.6;
+
+impl Steady {
+    /// The map laid out to fit `width` and `screen`, centred across `width`, and the scale it
+    /// is drawn at.
+    pub fn lay_out<'a>(&self, clusters: &[Cluster<'a>], width: f32, screen: f32) -> (Map<'a>, f32) {
+        let fresh = fit(clusters, width, screen);
+        let kept = self.across.get().and_then(|across| {
+            let map = Map::lay_out(clusters, across);
+            let scale = (width / across).min(screen / map.height).min(1.0);
+            let keep = scale * LARGER >= fresh && across * WIDER >= width / fresh;
+            keep.then_some((map, scale, across))
+        });
+        let (mut map, scale, across) = kept.unwrap_or_else(|| {
+            let across = width / fresh;
+            (Map::lay_out(clusters, across), fresh, across)
+        });
+        self.across.set(Some(across));
+        let spare = (width / scale - across).max(0.0) / 2.0;
+        for island in &mut map.islands {
+            island.top.x += spare;
+        }
+        (map, scale)
     }
 }
 
@@ -1119,6 +1156,28 @@ mod tests {
                 "1 dibs job running",
                 "1 subagent running"
             ]
+        );
+    }
+
+    #[test]
+    fn a_pane_resized_a_little_keeps_the_islands_where_they_are() {
+        let nodes: Vec<Node> = (0..6)
+            .map(|i| node(&format!("agent-{i}"), Some(&format!("/src/repo-{i}")), None))
+            .collect();
+        let mut room = Agents::default();
+        room.apply(RoomEvent::Snapshot(nodes));
+        let clusters = room.clusters();
+        let steady = Steady::default();
+        let tops =
+            |map: &Map| -> Vec<f32> { map.islands.iter().map(|island| island.top.y).collect() };
+        let (before, _) = steady.lay_out(&clusters, 900.0, 2000.0);
+        let (after, scale) = steady.lay_out(&clusters, 840.0, 2000.0);
+        assert_eq!(tops(&before), tops(&after));
+        assert!(scale < 1.0);
+        let (wide, _) = steady.lay_out(&clusters, 2400.0, 2000.0);
+        assert!(
+            wide.height < after.height,
+            "a much wider pane lays it out again"
         );
     }
 

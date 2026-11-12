@@ -9,11 +9,10 @@ use claudo_protocol::{
     Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
 };
 use claudo_room::agents::{
-    AGENT, Agents, BADGE_ROW, BADGE_SIZE, CAPTION_REACH, CHILD, Island, LEGEND, Map, PAD,
-    STARTED_GAP, STARTED_ROW, STARTED_SIZE, Shown, Tint, V, agent_colour, ago, badges, checks,
-    ci_counts, codex, dibs_job, fit, hue, kind, legend_kinds, made_by, open_prs, phase,
-    pull_requests, reason, short, started, started_rows, started_word, state, state_tint,
-    thousands,
+    AGENT, Agents, BADGE_ROW, BADGE_SIZE, CAPTION_REACH, CHILD, Island, LEGEND, PAD, STARTED_GAP,
+    STARTED_ROW, STARTED_SIZE, Shown, Steady, Tint, V, agent_colour, ago, badges, checks,
+    ci_counts, codex, dibs_job, hue, kind, legend_kinds, made_by, open_prs, phase, pull_requests,
+    reason, short, started, started_rows, started_word, state, state_tint, thousands,
 };
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2, vec2};
@@ -33,6 +32,7 @@ pub struct Room {
     markdown: CommonMarkCache,
     /// The open pull requests are listed under the summary.
     prs_open: bool,
+    steady: Steady,
 }
 
 impl Room {
@@ -386,8 +386,7 @@ impl Room {
     /// and a pull request's number opens it.
     fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Picked> {
         let clusters = self.agents.clusters();
-        let scale = fit(&clusters, width, screen);
-        let map = Map::lay_out(&clusters, width / scale);
+        let (map, scale) = self.steady.lay_out(&clusters, width, screen);
         let (response, painter) =
             ui.allocate_painter(vec2(width, map.height * scale), Sense::click());
         let origin = response.rect.min;

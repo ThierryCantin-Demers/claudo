@@ -10,7 +10,7 @@ use claudo_protocol::{
     Action as Act, DIBS_POLL, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState,
 };
 use claudo_room::agents::{
-    self as room_agents, Agents, LEGEND, Map, ago, checks, fit, legend_kinds, open_prs, reason,
+    self as room_agents, Agents, LEGEND, Steady, ago, checks, legend_kinds, open_prs, reason,
     state, state_tint,
 };
 use claudo_room::machines::{
@@ -72,6 +72,7 @@ pub struct Room {
     hover: Option<(NodeId, f32, f32)>,
     /// The open pull requests are listed under the summary.
     prs_open: bool,
+    steady: Steady,
 }
 
 #[derive(Debug, Clone)]
@@ -465,8 +466,8 @@ impl Room {
         let clusters = self.agents.clusters();
         // The header bar, this column's padding, and what is above the map.
         let screen = (height - 64.0 - 24.0 - used).max(160.0);
-        let scale = fit(&clusters, width / zoom, screen / zoom) * zoom;
-        let map = Map::lay_out(&clusters, width / scale);
+        let (map, scale) = self.steady.lay_out(&clusters, width / zoom, screen / zoom);
+        let scale = scale * zoom;
         let tall = map.height * scale;
         let canvas: Element<Message> = canvas::Canvas::new(super::room_map::MapView {
             map,
