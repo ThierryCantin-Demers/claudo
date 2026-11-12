@@ -1,20 +1,31 @@
-//! The dibs machines, each in a tile of its own: its state, what its CPU, memory and cards
-//! are doing, and its jobs, with dibstop's actions and keys, which the daemon runs.
+//! The dibs machines, in a grid of equal cells the person arranges: each machine's state, what
+//! its CPU, memory and cards are doing, and its jobs, with dibstop's actions and keys, which
+//! the daemon runs.
 
 use std::collections::HashMap;
 
-use claudo_protocol::{Command, DibsMachine, DibsWatch};
+use claudo_protocol::{Command, DIBS_POLL, DibsMachine, DibsWatch};
 use dibstop_view::action::Action;
 use dibstop_view::dibs_format::{Label, Mode, Span};
 use dibstop_view::item::{Item, Progress as _};
 use dibstop_view::text::{Tone, agent_hue, cores, plain, state_words};
-use egui::{Color32, Key, RichText, Ui};
+use egui::{Color32, Key, Rect, RichText, Ui, vec2};
+use serde::{Deserialize, Serialize};
 
 use crate::meters::{self, History};
+
+const KEY: &str = "machines";
+
+/// The narrowest a cell gets when the columns fit the width, and the shortest, below which
+/// the cells scroll instead.
+const NARROWEST: f32 = 420.0;
+const SHORTEST: f32 = 260.0;
+const GAP: f32 = 8.0;
 
 #[derive(Default)]
 pub struct Machines {
     machines: Vec<DibsMachine>,
+    arrangement: Arrangement,
     tiles: HashMap<String, Tile>,
     histories: HashMap<String, History>,
     /// The machine whose tile takes dibstop's keys: the one last clicked.
@@ -24,10 +35,20 @@ pub struct Machines {
     /// How the daemon watches them, once it says.
     pub watch: Option<DibsWatch>,
     /// The poll the menu's slider is set to while it moves, before the daemon says it took it.
-    pub poll: Option<u64>,
+    poll: Option<u64>,
 }
 
-/// What one machine's tile remembers between frames.
+/// How the person arranged the machines, kept with the page's storage.
+#[derive(Default, Serialize, Deserialize)]
+struct Arrangement {
+    /// The machines in the order shown; one dibs adds later goes last.
+    order: Vec<String>,
+    hidden: Vec<String>,
+    /// None fits as many as the width takes.
+    columns: Option<usize>,
+}
+
+/// What one machine's cell remembers between frames.
 #[derive(Default)]
 struct Tile {
     /// By pid, so the selection follows its job as the cards reorder.
@@ -40,6 +61,20 @@ struct Tile {
 }
 
 impl Machines {
+    pub fn new(storage: Option<&dyn eframe::Storage>) -> Self {
+        let arrangement = storage
+            .and_then(|storage| eframe::get_value(storage, KEY))
+            .unwrap_or_default();
+        Self {
+            arrangement,
+            ..Self::default()
+        }
+    }
+
+    pub fn save(&self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, KEY, &self.arrangement);
+    }
+
     pub fn heard(&mut self, machines: Vec<DibsMachine>) {
         for machine in &machines {
             if let Some(status) = &machine.status {
@@ -52,8 +87,169 @@ impl Machines {
         self.machines = machines;
     }
 
-    pub fn names(&self) -> Vec<String> {
-        self.machines.iter().map(|machine| machine.name.clone()).collect()
+    /// Every machine dibs lists, in the person's order.
+    fn ordered(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .machines
+            .iter()
+            .map(|machine| machine.name.clone())
+            .collect();
+        let at = |name: &String| {
+            let order = &self.arrangement.order;
+            order.iter().position(|other| other == name).unwrap_or(order.len())
+        };
+        names.sort_by_key(at);
+        names
+    }
+
+    /// The machines shown, in a grid of equal cells, and the dibs call the person asked for.
+    pub fn ui(&mut self, ui: &mut Ui) -> Option<Command> {
+        if self.machines.is_empty() {
+            ui.weak("No dibs machines yet: the daemon looks every few seconds, unless dibs is off here.");
+            return None;
+        }
+        let shown: Vec<String> = self
+            .ordered()
+            .into_iter()
+            .filter(|name| !self.arrangement.hidden.contains(name))
+            .collect();
+        if shown.is_empty() {
+            ui.weak("Every machine is hidden: show one from Arrange.");
+            return None;
+        }
+        let width = ui.available_width();
+        let fit = ((width + GAP) / (NARROWEST + GAP)).floor() as usize;
+        let columns = self.arrangement.columns.unwrap_or(fit).clamp(1, shown.len());
+        let rows = shown.len().div_ceil(columns);
+        let gaps = |count: usize| GAP * count.saturating_sub(1) as f32;
+        let cell = vec2(
+            (width - gaps(columns)) / columns as f32,
+            ((ui.available_height() - gaps(rows)) / rows as f32).max(SHORTEST),
+        );
+        let mut asked = None;
+        egui::ScrollArea::vertical()
+            .id_salt("machines")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let height = cell.y * rows as f32 + gaps(rows);
+                let (area, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
+                for (i, name) in shown.iter().enumerate() {
+                    let at = vec2((i % columns) as f32, (i / columns) as f32);
+                    let rect = Rect::from_min_size(area.min + at * (cell + vec2(GAP, GAP)), cell);
+                    ui.painter().rect_stroke(
+                        rect,
+                        4.0,
+                        ui.visuals().widgets.noninteractive.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                    let inner = rect.shrink(6.0);
+                    let mut cell_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(inner)
+                            .id_salt(("machine", name))
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    cell_ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+                    asked = asked.take().or(self.cell(&mut cell_ui, name));
+                }
+            });
+        asked
+    }
+
+    /// Which machines show, in what order and how many columns, which are read for metrics,
+    /// and how often the daemon looks.
+    pub fn menu(&mut self, ui: &mut Ui) -> Vec<Command> {
+        let mut sent = Vec::new();
+        // Several boxes are ticked in one visit, so only a click outside closes it.
+        let config = egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        egui::containers::menu::MenuButton::new("Arrange")
+            .config(config)
+            .ui(ui, |ui| self.arrange(ui, &mut sent));
+        sent
+    }
+
+    fn arrange(&mut self, ui: &mut Ui, sent: &mut Vec<Command>) {
+        let ordered = self.ordered();
+        let watch = self.watch.clone();
+        let mut moved = None;
+        egui::Grid::new("arrange").show(ui, |ui| {
+            ui.weak("");
+            ui.weak("shown");
+            ui.weak("metrics");
+            ui.end_row();
+            for (i, name) in ordered.iter().enumerate() {
+                ui.label(name);
+                let hidden = &mut self.arrangement.hidden;
+                let mut on = !hidden.contains(name);
+                if ui.checkbox(&mut on, "").changed() {
+                    hidden.retain(|other| other != name);
+                    if !on {
+                        hidden.push(name.clone());
+                    }
+                }
+                match &watch {
+                    Some(watch) => {
+                        let mut read = !watch.no_metrics.contains(name);
+                        if ui.checkbox(&mut read, "").changed() {
+                            let mut next = watch.clone();
+                            next.no_metrics.retain(|other| other != name);
+                            if !read {
+                                next.no_metrics.push(name.clone());
+                            }
+                            sent.push(Command::DibsWatch(next));
+                        }
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
+                        moved = Some((i, i - 1));
+                    }
+                    let last = i + 1 < ordered.len();
+                    if ui.add_enabled(last, egui::Button::new("↓").small()).clicked() {
+                        moved = Some((i, i + 1));
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        if let Some((from, to)) = moved {
+            let mut order = ordered.clone();
+            order.swap(from, to);
+            self.arrangement.order = order;
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("columns");
+            let columns = &mut self.arrangement.columns;
+            ui.selectable_value(columns, None, "fit");
+            for count in 1..=4 {
+                ui.selectable_value(columns, Some(count), count.to_string());
+            }
+        });
+        let Some(watch) = watch else {
+            return;
+        };
+        let poll = self.poll.get_or_insert(watch.poll);
+        let slider = egui::Slider::new(poll, DIBS_POLL)
+            .logarithmic(true)
+            .suffix(" s")
+            .text("look every");
+        let slid = ui.add(slider);
+        // Each change makes the daemon look again at once, so a drag sends only where it ends.
+        let settled = slid.drag_stopped() || (slid.changed() && !slid.dragged());
+        if settled && *poll != watch.poll {
+            sent.push(Command::DibsWatch(DibsWatch {
+                poll: *poll,
+                ..watch.clone()
+            }));
+        }
+        if !slid.dragged() && *poll == watch.poll {
+            self.poll = None;
+        }
     }
 
     pub fn answered(&mut self, title: String, body: String) {
@@ -65,7 +261,7 @@ impl Machines {
     }
 
     /// Draws the machine `name`, and returns the dibs call the person asked for.
-    pub fn ui(&mut self, ui: &mut Ui, name: &str) -> Option<Command> {
+    fn cell(&mut self, ui: &mut Ui, name: &str) -> Option<Command> {
         let Some(machine) = self.machines.iter().find(|machine| machine.name == name) else {
             ui.weak("dibs no longer lists this machine.");
             return None;
@@ -129,6 +325,7 @@ impl Tile {
     fn header(&mut self, ui: &mut Ui, machine: &DibsMachine) -> Option<Action> {
         let mut asked = None;
         ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&machine.name).strong().heading());
             match &machine.status {
                 Some(status) => {
                     let (words, tone) = state_words(status.state);

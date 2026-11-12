@@ -169,7 +169,7 @@ impl ClaudoApp {
             page: first_page(),
             room: room::Room::default(),
             desk: desk::Desk::new(storage),
-            machines: machines::Machines::default(),
+            machines: machines::Machines::new(storage),
         }
     }
 
@@ -590,6 +590,7 @@ impl ClaudoApp {
 impl eframe::App for ClaudoApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.desk.save(storage);
+        self.machines.save(storage);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

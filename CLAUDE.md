@@ -555,18 +555,18 @@ wrote it.
   command it left running in the background has not ended in its own transcript (its turn
   ends without waiting for one). A notification can follow a preamble of the harness's own,
   so `cli::notified_end` looks for the block anywhere in the message.
-- **Machines** (each a tile beside the agents on the page's Room tab, which the person drags
-  into a split or tabs, `egui_tiles`, laid out as eframe keeps it, and hides or shows from
-  the Machines menu on the agents' tab bar): the dibs collector also sends every machine's
-  status, and why one could not answer, as `ServerEvent::Dibs`. Each tile draws its
+- **Machines** (a tile beside the agents on the page's Room tab, which the person drags into
+  a split or tabs, `egui_tiles`, laid out as eframe keeps it; inside it, one cell per
+  machine in a grid of equal cells, which the Arrange menu on its tab bar orders, hides and
+  sets the columns of, kept with the page's storage): the dibs collector also sends every
+  machine's status, and why one could not answer, as `ServerEvent::Dibs`. Each cell draws its
   machine's state, its CPU, memory and cards (`meters.rs`, from the `metrics` that
   `dibs --status --metrics` adds, read in dibs's runner from `/proc`, NVML and sysfs, so
   cheap enough beside a benchmark) and its jobs, from dibstop's own items and actions
   (`dibstop-view`, from the dibs repo, egui pinned to the version dibs uses), and takes
-  dibstop's keys when it was the tile last clicked.
-  The same menu sets how often the daemon looks and which machines' metrics it asks for
+  dibstop's keys when it was the cell last clicked. The same menu sets how often the daemon looks and which machines' metrics it asks for
   (`Command::DibsWatch`, kept in `$XDG_CONFIG_HOME/claudo/dibs-watch.json` and told to every
-  page as `ServerEvent::DibsWatch`). An action the view returns goes back as `Command::Dibs` with its
+  page as `ServerEvent::DibsWatch`). An action a cell returns goes back as `Command::Dibs` with its
   `Call` and job label, never a command line, and the backend makes the `dibs` call again
   from those (`Action::new(..).run()`), answering `DibsAnswer` to the client that asked.
 - **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`
