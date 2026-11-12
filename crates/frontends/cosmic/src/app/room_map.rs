@@ -1,6 +1,6 @@
 //! The map of agents on a canvas: one island per repository, each agent with what it
 //! started fanned out above it, laid out by `claudo_room` as the web page lays it out.
-//! Clicking a node opens its details, shift-clicking an agent brings its terminal forward,
+//! Clicking a node opens its details, shift-clicking one brings its agent's terminal forward,
 //! and a pull request's number opens it.
 
 use claudo_protocol::{Node, NodeState};
@@ -39,6 +39,9 @@ struct Drawn<'a> {
     at: Point,
     radius: f32,
     agent: bool,
+    /// The agent whose terminal a shift-click brings forward: this one, or the one that
+    /// started it.
+    owner: &'a str,
 }
 
 impl<'a> MapView<'a> {
@@ -56,6 +59,7 @@ impl<'a> MapView<'a> {
                     at: self.point(island.top + placed.at),
                     radius: self.scale * if placed.depth == 0 { AGENT } else { CHILD },
                     agent: placed.depth == 0,
+                    owner: island.agent_of(&placed.node.id),
                 })
             })
             .collect()
@@ -142,10 +146,9 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
                     return Some(canvas::Action::publish(open).and_capture());
                 }
                 let drawn = self.under(pointer)?;
-                let id = drawn.node.id.clone();
-                let message = match state.modifiers.shift() && drawn.agent {
-                    true => RoomMessage::Focus(id),
-                    false => RoomMessage::Pick(id),
+                let message = match state.modifiers.shift() {
+                    true => RoomMessage::Focus(drawn.owner.to_string()),
+                    false => RoomMessage::Pick(drawn.node.id.clone()),
                 };
                 Some(canvas::Action::publish(Message::Room(message)).and_capture())
             }

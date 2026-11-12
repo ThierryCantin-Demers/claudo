@@ -349,7 +349,7 @@ impl Room {
     }
 
     /// `screen` is the height left on screen, which the map fits into while it stays readable.
-    /// Clicking a node opens its details, shift-clicking an agent brings its terminal forward,
+    /// Clicking a node opens its details, shift-clicking one brings its agent's terminal forward,
     /// and a pull request's number opens it.
     fn map(&self, ui: &mut egui::Ui, width: f32, screen: f32, now: f64) -> Option<Picked> {
         let clusters = self.agents.clusters();
@@ -372,7 +372,7 @@ impl Room {
         };
         let visuals = ui.visuals().clone();
 
-        let mut drawn: Vec<(&Node, Pos2, f32)> = Vec::new();
+        let mut drawn: Vec<(&Node, Pos2, f32, &str)> = Vec::new();
         let mut links: Vec<(Rect, &str)> = Vec::new();
         for island in &map.islands {
             let key = island.repo.unwrap_or("");
@@ -447,7 +447,7 @@ impl Room {
                         scale,
                     ));
                 }
-                drawn.push((placed.node, here, radius));
+                drawn.push((placed.node, here, radius, island.agent_of(&placed.node.id)));
             }
         }
 
@@ -470,10 +470,10 @@ impl Room {
         let hovered = pointer.and_then(|pointer| {
             drawn
                 .iter()
-                .filter(|(_, at, radius)| at.distance(pointer) <= radius + 6.0)
+                .filter(|(_, at, radius, _)| at.distance(pointer) <= radius + 6.0)
                 .min_by(|a, b| a.1.distance(pointer).total_cmp(&b.1.distance(pointer)))
         });
-        let &(node, at, radius) = hovered?;
+        let &(node, at, radius, owner) = hovered?;
         painter.circle_stroke(
             at,
             radius + 4.0,
@@ -482,8 +482,8 @@ impl Room {
         let agent = matches!(node.kind, Some(NodeKind::Agent(_)));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         let shift = ui.input(|input| input.modifiers.shift);
-        let picked = response.clicked().then(|| match shift && agent {
-            true => Picked::Focus(node.id.clone()),
+        let picked = response.clicked().then(|| match shift {
+            true => Picked::Focus(owner.to_string()),
             false => Picked::Node(node.id.clone()),
         });
         let held = self.agents.held(&node.id, now);
@@ -491,7 +491,7 @@ impl Room {
             about(ui, node, held);
             ui.weak(match agent {
                 true => "Click for details, shift-click to bring its terminal forward",
-                false => "Click for details",
+                false => "Click for details, shift-click to bring its agent's terminal forward",
             });
         });
         picked

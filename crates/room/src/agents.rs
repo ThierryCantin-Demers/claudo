@@ -348,6 +348,20 @@ impl<'a> Island<'a> {
             .iter()
             .filter(move |child| child.parent == Some(parent))
     }
+
+    /// The agent on this island that started `id`, however deep under it, or `id` itself.
+    pub fn agent_of(&self, id: &'a str) -> &'a str {
+        let mut id = id;
+        while let Some(parent) = self
+            .placed
+            .iter()
+            .find(|placed| placed.node.id == id)
+            .and_then(|placed| placed.parent)
+        {
+            id = parent;
+        }
+        id
+    }
 }
 
 fn place<'a>(
@@ -962,6 +976,8 @@ mod tests {
             || alpha.top.y + alpha.size.y <= beta.top.y
             || beta.top.y + beta.size.y <= alpha.top.y;
         assert!(apart);
+        assert_eq!(alpha.agent_of("sub-2-3"), "agent-2");
+        assert_eq!(alpha.agent_of("agent-2"), "agent-2");
         let bottom = (alpha.top.y + alpha.size.y).max(beta.top.y + beta.size.y);
         assert!(map.height >= bottom);
     }

@@ -495,7 +495,7 @@ impl Room {
             Some(NodeKind::Agent(_)) => {
                 "Click for details, shift-click to bring its terminal forward"
             }
-            _ => "Click for details",
+            _ => "Click for details, shift-click to bring its agent's terminal forward",
         };
         lines.push(widget::text(hint).size(12.0).class(dim()).into());
         let left = (x + 16.0).min(width - CARD).max(0.0);
