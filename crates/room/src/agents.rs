@@ -241,10 +241,9 @@ pub fn finished(node: &Node) -> bool {
 pub const AGENT: f32 = 17.0;
 pub const CHILD: f32 = 7.5;
 /// How far an agent's caption reaches to either side.
-pub const CAPTION_REACH: f32 = 88.0;
-/// Under an agent: its name on up to two rows, what it is doing, its badges, and what it
-/// started.
-const CAPTION: f32 = 84.0;
+pub const CAPTION_REACH: f32 = 72.0;
+/// Under an agent, a row each: its name, what it is doing, its badges, and what it started.
+const CAPTION: f32 = 62.0;
 /// An agent that started at most this many has each one named on the map.
 pub const LABELLED: usize = 3;
 const CELL_WIDTH: f32 = 2.0 * CAPTION_REACH + 12.0;
@@ -255,11 +254,11 @@ const FAN: usize = 7;
 const FAN_NEAR: f32 = 34.0;
 const FAN_STEP: f32 = 18.0;
 /// An island's name above its agents, and the margin around them.
-const TITLE: f32 = 28.0;
-pub const PAD: f32 = 10.0;
-const ISLAND_GAP: f32 = 16.0;
+const TITLE: f32 = 24.0;
+pub const PAD: f32 = 8.0;
+const ISLAND_GAP: f32 = 12.0;
 /// The smallest the map is drawn to fit the screen; below it names are too small to read.
-pub const MIN_SCALE: f32 = 0.7;
+pub const MIN_SCALE: f32 = 0.55;
 
 #[derive(Debug)]
 pub struct Placed<'a> {

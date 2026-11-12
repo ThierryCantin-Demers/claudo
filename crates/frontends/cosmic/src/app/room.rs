@@ -10,7 +10,7 @@ use claudo_protocol::{
     Action as Act, DIBS_POLL, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState,
 };
 use claudo_room::agents::{
-    self as room_agents, Agents, LEGEND, Map, ago, checks, fit, legend_kinds, open_prs, place_of,
+    self as room_agents, Agents, LEGEND, Map, ago, checks, fit, legend_kinds, open_prs,
     reason, state, state_tint,
 };
 use claudo_room::machines::{
@@ -351,12 +351,12 @@ impl Room {
         .into()
     }
 
-    /// How many agents and how they stand, the legend, the open pull requests, the agents
-    /// waiting on the person, and the map.
+    /// How many agents and how they stand with the open pull requests on one line, a line
+    /// for each agent waiting on the person, and the map in whatever height is left.
     fn agents_view(&self, zoom: f32, width: f32, height: f32) -> Element<'_, Message> {
         let mut page: Vec<Element<Message>> = Vec::new();
         let mut summary: Vec<Element<Message>> =
-            vec![widget::text::title3(format!("{} agents", self.agents.agents())).into()];
+            vec![widget::text::title4(format!("{} agents", self.agents.agents())).into()];
         for (shown, word) in [
             (NodeState::Working, "working"),
             (NodeState::Blocked, "need you"),
@@ -368,9 +368,32 @@ impl Room {
                 summary.push(widget::text(format!("{n} {word}")).into());
             }
         }
-        if self.agents.waiting().next().is_none() {
-            summary.push(dot(Some(NodeState::Working)));
-            summary.push(widget::text("nobody is waiting on you").into());
+        summary.push(
+            widget::tooltip(
+                widget::text("?").class(dim()),
+                legend(),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+        );
+        for (node, pr) in self.agents.pull_requests() {
+            summary.push(widget::text("·").class(dim()).into());
+            let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
+            summary.push(link(repo, pr.link));
+            if let Some((words, tint)) = pr.checks.map(checks) {
+                summary.push(
+                    widget::text(words)
+                        .size(11.0)
+                        .class(cosmic::theme::Text::Color(super::room_map::rgb(tint)))
+                        .into(),
+                );
+            }
+            summary.push(
+                widget::text(node.name.clone().unwrap_or_else(|| "unnamed".into()))
+                    .size(12.0)
+                    .class(dim())
+                    .into(),
+            );
         }
         page.push(
             widget::flex_row(summary)
@@ -378,35 +401,7 @@ impl Room {
                 .align_items(Alignment::Center)
                 .into(),
         );
-        page.push(legend());
-        let open = self.agents.pull_requests();
-        if !open.is_empty() {
-            let mut row: Vec<Element<Message>> =
-                vec![widget::text("Open PRs:").class(dim()).into()];
-            for (node, pr) in open {
-                let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
-                row.push(link(repo, pr.link));
-                if let Some((words, tint)) = pr.checks.map(checks) {
-                    row.push(
-                        widget::text(words)
-                            .size(11.0)
-                            .class(cosmic::theme::Text::Color(super::room_map::rgb(tint)))
-                            .into(),
-                    );
-                }
-                row.push(
-                    widget::text(node.name.clone().unwrap_or_else(|| "unnamed".into()))
-                        .class(dim())
-                        .into(),
-                );
-            }
-            page.push(
-                widget::flex_row(row)
-                    .spacing(8)
-                    .align_items(Alignment::Center)
-                    .into(),
-            );
-        }
+        let mut used = 40.0 * zoom;
         if let Some((node, detail)) = &self.failed {
             let name = self
                 .agents
@@ -427,18 +422,16 @@ impl Room {
                 .align_y(Alignment::Center)
                 .into(),
             );
+            used += 40.0 * zoom;
         }
-        let waiting: Vec<Element<Message>> = self
-            .agents
-            .waiting()
-            .map(|node| self.waiting_card(node, zoom))
-            .collect();
-        if !waiting.is_empty() {
-            page.push(widget::flex_row(waiting).spacing(12).into());
+        for node in self.agents.waiting() {
+            page.push(self.waiting_line(node, zoom));
+            used += 46.0 * zoom;
         }
-        let width = width - 32.0;
+        let width = width - 24.0;
         let clusters = self.agents.clusters();
-        let screen = (height - 260.0).max(200.0);
+        // The header bar, this column's padding, and what is above the map.
+        let screen = (height - 64.0 - 24.0 - used).max(160.0);
         let scale = fit(&clusters, width / zoom, screen / zoom) * zoom;
         let map = Map::lay_out(&clusters, width / scale);
         let tall = map.height * scale;
@@ -456,57 +449,98 @@ impl Room {
         );
         widget::scrollable(
             widget::Column::with_children(page)
-                .spacing(12)
-                .padding([16, 16]),
+                .spacing(6)
+                .padding([12, 12]),
         )
-        .width(Length::Fixed(width + 32.0))
+        .width(Length::Fixed(width + 24.0))
         .height(Length::Fill)
         .into()
     }
 
-    /// An agent waiting on the person: who, where, why and for how long, with a box to
-    /// answer it and its terminal a click away.
-    fn waiting_card(&self, node: &Node, zoom: f32) -> Element<'_, Message> {
+    /// An agent waiting on the person, on one line: its name, why, for how long, a box to
+    /// answer it, and its terminal. The whole reason shows on hover and in its details.
+    fn waiting_line(&self, node: &Node, zoom: f32) -> Element<'_, Message> {
+        let id = node.id.clone();
+        let draft = self.drafts.get(&node.id).map_or("", String::as_str);
+        let name = node.name.clone().unwrap_or_else(|| "unnamed".into());
+        let why = reason(node).unwrap_or_default().to_string();
         let mut parts: Vec<Element<Message>> = vec![
-            widget::Row::with_children(vec![
-                dot(Some(NodeState::Blocked)),
-                widget::text::title4(node.name.clone().unwrap_or_else(|| "unnamed".into())).into(),
-            ])
-            .spacing(8)
-            .align_y(Alignment::Center)
+            widget::text("!")
+                .font(cosmic::font::bold())
+                .class(cosmic::theme::Text::Color(warning()))
+                .into(),
+            widget::mouse_area(
+                widget::text(name)
+                    .font(cosmic::font::bold())
+                    .class(cosmic::theme::Text::Color(warning())),
+            )
+            .on_press(Message::Room(RoomMessage::Pick(id.clone())))
             .into(),
-            widget::text(place_of(node)).class(dim()).into(),
+            widget::tooltip(
+                widget::text(why.clone())
+                    .class(dim())
+                    .width(Length::Fill)
+                    .wrapping(cosmic::iced::widget::text::Wrapping::None)
+                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
+                widget::text(why),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
         ];
-        if let Some(reason) = reason(node) {
-            parts.push(widget::text(reason.to_string()).into());
-        }
         if let Some(held) = self.agents.held(&node.id, self.time()) {
-            parts.push(
-                widget::text(format!("waiting {}", ago(held)))
-                    .class(cosmic::theme::Text::Color(warning()))
-                    .into(),
-            );
+            parts.push(widget::text(ago(held)).size(12.0).class(dim()).into());
         }
-        for pr in open_prs(node) {
-            parts.push(link(format!("PR #{}", pr.number), pr.link));
-        }
-        parts.push(self.answer_box(node));
-        widget::container(widget::Column::with_children(parts).spacing(6))
-            .padding(14)
-            .width(Length::Fixed(300.0 * zoom))
-            .class(cosmic::theme::Container::custom(|theme| {
-                let warn = Color::from(theme.cosmic().warning_color());
-                container::Style {
-                    background: Some(Color { a: 0.1, ..warn }.into()),
-                    border: cosmic::iced::Border {
-                        color: Color { a: 0.8, ..warn },
-                        width: 1.5,
-                        radius: 12.0.into(),
-                    },
-                    ..Default::default()
-                }
-            }))
-            .into()
+        parts.push(
+            widget::text_input("Answer", draft)
+                .on_input({
+                    let id = id.clone();
+                    move |text| Message::Room(RoomMessage::Draft(id.clone(), text))
+                })
+                .on_submit({
+                    let id = id.clone();
+                    move |_| Message::Room(RoomMessage::Answer(id.clone()))
+                })
+                .width(Length::Fixed(240.0 * zoom))
+                .into(),
+        );
+        parts.push(
+            widget::tooltip(
+                widget::button::icon(widget::icon::from_name("mail-send-symbolic"))
+                    .on_press(Message::Room(RoomMessage::Answer(id.clone()))),
+                widget::text("Send"),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+        );
+        parts.push(
+            widget::tooltip(
+                widget::button::icon(widget::icon::from_name("utilities-terminal-symbolic"))
+                    .on_press(Message::Room(RoomMessage::Focus(id))),
+                widget::text("Bring its terminal forward"),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+        );
+        widget::container(
+            widget::Row::with_children(parts)
+                .spacing(8)
+                .align_y(Alignment::Center),
+        )
+        .padding([4, 10])
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let warn = Color::from(theme.cosmic().warning_color());
+            container::Style {
+                background: Some(Color { a: 0.08, ..warn }.into()),
+                border: cosmic::iced::Border {
+                    color: Color { a: 0.5, ..warn },
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
     }
 
     /// A box to write to the agent in, and its terminal brought forward.

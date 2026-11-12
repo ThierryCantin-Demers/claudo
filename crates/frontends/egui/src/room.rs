@@ -10,8 +10,8 @@ use claudo_protocol::{
 };
 use claudo_room::agents::{
     AGENT, Agents, CAPTION_REACH, CHILD, Island, LABELLED, LEGEND, Map, PAD, Shown, Tint, V, ago,
-    badges, checks, codex, dibs_job, fit, hue, kind, legend_kinds, made_by, open_prs, phase, short,
-    started, started_word, state, state_tint, thousands,
+    badges, checks, codex, dibs_job, fit, hue, kind, legend_kinds, made_by, open_prs, phase,
+    reason, short, started, started_word, state, state_tint, thousands,
 };
 use egui::epaint::QuadraticBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2, vec2};
@@ -85,13 +85,13 @@ impl Room {
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
                     self.summary(ui);
-                    ui.add_space(24.0);
-                    legend(ui);
+                    ui.add_space(8.0);
+                    ui.weak("?").on_hover_ui(legend);
+                    self.pull_requests(ui);
                 });
-                self.pull_requests(ui);
                 self.failure(ui);
-                ui.add_space(8.0);
-                self.tiles(ui, width, now);
+                ui.add_space(4.0);
+                self.waiting_lines(ui, width, now);
                 let left = screen - (ui.cursor().top() - top);
                 let picked = self.map(ui, width, left, now);
                 if double {
@@ -133,17 +133,13 @@ impl Room {
             return;
         }
         open.sort_by(|a, b| a.1.about.cmp(&b.1.about));
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.weak("Open PRs:");
-            for (node, pr) in open {
-                ui.add_space(8.0);
-                let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
-                ui.hyperlink_to(repo, pr.link).on_hover_text(&pr.about);
-                ci(ui, pr.checks);
-                ui.weak(node.name.as_deref().unwrap_or("unnamed"));
-            }
-        });
+        for (node, pr) in open {
+            ui.weak("·");
+            let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
+            ui.hyperlink_to(repo, pr.link).on_hover_text(&pr.about);
+            ci(ui, pr.checks);
+            ui.weak(node.name.as_deref().unwrap_or("unnamed"));
+        }
     }
 
     fn failure(&mut self, ui: &mut egui::Ui) {
@@ -296,7 +292,9 @@ impl Room {
             });
     }
 
-    fn tiles(&mut self, ui: &mut egui::Ui, width: f32, now: f64) {
+    /// A line for each agent waiting on the person: its name, why, for how long, a box to
+    /// answer it, and its terminal. The whole reason shows on hover and in its details.
+    fn waiting_lines(&mut self, ui: &mut egui::Ui, width: f32, now: f64) {
         let waiting: Vec<(Node, Option<f64>)> = self
             .agents
             .waiting()
@@ -306,23 +304,67 @@ impl Room {
         self.drafts.retain(|id, _| {
             selected.as_ref() == Some(id) || waiting.iter().any(|(node, _)| node.id == *id)
         });
-        let outer = TILE_WIDTH + 2.0 * TILE_MARGIN + TILE_GAP;
-        let across = (((width + TILE_GAP) / outer).floor() as usize).max(1);
-        for row in waiting.chunks(across) {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = TILE_GAP;
-                for (node, held) in row {
-                    let draft = self.drafts.entry(node.id.clone()).or_default();
-                    if let Some(action) = tile(ui, node, *held, now, draft) {
-                        self.sent.push(Command::Act {
-                            node: node.id.clone(),
-                            action,
-                            request: 0,
+        let warn = ui.visuals().warn_fg_color;
+        for (node, held) in waiting {
+            egui::Frame::new()
+                .fill(warn.gamma_multiply(0.08))
+                .stroke(Stroke::new(1.0, warn.gamma_multiply(0.5)))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(10, 4))
+                .show(ui, |ui| {
+                    ui.set_width(width - 20.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("!").strong().color(warn));
+                        let name = node.name.as_deref().unwrap_or("unnamed");
+                        if ui
+                            .add(
+                                egui::Label::new(RichText::new(name).strong().color(warn))
+                                    .sense(Sense::click()),
+                            )
+                            .clicked()
+                        {
+                            self.selected = Some(node.id.clone());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("terminal")
+                                .on_hover_text("Bring its terminal forward")
+                                .clicked()
+                            {
+                                self.sent.push(Command::Act {
+                                    node: node.id.clone(),
+                                    action: Action::Focus,
+                                    request: 0,
+                                });
+                            }
+                            let draft = self.drafts.entry(node.id.clone()).or_default();
+                            let send = ui.small_button("Send").clicked();
+                            let answer = ui.add(
+                                egui::TextEdit::singleline(draft)
+                                    .id(egui::Id::new(("answer", "line", &node.id)))
+                                    .hint_text("Answer")
+                                    .desired_width(220.0),
+                            );
+                            let entered = answer.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            if (send || entered) && !draft.trim().is_empty() {
+                                let text = std::mem::take(draft).trim().to_string();
+                                self.sent.push(Command::Act {
+                                    node: node.id.clone(),
+                                    action: Action::Prompt(text),
+                                    request: 0,
+                                });
+                            }
+                            if let Some(held) = held {
+                                ui.weak(ago(held));
+                            }
+                            let why = reason(&node).unwrap_or_default();
+                            ui.add(egui::Label::new(RichText::new(why).weak()).truncate())
+                                .on_hover_text(why);
                         });
-                    }
-                }
-            });
-            ui.add_space(TILE_GAP);
+                    });
+                });
+            ui.add_space(4.0);
         }
     }
 
@@ -461,10 +503,6 @@ enum Picked {
 /// longer than egui's own double-click delay.
 const DOUBLE_CLICK: f64 = 0.6;
 
-const TILE_WIDTH: f32 = 250.0;
-const TILE_MARGIN: f32 = 14.0;
-const TILE_GAP: f32 = 12.0;
-
 fn shore(
     painter: &egui::Painter,
     visuals: &egui::Visuals,
@@ -599,7 +637,7 @@ fn caption(
         name,
         13.0 * scale,
         visuals.strong_text_color(),
-        2,
+        1,
         scale,
     );
     let below = top + vec2(0.0, name.size().y + 2.0 * scale);
@@ -757,62 +795,6 @@ fn lines(
     job.wrap.max_rows = rows;
     job.halign = egui::Align::Center;
     painter.layout_job(job)
-}
-
-/// What the person asked of the agent from its tile: an answer typed in it, or its terminal.
-fn tile(
-    ui: &mut egui::Ui,
-    node: &Node,
-    held: Option<f64>,
-    now: f64,
-    draft: &mut String,
-) -> Option<Action> {
-    let mut action = None;
-    let warn = ui.visuals().warn_fg_color;
-    let breath = (0.5 + 0.5 * (now * 3.0).sin()) as f32;
-    egui::Frame::new()
-        .fill(warn.gamma_multiply(0.08 + 0.04 * breath))
-        .stroke(Stroke::new(1.5, warn.gamma_multiply(0.6 + 0.4 * breath)))
-        .corner_radius(12.0)
-        .inner_margin(TILE_MARGIN)
-        .show(ui, |ui| {
-            ui.set_width(TILE_WIDTH);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    dot(ui, warn);
-                    ui.label(
-                        RichText::new(node.name.as_deref().unwrap_or("unnamed"))
-                            .size(17.0)
-                            .strong(),
-                    );
-                });
-                let mut place = kind(node);
-                if let Some(repo) = &node.repo {
-                    place.push_str(&format!(" in {}", short(repo)));
-                }
-                ui.label(RichText::new(place).weak());
-                let note = node.note.as_ref().map(|note| note.text.as_str());
-                let reason = note
-                    .filter(|text| !text.is_empty())
-                    .or(node.doing.as_deref());
-                if let Some(reason) = reason {
-                    ui.add(egui::Label::new(reason).wrap());
-                }
-                if let Some(held) = held {
-                    ui.label(RichText::new(format!("waiting {}", ago(held))).color(warn));
-                }
-                for pr in open_prs(node) {
-                    ui.horizontal(|ui| {
-                        ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
-                            .on_hover_text(&pr.about);
-                        ci(ui, pr.checks);
-                    });
-                }
-                ui.add_space(4.0);
-                action = answer(ui, "tile", node, draft, TILE_WIDTH - 60.0);
-            });
-        });
-    action
 }
 
 /// A box to write to the agent in, and a link to its terminal. `place` keeps the tile's box

@@ -504,17 +504,14 @@ fn caption(
     let mut top = at.y + (AGENT + 6.0) * scale;
     let name = node.name.as_deref().unwrap_or("unnamed");
     let size = 13.0 * scale;
-    let rows = if fits(name, size, width) { 1.0 } else { 2.0 };
-    frame.fill_text(canvas::Text {
-        content: cut(name, size, width * 2.0),
-        position: Point::new(at.x, top),
-        max_width: width,
-        color: palette.strong,
-        size: size.into(),
-        align_x: cosmic::iced::Alignment::Center.into(),
-        ..Default::default()
-    });
-    top += rows * size * 1.3 + 2.0 * scale;
+    centred(
+        frame,
+        &[(cut(name, size, width), palette.strong)],
+        at.x,
+        top,
+        size,
+    );
+    top += size * 1.3 + 2.0 * scale;
     if let Some(doing) = &node.doing {
         let size = 11.0 * scale;
         centred(
