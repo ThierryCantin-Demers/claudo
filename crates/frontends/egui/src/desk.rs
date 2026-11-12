@@ -2,7 +2,7 @@
 //! and hides or shows again from the Machines menu. The layout is kept with the page's
 //! storage.
 
-use claudo_protocol::{Command, DIBS_POLLS, DibsWatch};
+use claudo_protocol::{Command, DIBS_POLL, DibsWatch};
 use egui_tiles::{
     Behavior, Container, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId, Tiles,
     Tree, UiResponse,
@@ -203,15 +203,22 @@ impl Panes<'_> {
             return;
         };
         ui.separator();
-        ui.label("Look every");
-        for seconds in DIBS_POLLS {
-            let chosen = watch.poll == seconds;
-            if ui.radio(chosen, format!("{seconds} s")).clicked() && !chosen {
-                self.sent.push(Command::DibsWatch(DibsWatch {
-                    poll: seconds,
-                    ..watch.clone()
-                }));
-            }
+        let poll = self.machines.poll.get_or_insert(watch.poll);
+        let slider = egui::Slider::new(poll, DIBS_POLL)
+            .logarithmic(true)
+            .suffix(" s")
+            .text("look every");
+        let moved = ui.add(slider);
+        // Each change makes the daemon look again at once, so a drag sends only where it ends.
+        let settled = moved.drag_stopped() || (moved.changed() && !moved.dragged());
+        if settled && *poll != watch.poll {
+            self.sent.push(Command::DibsWatch(DibsWatch {
+                poll: *poll,
+                ..watch.clone()
+            }));
+        }
+        if !moved.dragged() && *poll == watch.poll {
+            self.machines.poll = None;
         }
     }
 }

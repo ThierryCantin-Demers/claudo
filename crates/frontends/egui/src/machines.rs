@@ -23,6 +23,8 @@ pub struct Machines {
     asking: Option<String>,
     /// How the daemon watches them, once it says.
     pub watch: Option<DibsWatch>,
+    /// The poll the menu's slider is set to while it moves, before the daemon says it took it.
+    pub poll: Option<u64>,
 }
 
 /// What one machine's tile remembers between frames.

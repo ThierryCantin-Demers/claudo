@@ -834,12 +834,12 @@ pub enum Command {
 
 /// The seconds a page may choose between looks at the dibs machines. Each look reaches every
 /// machine over ssh; dibstop looks every 10 seconds by default.
-pub const DIBS_POLLS: [u64; 5] = [3, 5, 10, 30, 60];
+pub const DIBS_POLL: std::ops::RangeInclusive<u64> = 2..=120;
 
 /// How the daemon watches the dibs machines, the same for every page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DibsWatch {
-    /// Seconds between looks, one of `DIBS_POLLS`.
+    /// Seconds between looks, within `DIBS_POLL`.
     pub poll: u64,
     /// The machines whose CPU, memory and cards are not read; every other one's are.
     #[serde(default)]

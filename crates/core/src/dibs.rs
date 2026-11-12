@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use claudo_protocol::{DIBS_POLLS, DibsMachine, DibsWatch, Node, NodeKind, NodeState};
+use claudo_protocol::{DIBS_POLL, DibsMachine, DibsWatch, Node, NodeKind, NodeState};
 use dibstop_view::dibs_format::Mode;
 use dibstop_view::dibs_format::status::Status;
 
@@ -44,13 +44,10 @@ pub fn spawn(feed: Feed) {
     });
 }
 
-/// Watches as `watch` says from now on, looking again at once, every `poll` seconds rounded to
-/// the nearest of `DIBS_POLLS`.
+/// Watches as `watch` says from now on, looking again at once, every `poll` seconds kept
+/// within `DIBS_POLL`.
 pub fn set_watch(mut watch: DibsWatch) {
-    watch.poll = DIBS_POLLS
-        .into_iter()
-        .min_by_key(|choice| choice.abs_diff(watch.poll))
-        .unwrap_or(DibsWatch::default().poll);
+    watch.poll = watch.poll.clamp(*DIBS_POLL.start(), *DIBS_POLL.end());
     let text = serde_json::to_string(&watch).expect("plain data");
     *WATCH.lock().unwrap() = Some(watch);
     CHANGED.notify_all();
@@ -67,7 +64,7 @@ fn saved() -> DibsWatch {
     std::fs::read_to_string(watch_path())
         .ok()
         .and_then(|text| serde_json::from_str::<DibsWatch>(&text).ok())
-        .filter(|watch| DIBS_POLLS.contains(&watch.poll))
+        .filter(|watch| DIBS_POLL.contains(&watch.poll))
         .unwrap_or_default()
 }
 
