@@ -494,6 +494,12 @@ wrote it.
   for what the room shows: the agents' clusters and map layout, the machines' arrangement and
   traces, and the wording and colours of both. The canvas cannot measure text, so the map's
   captions are cut and centred by an estimate of their width.
+- **The team page** (`claudo-daemon --team`): the dibs machines in `CLAUDO_TEAM_MACHINES` (all
+  without it) on every address at `CLAUDO_PORT` (8790), for coworkers on the network, with no
+  token. It runs the dibs collector alone over `Hub::room_only`, a room with no backend, so
+  no conversation, agent or queued message of this user can reach it; it says
+  `ServerEvent::LookOnly` first, and drops whatever a page sends. The page then shows the
+  machines alone, without dibs's actions or keys.
 - **The whole room for apps**: the daemon also serves on `$XDG_RUNTIME_DIR/claudo-room.sock`
   (mode 0600) what a page hears, each line a `Command` in or a `ServerEvent` out, and
   `claudo-daemon --room-bridge` joins it to stdin and stdout, so `transport::connect_room`

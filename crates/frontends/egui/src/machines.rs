@@ -35,6 +35,8 @@ pub struct Machines {
     pub watch: Option<DibsWatch>,
     /// The poll the menu's slider is set to while it moves, before the daemon says it took it.
     poll: Option<u64>,
+    /// The daemon takes no call from this page, so it offers none.
+    pub look_only: bool,
 }
 
 /// What one machine's cell remembers between frames.
@@ -47,6 +49,7 @@ struct Tile {
     shown: Option<(String, String)>,
     /// What the action the daemon runs is doing.
     busy: Option<String>,
+    look_only: bool,
 }
 
 impl Machines {
@@ -261,8 +264,9 @@ impl Machines {
         if self.active.is_none() {
             self.active = Some(name.to_string());
         }
-        let keys = self.active.as_deref() == Some(name);
+        let keys = self.active.as_deref() == Some(name) && !self.look_only;
         let tile = self.tiles.entry(name.to_string()).or_default();
+        tile.look_only = self.look_only;
         let history = self.histories.entry(name.to_string()).or_default();
         let show = self.arrangement.show;
         let action = tile.ui(ui, machine, history, show, keys)?;
@@ -341,6 +345,9 @@ impl Tile {
             }
             if let Some(busy) = &self.busy {
                 ui.colored_label(Color32::from_rgb(80, 180, 200), format!("{busy}…"));
+            }
+            if self.look_only {
+                return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let name = machine.name.clone();
@@ -489,6 +496,9 @@ impl Tile {
             true => ui.colored_label(ui.visuals().warn_fg_color, format!("\u{26a0} {}", it.long)),
             false => ui.weak(&it.long),
         };
+        if self.look_only {
+            return None;
+        }
         ui.horizontal(|ui| {
             if ui.small_button("process tree").on_hover_text("p").clicked() {
                 asked = Some(Action::process_tree(it));

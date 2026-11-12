@@ -10,6 +10,11 @@
 //! `claudo-daemon --room-bridge` joins to stdin and stdout: for the COSMIC app, on this
 //! computer or over ssh.
 //!
+//! `claudo-daemon --team` serves something else: the dibs machines named in
+//! `CLAUDO_TEAM_MACHINES` (all, without it) to anyone on the network, who can only look. It
+//! runs no other collector and no backend, takes no command, and needs no token, so nothing
+//! of this user's agents or conversations reaches it.
+//!
 //! Auth: a token, made on the first start and kept in claudo's config so the page's
 //! link survives restarts, must be presented as `?token=…` on the WS upgrade. The
 //! token is part of the URL we print, so the served page can read it from its own
@@ -57,8 +62,71 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .expect("start tokio");
-    runtime.block_on(serve());
+    match std::env::args().nth(1).as_deref() {
+        Some("--team") => runtime.block_on(serve_team()),
+        _ => runtime.block_on(serve()),
+    }
     ExitCode::SUCCESS
+}
+
+/// The shared machines, on every address of this computer, for anyone to look at.
+async fn serve_team() {
+    let port: u16 = std::env::var("CLAUDO_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8790);
+    let machines: Vec<String> = std::env::var("CLAUDO_TEAM_MACHINES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    let static_dir = static_dir();
+    let hub = Hub::room_only();
+    claudo_core::dibs::spawn_team(hub.feed("dibs"), machines);
+    let app = Router::new()
+        .route("/ws", get(team_socket))
+        .fallback_service(
+            ServeDir::new(&static_dir)
+                .precompressed_br()
+                .precompressed_gzip(),
+        )
+        .layer(axum::middleware::from_fn(caching))
+        .with_state(hub);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("bind the team page's port");
+    println!("claudo team page on port {port}, for anyone on the network to look at");
+    println!("  serving bundle from: {}", static_dir.display());
+    axum::serve(listener, app).await.expect("serve");
+}
+
+async fn team_socket(ws: WebSocketUpgrade, State(hub): State<Hub>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        let (mut sink, mut stream) = socket.split();
+        let (events, mut sent) = unbounded_channel::<ServerEvent>();
+        let _ = events.send(ServerEvent::LookOnly);
+        let _client = hub.connect(events);
+        let forward = tokio::spawn(async move {
+            while let Some(event) = sent.recv().await {
+                let Ok(json) = serde_json::to_string(&event) else {
+                    break;
+                };
+                if sink.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+        // Whatever the page sends is dropped: nobody on the network acts as this user.
+        while let Some(Ok(message)) = stream.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+        forward.abort();
+    })
 }
 
 async fn serve() {

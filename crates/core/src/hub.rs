@@ -55,6 +55,17 @@ impl Hub {
         }
     }
 
+    /// A room with no backend behind it: its clients hear what the collectors give and
+    /// nothing of any conversation, and what they send goes nowhere.
+    pub fn room_only() -> Self {
+        let (inputs, _) = channel();
+        Self {
+            inputs,
+            next: Arc::new(AtomicU64::new(LOCAL + 1)),
+            room: Arc::default(),
+        }
+    }
+
     /// What the collector named `source` gives the room.
     pub fn feed(&self, source: &'static str) -> Feed {
         Feed::new(self.room.clone(), source)

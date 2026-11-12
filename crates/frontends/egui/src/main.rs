@@ -190,6 +190,8 @@ struct ClaudoApp {
     /// Whether a native window keeps its title bar, and what the window was last told.
     title_bar: bool,
     title_bar_told: Option<bool>,
+    /// A team daemon's page, which shows the shared machines and sends nothing.
+    look_only: bool,
     /// Frames left in the resize that makes the compositor apply a title bar change.
     nudge: u8,
 }
@@ -248,6 +250,7 @@ impl ClaudoApp {
             #[cfg(target_arch = "wasm32")]
             title_bar: true,
             title_bar_told: None,
+            look_only: false,
             nudge: 0,
             machines: machines::Machines::new(storage),
         }
@@ -647,6 +650,11 @@ impl ClaudoApp {
                 ServerEvent::Room(event) => self.room.apply(event),
                 ServerEvent::Dibs(machines) => self.machines.heard(machines),
                 ServerEvent::DibsWatch(watch) => self.machines.watch = Some(watch),
+                ServerEvent::LookOnly => {
+                    self.look_only = true;
+                    self.machines.look_only = true;
+                    self.page = Page::Room;
+                }
                 ServerEvent::DibsAnswer { title, body } => self.machines.answered(title, body),
 
                 ServerEvent::Answered { request_id, .. } => {
@@ -782,12 +790,28 @@ impl ClaudoApp {
             if !cfg!(target_arch = "wasm32") {
                 self.window_bar(ui);
             }
+            if self.look_only {
+                ui.horizontal(|ui| {
+                    ui.strong("Shared machines");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Arranging them is this page's own; the daemon hears nothing of it.
+                        let _ = self.machines.menu(ui);
+                    });
+                });
+                return;
+            }
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.page, Page::Room, "Room");
                 ui.selectable_value(&mut self.page, Page::Chat, "Chat");
             });
         });
         // A machine running only Codex agents never has Claude ready.
+        if self.look_only {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let _ = self.machines.ui(ui);
+            });
+            return;
+        }
         if self.page == Page::Room {
             let sent = egui::CentralPanel::default()
                 .show(ui, |ui| {

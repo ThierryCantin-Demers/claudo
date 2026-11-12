@@ -47,6 +47,28 @@ pub fn spawn(feed: Feed) {
     });
 }
 
+/// The machines named in `machines`, or every one without names, with their metrics, for
+/// a page anyone may look at: no jobs under agents, and a fixed poll nobody can change.
+pub fn spawn_team(feed: Feed, machines: Vec<String>) {
+    std::thread::spawn(move || {
+        let metrics = match machines.is_empty() {
+            true => "all".to_string(),
+            false => machines.join(","),
+        };
+        loop {
+            let found = look(&Some(metrics.clone()))
+                .map(|text| self::machines(&text))
+                .unwrap_or_default();
+            let shown = found
+                .into_iter()
+                .filter(|machine| machines.is_empty() || machines.contains(&machine.name))
+                .collect();
+            feed.dibs(shown);
+            std::thread::sleep(Duration::from_secs(DibsWatch::default().poll));
+        }
+    });
+}
+
 /// Watches as `watch` says from now on, looking again at once, every `poll` seconds kept
 /// within `DIBS_POLL`.
 pub fn set_watch(mut watch: DibsWatch) {

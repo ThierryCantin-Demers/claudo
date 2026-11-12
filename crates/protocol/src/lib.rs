@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
 /// cannot read. The backend sends it first, in `Hello`.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -885,6 +885,9 @@ pub enum ServerEvent {
     Dibs(Vec<DibsMachine>),
     /// How the daemon watches the dibs machines.
     DibsWatch(DibsWatch),
+    /// This page is for looking only, as a team daemon serves it: it shows the machines and
+    /// sends nothing.
+    LookOnly,
     /// What a `Dibs` call printed, to the client that asked.
     DibsAnswer {
         title: String,

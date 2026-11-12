@@ -2371,6 +2371,7 @@ mod app {
                 ServerEvent::Room(_)
                 | ServerEvent::Dibs(_)
                 | ServerEvent::DibsWatch(_)
+                | ServerEvent::LookOnly
                 | ServerEvent::DibsAnswer { .. } => {}
                 ServerEvent::Hello { version } => {
                     if version != claudo_protocol::PROTOCOL_VERSION {
@@ -2726,19 +2727,15 @@ mod app {
                     ]
                     .into_iter()
                     .chain(self.usage())
+                    .chain([widget::button::text("Room")
+                        .leading_icon(widget::icon::from_name("utilities-system-monitor-symbolic"))
+                        .on_press(Message::SetPage(Page::Room))
+                        .into()])
                     .chain([widget::Row::with_children(
-                        [
-                            widget::button::text("Settings")
-                                .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
-                                .on_press(Message::SetPage(Page::Settings))
-                                .into(),
-                            widget::button::text("Room")
-                                .leading_icon(widget::icon::from_name(
-                                    "utilities-system-monitor-symbolic",
-                                ))
-                                .on_press(Message::SetPage(Page::Room))
-                                .into(),
-                        ]
+                        [widget::button::text("Settings")
+                            .leading_icon(widget::icon::from_name("emblem-system-symbolic"))
+                            .on_press(Message::SetPage(Page::Settings))
+                            .into()]
                         .into_iter()
                         .chain(self.restart_button(w))
                         .collect::<Vec<_>>(),
