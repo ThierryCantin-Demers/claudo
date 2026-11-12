@@ -68,6 +68,8 @@ pub struct Room {
     lost: Option<String>,
     /// The room has said something since the link was made.
     answered: bool,
+    /// The node under the pointer on the map, and where it is drawn.
+    hover: Option<(NodeId, f32, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +97,7 @@ pub enum RoomMessage {
     Pick(NodeId),
     Unpick,
     Dismiss,
+    Hover(Option<(NodeId, f32, f32)>),
 }
 
 impl Room {
@@ -200,6 +203,7 @@ impl Room {
                 self.picked = (self.picked.as_ref() != Some(&id)).then_some(id);
             }
             RoomMessage::Unpick => self.picked = None,
+            RoomMessage::Hover(hover) => self.hover = hover,
             RoomMessage::Dismiss => self.failed = None,
             RoomMessage::Poll(seconds) => self.poll = Some(seconds),
             // Each change makes the daemon look again at once, so only where a drag ends is sent.
@@ -449,18 +453,20 @@ impl Room {
         let scale = fit(&clusters, width / zoom, screen / zoom) * zoom;
         let map = Map::lay_out(&clusters, width / scale);
         let tall = map.height * scale;
-        page.push(
-            canvas::Canvas::new(super::room_map::MapView {
-                agents: &self.agents,
-                map,
-                scale,
-                now: self.time(),
-                selected: self.picked.as_deref(),
-            })
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(tall))
-            .into(),
-        );
+        let canvas: Element<Message> = canvas::Canvas::new(super::room_map::MapView {
+            map,
+            scale,
+            now: self.time(),
+            selected: self.picked.as_deref(),
+        })
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(tall))
+        .into();
+        let mut layers = vec![canvas];
+        if let Some(card) = self.hover_card(width, tall) {
+            layers.push(card);
+        }
+        page.push(cosmic::iced::widget::Stack::with_children(layers).into());
         widget::scrollable(
             widget::Column::with_children(page)
                 .spacing(6)
@@ -469,6 +475,65 @@ impl Room {
         .width(Length::Fixed(width + 24.0))
         .height(Length::Fill)
         .into()
+    }
+
+    /// What the hover says about the node under the pointer, in a card beside it.
+    fn hover_card(&self, width: f32, tall: f32) -> Option<Element<'_, Message>> {
+        const CARD: f32 = 420.0;
+        let (id, x, y) = self.hover.as_ref()?;
+        let node = self.agents.nodes.get(id)?;
+        let held = self.agents.held(id, self.time());
+        let mut lines: Vec<Element<Message>> = room_agents::about(node, held)
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| match i {
+                0 => widget::text(line).font(cosmic::font::bold()).into(),
+                _ => widget::text(line).size(13.0).into(),
+            })
+            .collect();
+        let hint = match node.kind {
+            Some(NodeKind::Agent(_)) => {
+                "Click for details, double-click to bring its terminal forward"
+            }
+            _ => "Click for details",
+        };
+        lines.push(widget::text(hint).size(12.0).class(dim()).into());
+        let left = (x + 16.0).min(width - CARD).max(0.0);
+        // Below the node, or above it when it is low on the map.
+        let top = if *y > tall * 0.6 {
+            (y - 220.0).max(0.0)
+        } else {
+            y + 16.0
+        };
+        let card = widget::container(widget::Column::with_children(lines).spacing(2))
+            .padding([8, 12])
+            .max_width(CARD)
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                container::Style {
+                    background: Some(Color::from(cosmic.bg_component_color()).into()),
+                    border: cosmic::iced::Border {
+                        color: Color::from(cosmic.bg_divider()),
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    shadow: cosmic::iced::Shadow {
+                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                        offset: cosmic::iced::Vector::new(0.0, 4.0),
+                        blur_radius: 12.0,
+                    },
+                    ..Default::default()
+                }
+            }));
+        Some(
+            widget::container(card)
+                .padding(Padding {
+                    top,
+                    left,
+                    ..Padding::ZERO
+                })
+                .into(),
+        )
     }
 
     /// An agent waiting on the person, on one line: its name, why, for how long, a box to
@@ -768,7 +833,7 @@ impl Room {
                 parts.push(job(it, selected, zoom));
             }
         }
-        widget::Column::with_children(parts).spacing(4).into()
+        widget::Column::with_children(parts).spacing(6).into()
     }
 
     fn confirming(&self) -> Option<Element<'_, Message>> {
@@ -1286,66 +1351,74 @@ fn job(it: &Item, selected: bool, zoom: f32) -> Element<'static, Message> {
         Mode::Bench => danger(),
         _ => warning(),
     };
-    let mut line: Vec<Element<Message>> = vec![
+    let mut first: Vec<Element<Message>> = vec![
         widget::text(it.mode.to_string())
             .font(cosmic::font::bold())
             .class(cosmic::theme::Text::Color(mode))
             .into(),
     ];
     if it.holding && it.slot != "HOLDING" {
-        line.push(
+        first.push(
             widget::text(it.slot.to_lowercase())
                 .class(cosmic::theme::Text::Color(warning()))
                 .into(),
         );
     }
     if !it.holding {
-        line.push(
+        first.push(
             widget::text(it.slot.replace("queued ", "#"))
                 .class(dim())
                 .into(),
         );
     }
-    line.push(
+    first.push(
         widget::text(it.label.as_str().to_string())
             .font(cosmic::font::bold())
-            .class(cosmic::theme::Text::Color(hue))
+            .width(Length::Fill)
+            .wrapping(cosmic::iced::widget::text::Wrapping::None)
+            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
             .into(),
     );
-    line.push(
+    let time = Span(it.time).to_string();
+    first.push(match it.holding {
+        true => widget::text(format!("for {time}")).into(),
+        false => widget::text(format!("waited {time}")).class(dim()).into(),
+    });
+    let mut second: Vec<Element<Message>> = vec![
         widget::text(it.agent.clone())
             .class(cosmic::theme::Text::Color(hue))
             .into(),
-    );
+    ];
     if let Some(device) = &it.device {
-        line.push(
+        second.push(
             widget::text(device.as_str().to_string())
                 .class(cosmic::theme::Text::Color(Color::from_rgb8(200, 110, 200)))
                 .into(),
         );
     }
     if let Some(batch) = &it.batch {
-        line.push(widget::text(batch.progress()).class(dim()).into());
+        second.push(widget::text(batch.progress()).class(dim()).into());
     } else if let Some(eta) = it.eta.filter(|_| it.holding) {
-        line.push(
+        second.push(
             widget::text(format!("~{} left", Span(eta)))
                 .class(dim())
                 .into(),
         );
     }
     if let Some(rate) = it.rate {
-        line.push(
+        second.push(
             widget::text(format!("{} cpu", cores(rate)))
                 .class(dim())
                 .into(),
         );
     }
-    let time = Span(it.time).to_string();
-    line.push(match it.holding {
-        true => widget::text(format!("for {time}")).into(),
-        false => widget::text(format!("waited {time}")).class(dim()).into(),
-    });
-    let mut parts: Vec<Element<Message>> = vec![widget::flex_row(line).spacing(6).into()];
+    let mut parts: Vec<Element<Message>> = vec![
+        widget::Row::with_children(first)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        widget::flex_row(second).spacing(8).into(),
+    ];
     if it.alarm && !selected {
         parts.push(
             widget::text(it.note.clone())
@@ -1356,30 +1429,53 @@ fn job(it: &Item, selected: bool, zoom: f32) -> Element<'static, Message> {
     if selected {
         parts.extend(detail(it, zoom));
     }
-    let stripe = if it.holding { Some(mode) } else { None };
-    let card = widget::container(widget::Column::with_children(parts).spacing(3))
-        .padding([4, 8])
-        .width(Length::Fill)
-        .class(cosmic::theme::Container::custom(move |theme| {
-            let cosmic = theme.cosmic();
-            let fill = match (selected, stripe.is_some()) {
-                (true, _) => Color {
-                    a: 0.35,
-                    ..Color::from(cosmic.accent_color())
-                },
-                (false, true) => Color { a: 0.1, ..green() },
-                (false, false) => Color::from(cosmic.bg_component_color()),
-            };
-            container::Style {
-                background: Some(fill.into()),
-                border: cosmic::iced::Border {
-                    color: stripe.unwrap_or(Color::TRANSPARENT),
-                    width: if stripe.is_some() { 1.0 } else { 0.0 },
-                    radius: 4.0.into(),
-                },
+    // The stripe says how it holds the machine, or that it waits.
+    let stripe = if it.holding { mode } else { dim_color() };
+    let running = it.holding;
+    let card = widget::container(
+        widget::Row::with_children(vec![
+            widget::container(widget::space::horizontal())
+                .width(Length::Fixed(4.0))
+                .height(Length::Fill)
+                .class(cosmic::theme::Container::custom(move |_| {
+                    container::Style {
+                        background: Some(stripe.into()),
+                        border: cosmic::iced::Border {
+                            radius: [6.0, 0.0, 0.0, 6.0].into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .into(),
+            widget::container(widget::Column::with_children(parts).spacing(2))
+                .padding([6, 10])
+                .width(Length::Fill)
+                .into(),
+        ])
+        .height(Length::Shrink),
+    )
+    .width(Length::Fill)
+    .class(cosmic::theme::Container::custom(move |theme| {
+        let cosmic = theme.cosmic();
+        let base = Color::from(cosmic.bg_component_color());
+        let fill = match (selected, running) {
+            (true, _) => Color {
+                a: 0.4,
+                ..Color::from(cosmic.accent_color())
+            },
+            (false, true) => base,
+            (false, false) => Color { a: 0.55, ..base },
+        };
+        container::Style {
+            background: Some(fill.into()),
+            border: cosmic::iced::Border {
+                radius: 6.0.into(),
                 ..Default::default()
-            }
-        }));
+            },
+            ..Default::default()
+        }
+    }));
     let pressed = Message::Room(RoomMessage::Select(it.machine.clone(), it.pid));
     let card = widget::mouse_area(card).on_press(pressed);
     match it.note.is_empty() || it.alarm || selected {
@@ -1497,12 +1593,12 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Graph {
         &self,
         _state: &(),
         renderer: &cosmic::Renderer,
-        _theme: &cosmic::Theme,
+        theme: &cosmic::Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<cosmic::Renderer>> {
         let mut frame = Frame::new(renderer, bounds.size());
-        well(&mut frame, bounds);
+        well(&mut frame, bounds, theme);
         let column = bounds.width / KEPT as f32;
         let single: Vec<f32> = self.now.into_iter().collect();
         let points = if self.points.is_empty() {
@@ -1537,12 +1633,12 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Bar {
         &self,
         _state: &(),
         renderer: &cosmic::Renderer,
-        _theme: &cosmic::Theme,
+        theme: &cosmic::Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry<cosmic::Renderer>> {
         let mut frame = Frame::new(renderer, bounds.size());
-        well(&mut frame, bounds);
+        well(&mut frame, bounds, theme);
         let width = bounds.width * self.share.clamp(0.0, 1.0);
         frame.fill(
             &Path::rounded_rectangle(Point::ORIGIN, Size::new(width, bounds.height), 3.0.into()),
@@ -1579,10 +1675,15 @@ fn bar<'a>(share: f32, caption: String, height: f32) -> Element<'a, Message> {
         .into()
 }
 
-fn well(frame: &mut Frame<cosmic::Renderer>, bounds: Rectangle) {
+/// The ground a meter is drawn on: the window's own colour, so it reads the same over a
+/// translucent card in either theme.
+fn well(frame: &mut Frame<cosmic::Renderer>, bounds: Rectangle, theme: &cosmic::Theme) {
     frame.fill(
         &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 3.0.into()),
-        Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+        Color {
+            a: 0.85,
+            ..Color::from(theme.cosmic().bg_color())
+        },
     );
 }
 

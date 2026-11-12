@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use claudo_protocol::{Node, NodeKind, NodeState};
 use claudo_room::agents::{
-    AGENT, Agents, CAPTION_REACH, CHILD, LABELLED, Map, PAD, Tint, V, about, badges, codex,
-    dibs_job, hue, made_by, phase, started, started_word, state_tint,
+    AGENT, CAPTION_REACH, CHILD, LABELLED, Map, PAD, Tint, V, badges, codex, dibs_job, hue,
+    made_by, phase, started, started_word, state_tint,
 };
 use cosmic::iced::widget::canvas::{self, Frame, Path, Stroke, path::Arc};
 use cosmic::iced::{Radians, Rectangle, mouse};
@@ -21,7 +21,6 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 /// The map as laid out for this frame, at `scale` screen pixels to a map unit.
 pub struct MapView<'a> {
-    pub agents: &'a Agents,
     pub map: Map<'a>,
     pub scale: f32,
     /// Seconds on the room's clock, for what pulses.
@@ -83,12 +82,14 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
         let pointer = cursor.position_in(bounds);
         match event {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let hovered = pointer
-                    .and_then(|pointer| self.under(pointer))
-                    .map(|drawn| drawn.node.id.clone());
+                let under = pointer.and_then(|pointer| self.under(pointer));
+                let hovered = under.as_ref().map(|drawn| drawn.node.id.clone());
                 (hovered != state.hovered).then(|| {
                     state.hovered = hovered;
-                    canvas::Action::request_redraw()
+                    // The page draws the hover's card over the canvas: text a canvas draws
+                    // goes over all its shapes, so a card drawn here would not hide the map.
+                    let at = under.map(|drawn| (drawn.node.id.clone(), drawn.at.x, drawn.at.y));
+                    canvas::Action::publish(Message::Room(RoomMessage::Hover(at)))
                 })
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -208,14 +209,6 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
             frame.stroke(
                 &Path::circle(drawn.at, drawn.radius + 4.0),
                 Stroke::default().with_color(palette.strong).with_width(1.5),
-            );
-            hover(
-                &mut frame,
-                &palette,
-                drawn.node,
-                self.agents.held(&drawn.node.id, self.now),
-                drawn.at,
-                bounds,
             );
         }
         vec![frame.into_geometry()]
@@ -578,51 +571,5 @@ fn centred(
             ..Default::default()
         });
         left += wide(text, size);
-    }
-}
-
-/// What the hover says about a node, in a box beside it.
-fn hover(
-    frame: &mut Frame<cosmic::Renderer>,
-    palette: &Palette,
-    node: &Node,
-    held: Option<f64>,
-    at: Point,
-    bounds: Rectangle,
-) {
-    let mut lines = about(node, held);
-    lines.push(
-        match node.kind {
-            Some(NodeKind::Agent(_)) => {
-                "Click for details, double-click to bring its terminal forward"
-            }
-            _ => "Click for details",
-        }
-        .to_string(),
-    );
-    let size = 12.0;
-    let width = lines
-        .iter()
-        .map(|line| wide(line, size))
-        .fold(0.0, f32::max)
-        .min(420.0)
-        + 16.0;
-    let height = lines.len() as f32 * size * 1.4 + 12.0;
-    let x = (at.x + 16.0).min(bounds.width - width).max(0.0);
-    let y = (at.y + 16.0).min(bounds.height - height).max(0.0);
-    let card = Path::rounded_rectangle(Point::new(x, y), Size::new(width, height), 6.0.into());
-    frame.fill(&card, palette.ground);
-    frame.stroke(
-        &card,
-        Stroke::default().with_color(palette.weak).with_width(1.0),
-    );
-    for (i, line) in lines.iter().enumerate() {
-        frame.fill_text(canvas::Text {
-            content: cut(line, size, width - 16.0),
-            position: Point::new(x + 8.0, y + 6.0 + i as f32 * size * 1.4),
-            color: if i == 0 { palette.strong } else { palette.text },
-            size: size.into(),
-            ..Default::default()
-        });
     }
 }
