@@ -5083,6 +5083,9 @@ mod app {
                     }
                     self.room.update(room::RoomMessage::Focus(agent));
                 }
+                Message::Room(room::RoomMessage::Agent(id)) if self.modifiers.shift() => {
+                    self.room.update(room::RoomMessage::Focus(id));
+                }
                 Message::Room(message) => {
                     self.room.update(message);
                 }

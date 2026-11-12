@@ -79,6 +79,8 @@ pub struct Room {
 pub enum RoomMessage {
     Connected(Commands),
     TogglePrs,
+    /// An agent's name: opens its details, or with Shift brings its terminal forward.
+    Agent(NodeId),
     /// A pull request's link: opens it, or with Shift brings forward the agent that opened it.
     PullRequest {
         link: String,
@@ -209,6 +211,8 @@ impl Room {
             }
             RoomMessage::Focus(id) => self.act(id, Act::Focus),
             RoomMessage::TogglePrs => self.prs_open = !self.prs_open,
+            // The app sends `Focus` instead when Shift is held.
+            RoomMessage::Agent(id) => self.picked = Some(id),
             // The app opens the link itself unless Shift is held.
             RoomMessage::PullRequest { agent, .. } => self.act(agent, Act::Focus),
             RoomMessage::Pick(id) => {
@@ -574,7 +578,7 @@ impl Room {
                     .font(cosmic::font::bold())
                     .class(cosmic::theme::Text::Color(colour)),
             )
-            .on_press(Message::Room(RoomMessage::Pick(id.clone())))
+            .on_press(Message::Room(RoomMessage::Agent(id.clone())))
             .into(),
             widget::tooltip(
                 widget::text(why.clone())
@@ -1091,6 +1095,7 @@ fn pull_request_table<'a>(prs: &[(&Node, room_agents::Shown)]) -> Element<'a, Me
         };
         let agent = node.name.clone().unwrap_or_else(|| "unnamed".into());
         let colour = super::room_map::rgb(room_agents::agent_colour(&agent));
+        let id = node.id.clone();
         widget::row::with_children(vec![
             widget::container(pull_request(name.to_string(), pr.link, &node.id))
                 .width(Length::Fixed(200.0))
@@ -1106,10 +1111,14 @@ fn pull_request_table<'a>(prs: &[(&Node, room_agents::Shown)]) -> Element<'a, Me
             .into(),
             widget::container(ci).width(Length::Fixed(90.0)).into(),
             widget::container(
-                widget::text(agent)
-                    .size(13.0)
-                    .class(cosmic::theme::Text::Color(colour))
-                    .wrapping(text::Wrapping::None),
+                widget::mouse_area(
+                    widget::text(agent)
+                        .size(13.0)
+                        .class(cosmic::theme::Text::Color(colour))
+                        .wrapping(text::Wrapping::None),
+                )
+                .interaction(cosmic::iced::mouse::Interaction::Pointer)
+                .on_press(Message::Room(RoomMessage::Agent(id))),
             )
             .width(Length::Fixed(260.0))
             .clip(true)

@@ -148,7 +148,18 @@ impl Room {
                     ui.add(egui::Label::new(RichText::new(title).weak()).truncate());
                     ci(ui, pr.checks);
                     let agent = node.name.as_deref().unwrap_or("unnamed");
-                    ui.label(RichText::new(agent).color(rgb(agent_colour(agent))));
+                    let label =
+                        egui::Label::new(RichText::new(agent).color(rgb(agent_colour(agent))))
+                            .sense(Sense::click());
+                    let response = ui
+                        .add(label)
+                        .on_hover_text("Click for details, shift-click for its terminal");
+                    if response.clicked() {
+                        match ui.input(|input| input.modifiers.shift) {
+                            true => sent.push(focus(&node.id)),
+                            false => self.selected = Some(node.id.clone()),
+                        }
+                    }
                     ui.end_row();
                 }
             });
@@ -329,14 +340,16 @@ impl Room {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").strong().color(warn));
                         let name = node.name.as_deref().unwrap_or("unnamed");
-                        if ui
-                            .add(
-                                egui::Label::new(RichText::new(name).strong().color(warn))
-                                    .sense(Sense::click()),
-                            )
-                            .clicked()
-                        {
-                            self.selected = Some(node.id.clone());
+                        let label = egui::Label::new(RichText::new(name).strong().color(warn))
+                            .sense(Sense::click());
+                        let response = ui
+                            .add(label)
+                            .on_hover_text("Click for details, shift-click for its terminal");
+                        if response.clicked() {
+                            match ui.input(|input| input.modifiers.shift) {
+                                true => self.sent.push(focus(&node.id)),
+                                false => self.selected = Some(node.id.clone()),
+                            }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
@@ -530,6 +543,14 @@ impl Room {
     }
 }
 
+fn focus(agent: &str) -> Command {
+    Command::Act {
+        node: agent.to_string(),
+        action: Action::Focus,
+        request: 0,
+    }
+}
+
 /// A pull request's link: opens it, or with Shift brings forward the agent that opened it.
 fn pull_request(
     ui: &mut egui::Ui,
@@ -544,11 +565,7 @@ fn pull_request(
     );
     if ui.link(label).on_hover_text(hint).clicked() {
         match ui.input(|input| input.modifiers.shift) {
-            true => sent.push(Command::Act {
-                node: agent.to_string(),
-                action: Action::Focus,
-                request: 0,
-            }),
+            true => sent.push(focus(agent)),
             false => ui.ctx().open_url(egui::OpenUrl::new_tab(pr.link)),
         }
     }
