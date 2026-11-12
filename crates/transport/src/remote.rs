@@ -22,6 +22,29 @@ use super::{Commands, Events, Input};
 /// reads it the same under any login shell.
 const BRIDGE: &str = r#"sh -c 'exec "${CARGO_HOME:-$HOME/.cargo}/bin/claudo-cosmic" --bridge'"#;
 
+/// Runs the daemon's room bridge wherever `cargo xtask install-daemon` put it.
+const ROOM_BRIDGE: &str =
+    r#"exec "${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/claudo-daemon" --room-bridge"#;
+
+/// The control room of the daemon on `host` as ssh names it, or on this computer, reached
+/// again whenever it is lost.
+pub fn connect_room(host: Option<String>) -> (Commands, Events) {
+    connect_with(move || match &host {
+        Some(host) => {
+            let mut ssh = Process::new("ssh");
+            ssh.args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=10"])
+                .args(["-o", "ServerAliveCountMax=3", host])
+                .arg(format!("sh -c '{ROOM_BRIDGE}'"));
+            ssh
+        }
+        None => {
+            let mut sh = Process::new("sh");
+            sh.args(["-c", ROOM_BRIDGE]);
+            sh
+        }
+    })
+}
+
 /// Where this computer's claudo serves its backend.
 pub fn socket() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")

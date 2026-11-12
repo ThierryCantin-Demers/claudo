@@ -486,6 +486,10 @@ wrote it.
   that watch each other echo nothing: dibs jobs, which both see, would otherwise outlive
   their end. An `Act` on a node another computer shows goes to that computer's daemon, and
   its `Failed` back to the tab that asked.
+- **The whole room for apps**: the daemon also serves on `$XDG_RUNTIME_DIR/claudo-room.sock`
+  (mode 0600) what a page hears, each line a `Command` in or a `ServerEvent` out, and
+  `claudo-daemon --room-bridge` joins it to stdin and stdout, so `transport::connect_room`
+  reaches it on this computer or over ssh, reconnecting like `--on`.
 - **One hub per daemon** (`core/src/hub.rs`). Every WebSocket is a client of one headless
   `Backend`, on the thread that owns it, as the transport's clients are; a backend per
   socket ran every agent and collector once per tab. `examples/hub_probe` checks it.

@@ -6,6 +6,10 @@
 //! agents beside this one's: each serves its room on a socket only its user can open, and
 //! `claudo-daemon --bridge`, run over ssh, joins that socket to ssh's stdin and stdout.
 //!
+//! The whole room, as the page hears it, is served the same way on a second socket, which
+//! `claudo-daemon --room-bridge` joins to stdin and stdout: for the COSMIC app, on this
+//! computer or over ssh.
+//!
 //! Auth: a token, made on the first start and kept in claudo's config so the page's
 //! link survives restarts, must be presented as `?token=…` on the WS upgrade. The
 //! token is part of the URL we print, so the served page can read it from its own
@@ -44,8 +48,10 @@ struct AppState {
 }
 
 fn main() -> ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("--bridge") {
-        return claudo_transport::bridge_at(&machine_socket());
+    match std::env::args().nth(1).as_deref() {
+        Some("--bridge") => return claudo_transport::bridge_at(&machine_socket()),
+        Some("--room-bridge") => return claudo_transport::bridge_at(&room_socket()),
+        _ => {}
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -80,6 +86,7 @@ async fn serve() {
         .filter(|host| !host.is_empty())
         .map(str::to_string);
     let machines = Arc::new(Machines::spawn(others, &hub));
+    serve_room(&room_socket(), hub.clone(), machines.clone());
     let state = AppState {
         token: Arc::new(token.clone()),
         hub,
@@ -107,6 +114,69 @@ async fn serve() {
     println!("  serving bundle from: {}", static_dir.display());
 
     axum::serve(listener, app).await.expect("serve");
+}
+
+/// Where this computer's daemon serves its whole room to apps, as the page hears it.
+fn room_socket() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("claudo-room.sock")
+}
+
+/// Serves the room on `path`, a socket only this user can open: one JSON line per command
+/// in and per event out, each client heard as a page is. Leaves a daemon already serving.
+fn serve_room(path: &Path, hub: Hub, machines: Arc<Machines>) {
+    use std::io::{BufRead, BufReader, BufWriter};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    if UnixStream::connect(path).is_ok() {
+        return;
+    }
+    let _ = fs::remove_file(path);
+    let listener = match UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("cannot serve the room on {}: {error}", path.display());
+            return;
+        }
+    };
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let Ok(writer) = stream.try_clone() else {
+                continue;
+            };
+            let (events, mut sent) = unbounded_channel::<ServerEvent>();
+            let asker = events.clone();
+            let client = hub.connect(events);
+            let machines = machines.clone();
+            std::thread::spawn(move || {
+                let mut writer = BufWriter::new(writer);
+                while let Some(event) = sent.blocking_recv() {
+                    let Ok(line) = serde_json::to_string(&event) else {
+                        continue;
+                    };
+                    if writeln!(writer, "{line}")
+                        .and_then(|()| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            std::thread::spawn(move || {
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                    if let Ok(command) = serde_json::from_str::<Command>(&line)
+                        && !machines.act(&command, &asker)
+                    {
+                        client.send(command);
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Where this computer's daemon serves its room to other computers' daemons.
