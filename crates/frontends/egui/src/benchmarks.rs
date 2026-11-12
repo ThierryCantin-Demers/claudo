@@ -186,6 +186,10 @@ fn summary(ui: &mut Ui, seen: &[Seen]) {
                 .strong(),
         );
         ui.add_space(12.0);
+        if new == seen.len() {
+            ui.weak("The first night measured: nothing to compare with yet.");
+            return;
+        }
         let weak = ui.visuals().weak_text_color();
         let count = |ui: &mut Ui, n: usize, words: &str, colour: Color32| {
             ui.label(
@@ -202,6 +206,9 @@ fn summary(ui: &mut Ui, seen: &[Seen]) {
             count(ui, new, "without a night before", weak);
         }
     });
+    if new == seen.len() {
+        return;
+    }
     ui.weak(format!(
         "Each value against the same benchmark's night before; under {STEADY:.0}% is steady."
     ));
@@ -240,9 +247,41 @@ fn summary(ui: &mut Ui, seen: &[Seen]) {
     });
 }
 
-/// A table's every benchmark and quantity, each cell tinted by how it moved since its night
-/// before. Gives back the quantity whose cell was clicked.
+/// A table's every benchmark measured and quantity, each cell tinted by how it moved since
+/// its night before, with a bar against its column. Gives back the quantity clicked.
 fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
+    let rows: Vec<(&Row, Vec<Option<Trend>>)> = group
+        .rows
+        .iter()
+        .map(|row| {
+            let trends = group
+                .quantities
+                .iter()
+                .map(|quantity| trend(row.benchmark, &quantity.name, point))
+                .collect();
+            (row, trends)
+        })
+        .filter(|(_, trends): &(_, Vec<Option<Trend>>)| trends.iter().any(Option::is_some))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let columns: Vec<(f64, Option<f64>)> = group
+        .quantities
+        .iter()
+        .enumerate()
+        .map(|(column, quantity)| {
+            let values = rows
+                .iter()
+                .filter_map(|(_, trends)| trends[column].as_ref().map(|trend| trend.now));
+            let longest = values.clone().fold(0.0, f64::max);
+            let best = values.reduce(|a, b| match quantity.higher_is_better {
+                true => a.max(b),
+                false => a.min(b),
+            });
+            (longest, best)
+        })
+        .collect();
     let mut clicked = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new(&group.name).size(15.0).strong());
@@ -257,12 +296,12 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
             for quantity in group.quantities {
                 ui.add_sized(
                     vec2(CELL.x, 0.0),
-                    egui::Label::new(RichText::new(heading(quantity)).small().weak()).wrap(),
+                    egui::Label::new(RichText::new(heading(quantity)).small()).wrap(),
                 );
             }
             ui.end_row();
             let mut family = None;
-            for row in &group.rows {
+            for (row, trends) in &rows {
                 let (this, variant) = split(&row.label);
                 if this != family {
                     family = this;
@@ -271,13 +310,20 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
                         ui.end_row();
                     }
                 }
+                let colour = colour(group, &row.label);
                 ui.horizontal(|ui| {
-                    swatch(ui, colour(group, &row.label));
+                    swatch(ui, colour);
                     ui.label(variant);
                 });
-                for quantity in group.quantities {
-                    let trend = trend(row.benchmark, &quantity.name, point);
-                    if tile(ui, trend, quantity).clicked() {
+                for ((quantity, trend), (longest, best)) in
+                    group.quantities.iter().zip(trends).zip(&columns)
+                {
+                    let shown = Shown {
+                        colour,
+                        longest: *longest,
+                        best: trend.as_ref().is_some_and(|trend| Some(trend.now) == *best),
+                    };
+                    if tile(ui, trend.as_ref(), quantity, shown).clicked() {
                         clicked = Some(quantity.name.clone());
                     }
                 }
@@ -287,8 +333,17 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
     clicked
 }
 
-/// A value, and how it moved since its night before, on a tint of that move.
-fn tile(ui: &mut Ui, trend: Option<Trend>, quantity: &Quantity) -> egui::Response {
+/// How a cell sits in its table: its row's colour, its column's largest value, and whether
+/// it is the column's best.
+struct Shown {
+    colour: Color32,
+    longest: f64,
+    best: bool,
+}
+
+/// A value, how it moved since its night before on a tint of that move, and a bar against
+/// its column.
+fn tile(ui: &mut Ui, trend: Option<&Trend>, quantity: &Quantity, shown: Shown) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(CELL, Sense::click());
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
@@ -324,35 +379,53 @@ fn tile(ui: &mut Ui, trend: Option<Trend>, quantity: &Quantity) -> egui::Respons
         );
     }
     painter.text(
-        rect.left_top() + vec2(8.0, 3.0),
+        rect.left_top() + vec2(8.0, 4.0),
         Align2::LEFT_TOP,
         number(trend.now),
-        FontId::proportional(15.0),
-        visuals.strong_text_color(),
+        FontId::proportional(if shown.best { 16.5 } else { 15.0 }),
+        match shown.best {
+            true => visuals.strong_text_color(),
+            false => visuals.text_color(),
+        },
     );
-    let (said, colour) = match change {
-        Some((percent, _)) if percent.abs() < STEADY => {
-            (signed(percent), visuals.weak_text_color())
-        }
-        Some((percent, better)) => (signed(percent), if better { GREEN } else { RED }),
-        None => ("first night".to_string(), visuals.weak_text_color()),
-    };
-    painter.text(
-        rect.left_bottom() + vec2(8.0, -3.0),
-        Align2::LEFT_BOTTOM,
-        said,
-        FontId::proportional(11.0),
-        colour,
+    if let Some((percent, better)) = change {
+        painter.text(
+            rect.right_top() + vec2(-8.0, 6.0),
+            Align2::RIGHT_TOP,
+            signed(percent),
+            FontId::proportional(11.0),
+            shade(ui, percent, better),
+        );
+    }
+    let track = egui::Rect::from_min_max(
+        rect.left_bottom() + vec2(8.0, -9.0),
+        rect.right_bottom() + vec2(-8.0, -5.0),
     );
+    if shown.longest > 0.0 {
+        let mut filled = track;
+        filled.set_width(track.width() * (trend.now / shown.longest).clamp(0.0, 1.0) as f32);
+        painter.rect_filled(filled, 2.0, shown.colour);
+    }
     response.on_hover_ui(|ui| {
         ui.strong(format!("{} {}", number(trend.now), quantity.unit));
-        if let Some((before, night)) = trend.before {
-            ui.label(format!(
-                "{} {} on the night of {}",
-                number(before),
-                quantity.unit,
-                date(night as f64)
-            ));
+        if shown.best {
+            ui.label(match quantity.higher_is_better {
+                true => "The highest of its column",
+                false => "The lowest of its column",
+            });
+        }
+        match trend.before {
+            Some((before, night)) => {
+                ui.label(format!(
+                    "{} {} on the night of {}",
+                    number(before),
+                    quantity.unit,
+                    date(night as f64)
+                ));
+            }
+            None => {
+                ui.weak("Its first night");
+            }
         }
         ui.weak(when(&trend.measurement.at));
         if let Some(machine) = &trend.measurement.machine {
