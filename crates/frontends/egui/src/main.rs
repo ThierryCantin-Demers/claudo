@@ -20,7 +20,9 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([900.0, 700.0])
+            .with_decorations(title_bar::load()),
         ..Default::default()
     };
     eframe::run_native(
@@ -42,7 +44,36 @@ fn main() -> eframe::Result<()> {
 
 /// The daemon's room to show, from `--room <page link>` or `CLAUDO_ROOM`; without one, the
 /// window runs its own backend, which has no room.
-const TITLE_BAR_KEY: &str = "title-bar";
+/// Whether a native window has its title bar, kept in a file of its own rather than with
+/// eframe's storage, which is read only once the window exists: a window opened with one and
+/// told otherwise keeps it until the compositor next configures it.
+#[cfg(not(target_arch = "wasm32"))]
+mod title_bar {
+    use std::path::PathBuf;
+
+    fn path() -> Option<PathBuf> {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        Some(config.join("claudo/egui-title-bar"))
+    }
+
+    pub fn load() -> bool {
+        path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_none_or(|text| text.trim() != "hidden")
+    }
+
+    pub fn save(shown: bool) {
+        let Some(path) = path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, if shown { "shown" } else { "hidden" });
+    }
+}
 
 /// What a window asks of its backend as it connects.
 fn first_asked() -> [Command; 4] {
@@ -159,6 +190,8 @@ struct ClaudoApp {
     /// Whether a native window keeps its title bar, and what the window was last told.
     title_bar: bool,
     title_bar_told: Option<bool>,
+    /// Frames left in the resize that makes the compositor apply a title bar change.
+    nudge: u8,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -210,10 +243,12 @@ impl ClaudoApp {
             page: first_page(),
             room: room::Room::default(),
             desk: desk::Desk::new(storage),
-            title_bar: storage
-                .and_then(|storage| eframe::get_value(storage, TITLE_BAR_KEY))
-                .unwrap_or(true),
+            #[cfg(not(target_arch = "wasm32"))]
+            title_bar: title_bar::load(),
+            #[cfg(target_arch = "wasm32")]
+            title_bar: true,
             title_bar_told: None,
+            nudge: 0,
             machines: machines::Machines::new(storage),
         }
     }
@@ -641,7 +676,6 @@ impl ClaudoApp {
 
 impl eframe::App for ClaudoApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, TITLE_BAR_KEY, &self.title_bar);
         self.desk.save(storage);
         self.machines.save(storage);
     }
@@ -660,10 +694,28 @@ impl ClaudoApp {
     /// maximise it. The compositor draws the title bar, so a click on it never reaches here.
     /// Called before the bar's widgets, which take the clicks that land on them.
     fn window_bar(&mut self, ui: &mut egui::Ui) {
-        if self.title_bar_told != Some(self.title_bar) {
+        // The window opens as the saved setting says, so only a change is sent.
+        let told = *self.title_bar_told.get_or_insert(self.title_bar);
+        if told != self.title_bar {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Decorations(self.title_bar));
             self.title_bar_told = Some(self.title_bar);
+            #[cfg(not(target_arch = "wasm32"))]
+            title_bar::save(self.title_bar);
+            self.nudge = 2;
+        }
+        // A changed title bar shows only once the compositor configures the window again,
+        // which a resize asks for.
+        if self.nudge > 0 {
+            let inner = ui.ctx().input(|input| input.viewport().inner_rect);
+            if let Some(inner) = inner {
+                let grow = if self.nudge == 2 { 1.0 } else { 0.0 };
+                let size = inner.size() + egui::vec2(0.0, grow);
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+            self.nudge -= 1;
+            ui.ctx().request_repaint();
         }
         let bar = ui.interact(
             ui.max_rect(),
