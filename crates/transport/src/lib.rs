@@ -162,24 +162,39 @@ mod ws {
     use super::*;
     use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 
-    /// Web transport: JSON-over-WebSocket to the daemon. Commands sent before the
-    /// socket opens are buffered and flushed on `Opened`.
+    /// JSON over the daemon's WebSocket, for the page and for a native window showing its
+    /// room. Commands sent while the socket is not open wait for it, and a socket that closes
+    /// is dialled again, sooner at first, then every few seconds.
     pub struct WsClient {
+        url: String,
         sender: WsSender,
         receiver: WsReceiver,
         open: bool,
+        /// Whether it ever opened, so opening again says the link is back.
+        opened: bool,
         pending: Vec<Command>,
+        /// Polls left before dialling again, while closed; counted in polls rather than time,
+        /// since the page has no clock that std gives, and a frontend polls every frame.
+        retry_in: Option<u32>,
+        backoff: u32,
     }
+
+    /// Polls between attempts: a frontend polls about twenty times a second.
+    const FIRST_RETRY: u32 = 20;
+    const LAST_RETRY: u32 = 200;
 
     impl WsClient {
         pub fn connect(url: &str) -> Self {
-            let (sender, receiver) =
-                ewebsock::connect(url, ewebsock::Options::default()).expect("open websocket");
+            let (sender, receiver) = dial(url);
             Self {
+                url: url.to_string(),
                 sender,
                 receiver,
                 open: false,
+                opened: false,
                 pending: Vec::new(),
+                retry_in: None,
+                backoff: FIRST_RETRY,
             }
         }
 
@@ -188,6 +203,22 @@ mod ws {
                 sender.send(WsMessage::Text(text));
             }
         }
+
+        fn closed(&mut self, out: &mut Vec<ServerEvent>, detail: String) {
+            if self.retry_in.is_none() {
+                out.push(ServerEvent::Connection {
+                    connected: false,
+                    detail,
+                });
+                self.retry_in = Some(self.backoff);
+                self.backoff = (self.backoff * 2).min(LAST_RETRY);
+            }
+            self.open = false;
+        }
+    }
+
+    fn dial(url: &str) -> (WsSender, WsReceiver) {
+        ewebsock::connect(url, ewebsock::Options::default()).expect("open websocket")
     }
 
     impl Transport for WsClient {
@@ -201,10 +232,26 @@ mod ws {
 
         fn poll(&mut self) -> Vec<ServerEvent> {
             let mut out = Vec::new();
+            if let Some(left) = self.retry_in.as_mut() {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    self.retry_in = None;
+                    (self.sender, self.receiver) = dial(&self.url);
+                }
+                return out;
+            }
             while let Some(event) = self.receiver.try_recv() {
                 match event {
                     WsEvent::Opened => {
                         self.open = true;
+                        self.backoff = FIRST_RETRY;
+                        if self.opened {
+                            out.push(ServerEvent::Connection {
+                                connected: true,
+                                detail: String::new(),
+                            });
+                        }
+                        self.opened = true;
                         for cmd in std::mem::take(&mut self.pending) {
                             Self::ship(&mut self.sender, &cmd);
                         }
@@ -215,14 +262,14 @@ mod ws {
                         }
                     }
                     WsEvent::Message(_) => {}
-                    WsEvent::Error(detail) => out.push(ServerEvent::Connection {
-                        connected: false,
-                        detail,
-                    }),
-                    WsEvent::Closed => out.push(ServerEvent::Connection {
-                        connected: false,
-                        detail: "the daemon closed the connection".to_string(),
-                    }),
+                    WsEvent::Error(detail) => {
+                        self.closed(&mut out, detail);
+                        break;
+                    }
+                    WsEvent::Closed => {
+                        self.closed(&mut out, "the daemon closed the connection".into());
+                        break;
+                    }
                 }
             }
             out

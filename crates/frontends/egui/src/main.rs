@@ -42,6 +42,16 @@ fn main() -> eframe::Result<()> {
 
 /// The daemon's room to show, from `--room <page link>` or `CLAUDO_ROOM`; without one, the
 /// window runs its own backend, which has no room.
+/// What a window asks of its backend as it connects.
+fn first_asked() -> [Command; 4] {
+    [
+        Command::GetStatus,
+        Command::GetSettings,
+        Command::GetCapabilities,
+        Command::ListConversations,
+    ]
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn transport() -> Box<dyn claudo_transport::Transport> {
     let args: Vec<String> = std::env::args().collect();
@@ -165,10 +175,9 @@ fn first_page() -> Page {
 impl ClaudoApp {
     fn new(storage: Option<&dyn eframe::Storage>) -> Self {
         let mut transport = transport();
-        transport.send(Command::GetStatus);
-        transport.send(Command::GetSettings);
-        transport.send(Command::GetCapabilities);
-        transport.send(Command::ListConversations);
+        for command in first_asked() {
+            transport.send(command);
+        }
         Self {
             transport,
             status: None,
@@ -582,6 +591,13 @@ impl ClaudoApp {
 
                 ServerEvent::Connection { connected, detail } => {
                     self.lost = (!connected).then_some(detail);
+                    // A daemon dialled again knows nothing of this window: ask what it asked
+                    // at the start. The room comes by itself.
+                    if connected {
+                        for command in first_asked() {
+                            self.transport.send(command);
+                        }
+                    }
                 }
 
                 ServerEvent::Room(event) => self.room.apply(event),
@@ -648,8 +664,8 @@ impl ClaudoApp {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
                     format!(
-                        "Lost the daemon ({detail}). What is shown may be out of date: reload the \
-                         page once it runs again."
+                        "Lost the daemon ({detail}). What is shown may be out of date until \
+                         it answers again; trying every few seconds."
                     ),
                 );
             });
