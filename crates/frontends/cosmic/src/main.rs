@@ -772,6 +772,8 @@ mod app {
             origin: Option<f32>,
             start: (f32, f32),
         },
+        /// The handle between the room's agents and its machines, from the split at the start.
+        Room { origin: Option<f32>, start: f32 },
         /// A tile picked up by its title, or with Ctrl anywhere in it. Positions are in the
         /// tile row; `at` is set once the cursor has moved far enough to lift the tile, and
         /// `slot` is where it would land among the others.
@@ -1869,6 +1871,12 @@ mod app {
                 return;
             };
             self.current = w;
+            if let Some(Drag::Room { origin, start }) = &mut self.layout_mut().drag {
+                let (origin, start) = (*origin.get_or_insert(x), *start);
+                let spread = self.room.spread().max(1.0);
+                self.room.resize(start + (x - origin) / spread);
+                return;
+            }
             let room = self.tile_room(w).1;
             let total = self.total_share(w);
             let min = self.tile_min();
@@ -1915,7 +1923,7 @@ mod app {
                         tiles[left + 1].share = a + b - left_share;
                     }
                 }
-                Some(Drag::Tile { .. }) | None => {}
+                Some(Drag::Tile { .. } | Drag::Room { .. }) | None => {}
             }
         }
 
@@ -5083,6 +5091,13 @@ mod app {
                     }
                     self.room.update(room::RoomMessage::Focus(agent));
                 }
+                Message::Room(room::RoomMessage::StartSplit) => {
+                    let start = self.room.split();
+                    self.layout_mut().drag = Some(Drag::Room {
+                        origin: None,
+                        start,
+                    });
+                }
                 Message::Room(room::RoomMessage::Agent(id)) if self.modifiers.shift() => {
                     self.room.update(room::RoomMessage::Focus(id));
                 }
@@ -5764,6 +5779,9 @@ mod app {
                         .layout_mut()
                         .drag
                         .take_if(|drag| !matches!(drag, Drag::Tile { away: true, .. }));
+                    if matches!(ended, Some(Drag::Room { .. })) {
+                        self.room.save_panes();
+                    }
                     if let Some(Drag::Tile {
                         from,
                         at: Some(_),

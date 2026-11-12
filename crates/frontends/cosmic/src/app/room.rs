@@ -37,6 +37,35 @@ const CARD: f32 = 210.0;
 const CARD_GRAPH: f32 = 30.0;
 const ROW_BAR: f32 = 90.0;
 const ARRANGEMENT: &str = "room-arrangement";
+const PANES: &str = "room-panes";
+/// The handle between the agents and the machines, which drags their split.
+const HANDLE: f32 = 8.0;
+const ZOOMS: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// How the page is shared between the agents and the machines, and each one's zoom.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct Panes {
+    /// The agents' share of the width the two have.
+    split: f32,
+    agents: f32,
+    machines: f32,
+}
+
+impl Default for Panes {
+    fn default() -> Self {
+        Self {
+            split: 0.6,
+            agents: 1.0,
+            machines: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Side {
+    Agents,
+    Machines,
+}
 
 #[derive(Default)]
 pub struct Room {
@@ -73,12 +102,20 @@ pub struct Room {
     /// The open pull requests are listed under the summary.
     prs_open: bool,
     steady: Steady,
+    panes: Panes,
+    /// The width the agents and the machines shared when last drawn, which a drag of the
+    /// handle between them moves across.
+    spread: std::cell::Cell<f32>,
 }
 
 #[derive(Debug, Clone)]
 pub enum RoomMessage {
     Connected(Commands),
     TogglePrs,
+    /// The handle between the agents and the machines was pressed; the app follows the drag.
+    StartSplit,
+    /// A pane's zoom a step up or down, or back to whole with 0.
+    Zoom(Side, i8),
     /// An agent's name: opens its details, or with Shift brings its terminal forward.
     Agent(NodeId),
     /// A pull request's link: opens it, or with Shift brings forward the agent that opened it.
@@ -113,12 +150,39 @@ pub enum RoomMessage {
 
 impl Room {
     pub fn new() -> Self {
-        let arrangement = UiState::store()
+        let store = UiState::store();
+        let arrangement = store
+            .as_ref()
             .and_then(|store| store.get(&remote::scoped(ARRANGEMENT)).ok())
+            .unwrap_or_default();
+        let panes = store
+            .as_ref()
+            .and_then(|store| store.get(&remote::scoped(PANES)).ok())
             .unwrap_or_default();
         Self {
             arrangement,
+            panes,
             ..Self::default()
+        }
+    }
+
+    /// The agents' share of the width they and the machines have.
+    pub fn split(&self) -> f32 {
+        self.panes.split
+    }
+
+    pub fn spread(&self) -> f32 {
+        self.spread.get()
+    }
+
+    pub fn resize(&mut self, split: f32) {
+        self.panes.split = split.clamp(0.2, 0.85);
+    }
+
+    /// Keeps the split and the zooms for the next start.
+    pub fn save_panes(&self) {
+        if let Some(store) = UiState::store() {
+            let _ = store.set(&remote::scoped(PANES), self.panes);
         }
     }
 
@@ -211,6 +275,19 @@ impl Room {
             }
             RoomMessage::Focus(id) => self.act(id, Act::Focus),
             RoomMessage::TogglePrs => self.prs_open = !self.prs_open,
+            RoomMessage::StartSplit => {}
+            RoomMessage::Zoom(side, step) => {
+                let zoom = match side {
+                    Side::Agents => &mut self.panes.agents,
+                    Side::Machines => &mut self.panes.machines,
+                };
+                *zoom = match step {
+                    0 => 1.0,
+                    _ => ((*zoom * 10.0).round() + f32::from(step)) / 10.0,
+                }
+                .clamp(*ZOOMS.start(), *ZOOMS.end());
+                self.save_panes();
+            }
             // The app sends `Focus` instead when Shift is held.
             RoomMessage::Agent(id) => self.picked = Some(id),
             // The app opens the link itself unless Shift is held.
@@ -327,14 +404,26 @@ impl Room {
             .as_ref()
             .and_then(|id| self.agents.nodes.get(id));
         let aside = if details.is_some() { 380.0 * zoom } else { 0.0 };
-        let agents = (width - aside) * 0.6;
-        let mut columns: Vec<Element<Message>> = vec![self.agents_view(zoom, agents, height)];
+        let spread = width - aside - HANDLE;
+        self.spread.set(spread);
+        let agents = spread * self.panes.split;
+        let mut columns: Vec<Element<Message>> =
+            vec![self.agents_view(zoom * self.panes.agents, agents, height)];
         if let Some(node) = details {
             columns.push(widget::divider::vertical::default().into());
             columns.push(self.details(node, aside));
         }
-        columns.push(widget::divider::vertical::default().into());
-        columns.push(self.machines_view(zoom, width - aside - agents));
+        columns.push(
+            widget::mouse_area(
+                widget::container(widget::divider::vertical::default())
+                    .center_x(Length::Fixed(HANDLE))
+                    .height(Length::Fill),
+            )
+            .on_press(Message::Room(RoomMessage::StartSplit))
+            .interaction(cosmic::iced::mouse::Interaction::ResizingHorizontally)
+            .into(),
+        );
+        columns.push(self.machines_view(zoom * self.panes.machines, spread - agents));
         widget::Row::with_children(columns)
             .height(Length::Fill)
             .into()
@@ -347,6 +436,7 @@ impl Room {
             bar.push(widget::text(format!("{busy}…")).class(dim()).into());
         }
         bar.push(widget::space::horizontal().into());
+        bar.push(zoom_buttons(Side::Machines, self.panes.machines));
         bar.push(
             widget::button::text(if self.arranging { "Done" } else { "Arrange" })
                 .on_press(Message::Room(RoomMessage::Arrange))
@@ -429,6 +519,8 @@ impl Room {
                 );
             }
         }
+        summary.push(widget::text("·").class(dim()).into());
+        summary.push(zoom_buttons(Side::Agents, self.panes.agents));
         page.push(
             widget::flex_row(summary)
                 .spacing(8)
@@ -1132,6 +1224,27 @@ fn pull_request_table<'a>(prs: &[(&Node, room_agents::Shown)]) -> Element<'a, Me
         .spacing(2)
         .padding([0, 8])
         .into()
+}
+
+/// A pane's zoom: smaller, the percentage, which resets it, and larger.
+fn zoom_buttons<'a>(side: Side, zoom: f32) -> Element<'a, Message> {
+    let step = |label: String, step: i8, on: bool| {
+        widget::button::text(label)
+            .on_press_maybe(on.then_some(Message::Room(RoomMessage::Zoom(side, step))))
+    };
+    widget::Row::with_children(vec![
+        step("−".into(), -1, zoom > *ZOOMS.start() + 0.01).into(),
+        widget::tooltip(
+            step(format!("{:.0}%", zoom * 100.0), 0, true),
+            widget::text("This pane's zoom; click for 100%").size(12.0),
+            widget::tooltip::Position::Bottom,
+        )
+        .into(),
+        step("+".into(), 1, zoom < *ZOOMS.end() - 0.01).into(),
+    ])
+    .spacing(2)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn pull_request<'a>(label: String, url: &str, agent: &str) -> Element<'a, Message> {
