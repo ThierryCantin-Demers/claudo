@@ -907,6 +907,9 @@ pub struct DibsMachine {
     pub status: Option<dibstop_view::dibs_format::status::Status>,
     /// What it said that was not a status, such as why it could not be reached.
     pub trouble: Option<String>,
+    /// It answered with a status this build cannot read, so it is up.
+    #[serde(default)]
+    pub unreadable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

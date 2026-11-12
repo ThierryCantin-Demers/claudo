@@ -1291,7 +1291,12 @@ fn header(machine: &DibsMachine) -> Element<'_, Message> {
             }
         }
         None if machine.trouble.is_some() => {
-            parts.push(widget::text("down").class(destructive()).into())
+            let state = if machine.unreadable {
+                "unreadable"
+            } else {
+                "down"
+            };
+            parts.push(widget::text(state).class(destructive()).into())
         }
         None => parts.push(widget::text("connecting…").class(dim()).into()),
     }

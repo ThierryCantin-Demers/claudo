@@ -151,22 +151,34 @@ fn machines(text: &str) -> Vec<DibsMachine> {
                 name: name.to_string(),
                 status: None,
                 trouble: None,
+                unreadable: false,
             });
             if !line.starts_with('{') {
                 continue;
             }
         }
         let machine = machines.last_mut().expect("pushed above");
-        match serde_json::from_str::<Status>(line) {
-            Ok(status) => machine.status = Some(status),
-            Err(_) => {
-                let trouble = machine.trouble.get_or_insert_default();
-                if !trouble.is_empty() {
-                    trouble.push('\n');
-                }
-                trouble.push_str(line);
+        let said = match serde_json::from_str::<Status>(line) {
+            Ok(status) => {
+                machine.status = Some(status);
+                continue;
             }
+            // A status this build cannot read, as when dibs reports something new: the
+            // machine answered, so it is not down.
+            Err(error) if line.starts_with('{') => {
+                machine.unreadable = true;
+                format!(
+                    "answered, but claudo cannot read its status, which a newer dibs may have \
+                     changed: {error}"
+                )
+            }
+            Err(_) => line.to_string(),
+        };
+        let trouble = machine.trouble.get_or_insert_default();
+        if !trouble.is_empty() {
+            trouble.push('\n');
         }
+        trouble.push_str(&said);
     }
     machines
 }
@@ -268,6 +280,18 @@ mod tests {
             holders.join(","),
             queue.join(",")
         )
+    }
+
+    #[test]
+    fn a_status_this_build_cannot_read_says_so_rather_than_down() {
+        let text = "host-a\n  {\"t\":0,\"state\":\"something-new\"}\n";
+        let machines = machines(text);
+        let trouble = machines[0].trouble.as_deref().unwrap_or_default();
+        assert!(
+            trouble.starts_with("answered, but claudo cannot read its status"),
+            "{trouble}"
+        );
+        assert!(machines[0].unreadable);
     }
 
     #[test]

@@ -148,10 +148,13 @@ pub fn memory(metrics: &Metrics) -> Option<(u64, u64)> {
 /// How full a filesystem is to this account, and what to write on its bar: its own free
 /// space, or a quota's room when that is less, since either stops a job the same way.
 pub fn filled(disk: &Disk) -> (f32, String) {
+    // A linked filesystem holds only some of scratch, which it is named by.
     let role = match disk.role {
-        DiskRole::Scratch => "scratch",
-        DiskRole::Tmp => "tmp",
-        DiskRole::SystemTmp => "/tmp",
+        DiskRole::Scratch => "scratch".to_string(),
+        DiskRole::Tmp => "tmp".to_string(),
+        DiskRole::SystemTmp => "/tmp".to_string(),
+        DiskRole::Linked if disk.paths.is_empty() => disk.mount.clone(),
+        DiskRole::Linked => disk.paths.join(", "),
     };
     let disk_share = 1.0 - disk.free as f32 / disk.total.max(1) as f32;
     let tightest = disk

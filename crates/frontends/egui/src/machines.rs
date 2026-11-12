@@ -337,7 +337,12 @@ impl Tile {
                     }
                 }
                 None if machine.trouble.is_some() => {
-                    ui.colored_label(ui.visuals().error_fg_color, "down");
+                    let state = if machine.unreadable {
+                        "unreadable"
+                    } else {
+                        "down"
+                    };
+                    ui.colored_label(ui.visuals().error_fg_color, state);
                 }
                 None => {
                     ui.weak("connecting…");
