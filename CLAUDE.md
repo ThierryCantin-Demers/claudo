@@ -559,7 +559,8 @@ wrote it.
   a split or tabs, `egui_tiles`, laid out as eframe keeps it, each tile zoomed on its own from
   its tab bar by drawing it on a layer egui scales, pointer included; inside it, one cell per
   machine in a grid of equal cells, which the Arrange menu on its tab bar orders, hides and
-  sets the columns of, kept with the page's storage; each cell as tall as what it holds, the
+  sets the columns of, and which metrics show, cards as graphs, rows or not at all, kept with
+  the page's storage; each cell as tall as what it holds, the
   pane scrolling as a whole): the dibs collector also sends every
   machine's status, and why one could not answer, as `ServerEvent::Dibs`. Each cell draws its
   machine's state, its CPU, memory and cards (`meters.rs`, from the `metrics` that

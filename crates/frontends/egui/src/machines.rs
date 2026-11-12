@@ -12,7 +12,7 @@ use dibstop_view::text::{Tone, agent_hue, cores, plain, state_words};
 use egui::{Color32, Key, RichText, Ui, vec2};
 use serde::{Deserialize, Serialize};
 
-use crate::meters::{self, History};
+use crate::meters::{self, Cards, History, Show};
 
 const KEY: &str = "machines";
 
@@ -44,6 +44,8 @@ struct Arrangement {
     hidden: Vec<String>,
     /// None fits as many as the width takes.
     columns: Option<usize>,
+    #[serde(default)]
+    show: Show,
 }
 
 /// What one machine's cell remembers between frames.
@@ -242,9 +244,23 @@ impl Machines {
                 ui.selectable_value(columns, Some(count), count.to_string());
             }
         });
+        ui.separator();
+        let show = &mut self.arrangement.show;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut show.cpu, "CPU graph");
+            ui.checkbox(&mut show.memory, "memory");
+            ui.checkbox(&mut show.asleep, "sleeping cards");
+        });
+        ui.horizontal(|ui| {
+            ui.label("cards");
+            ui.selectable_value(&mut show.cards, Cards::Graphs, "graphs");
+            ui.selectable_value(&mut show.cards, Cards::Rows, "rows");
+            ui.selectable_value(&mut show.cards, Cards::Hidden, "hidden");
+        });
         let Some(watch) = watch else {
             return;
         };
+        ui.separator();
         let poll = self.poll.get_or_insert(watch.poll);
         let slider = egui::Slider::new(poll, DIBS_POLL)
             .logarithmic(true)
@@ -284,7 +300,8 @@ impl Machines {
         let keys = self.active.as_deref() == Some(name);
         let tile = self.tiles.entry(name.to_string()).or_default();
         let history = self.histories.entry(name.to_string()).or_default();
-        let action = tile.ui(ui, machine, history, keys)?;
+        let show = self.arrangement.show;
+        let action = tile.ui(ui, machine, history, show, keys)?;
         tile.busy = Some(action.doing.clone());
         self.asking = Some(name.to_string());
         Some(Command::Dibs {
@@ -301,6 +318,7 @@ impl Tile {
         ui: &mut Ui,
         machine: &DibsMachine,
         history: &History,
+        show: Show,
         keys: bool,
     ) -> Option<Action> {
         let name = &machine.name;
@@ -313,7 +331,7 @@ impl Tile {
         asked = asked.or(self.header(ui, machine));
         match &machine.status {
             Some(status) => {
-                meters::ui(ui, status, history, &jobs);
+                meters::ui(ui, show, status, history, &jobs);
                 ui.separator();
                 asked = asked.take().or(self.jobs(ui, &jobs));
             }

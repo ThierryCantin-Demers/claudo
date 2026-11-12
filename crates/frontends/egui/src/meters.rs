@@ -5,6 +5,8 @@ use std::collections::{HashMap, VecDeque};
 
 use dibstop_view::dibs_format::status::{GpuMetrics, Metrics, Status};
 use dibstop_view::item::Item;
+use serde::{Deserialize, Serialize};
+
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, Vec2, vec2};
 
 /// Looks kept for each trace: ten minutes at the default poll.
@@ -15,6 +17,37 @@ const BAR: f32 = 16.0;
 /// A card's panel, which several share a row in.
 const CARD: f32 = 210.0;
 const CARD_GRAPH: f32 = 30.0;
+const ROW_BAR: f32 = 90.0;
+
+/// What a machine's cell shows of its metrics, the same for every machine.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Show {
+    pub cpu: bool,
+    pub memory: bool,
+    pub cards: Cards,
+    pub asleep: bool,
+}
+
+impl Default for Show {
+    fn default() -> Self {
+        Self {
+            cpu: true,
+            memory: true,
+            cards: Cards::Graphs,
+            asleep: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Cards {
+    /// A panel each, with its use as a graph.
+    Graphs,
+    /// A line each, with its use as a bar.
+    Rows,
+    Hidden,
+}
 
 /// One machine's last looks, for the traces.
 #[derive(Default)]
@@ -59,7 +92,7 @@ fn push(trace: &mut VecDeque<f32>, value: f32) {
 /// The CPU as a graph of its last looks and the memory as a bar across the cell, then a panel
 /// per card awake, each with its use as a graph, its memory as a bar and the job on it, as
 /// btop draws them; the sleeping cards together after.
-pub fn ui(ui: &mut Ui, status: &Status, history: &History, jobs: &[Item]) {
+pub fn ui(ui: &mut Ui, show: Show, status: &Status, history: &History, jobs: &[Item]) {
     let metrics = status.metrics.as_ref();
     let width = ui.available_width();
     let busy = metrics
@@ -70,8 +103,10 @@ pub fn ui(ui: &mut Ui, status: &Status, history: &History, jobs: &[Item]) {
         Some(busy) => format!("CPU {}   {load}", percent(busy)),
         None => format!("CPU   {load}"),
     };
-    graph(ui, vec2(width, CPU_GRAPH), &history.cpu, busy, &over);
-    if let Some((used, total)) = metrics.and_then(memory) {
+    if show.cpu {
+        graph(ui, vec2(width, CPU_GRAPH), &history.cpu, busy, &over);
+    }
+    if let Some((used, total)) = metrics.and_then(memory).filter(|_| show.memory) {
         let share = used as f32 / total.max(1) as f32;
         bar(
             ui,
@@ -83,7 +118,17 @@ pub fn ui(ui: &mut Ui, status: &Status, history: &History, jobs: &[Item]) {
     let gpus = metrics.map_or(&[][..], |metrics| &metrics.gpus[..]);
     let (asleep, awake): (Vec<&GpuMetrics>, Vec<&GpuMetrics>) =
         gpus.iter().partition(|gpu| gpu.suspended);
-    if !awake.is_empty() {
+    if !awake.is_empty() && show.cards == Cards::Rows {
+        egui::Grid::new("cards")
+            .num_columns(5)
+            .spacing(vec2(8.0, 2.0))
+            .show(ui, |ui| {
+                for gpu in &awake {
+                    row(ui, gpu, jobs);
+                }
+            });
+    }
+    if !awake.is_empty() && show.cards == Cards::Graphs {
         ui.add_space(4.0);
         // As many panels a row as fit, sharing its width evenly.
         let gap = ui.spacing().item_spacing.x;
@@ -97,7 +142,7 @@ pub fn ui(ui: &mut Ui, status: &Status, history: &History, jobs: &[Item]) {
             });
         }
     }
-    if !asleep.is_empty() {
+    if !asleep.is_empty() && show.asleep && show.cards != Cards::Hidden {
         let names: Vec<String> = asleep.iter().map(|gpu| name(gpu)).collect();
         ui.weak(format!("asleep: {}", names.join(", ")))
             .on_hover_text("A card the driver has put to sleep, which reading would wake.");
@@ -108,15 +153,56 @@ fn memory(metrics: &Metrics) -> Option<(u64, u64)> {
     Some((metrics.mem_used?, metrics.mem_total?))
 }
 
-fn card(ui: &mut Ui, width: f32, gpu: &GpuMetrics, points: Option<&VecDeque<f32>>, jobs: &[Item]) {
-    let on: Vec<&Item> = jobs
-        .iter()
+/// The running jobs on `gpu`.
+fn running_on<'a>(gpu: &GpuMetrics, jobs: &'a [Item]) -> Vec<&'a Item> {
+    jobs.iter()
         .filter(|job| job.holding)
         .filter(|job| {
             let device = job.device.as_ref().map(|device| device.as_str());
             alias(gpu).is_some_and(|alias| device == Some(alias))
         })
-        .collect();
+        .collect()
+}
+
+/// One card as a line: its name, its use and memory as bars, its temperature and its job.
+fn row(ui: &mut Ui, gpu: &GpuMetrics, jobs: &[Item]) {
+    let on = running_on(gpu, jobs);
+    let busy = ui.visuals().warn_fg_color;
+    let named = RichText::new(name(gpu)).strong();
+    ui.label(match on.is_empty() {
+        true => named,
+        false => named.color(busy),
+    });
+    let util = gpu.util_pct.unwrap_or(0) as f32 / 100.0;
+    bar(ui, vec2(ROW_BAR, BAR), util, &percent(util));
+    match (gpu.mem_used, gpu.mem_total) {
+        (Some(used), Some(total)) => {
+            let share = used as f32 / total.max(1) as f32;
+            bar(ui, vec2(ROW_BAR * 1.5, BAR), share, &gib(used, total));
+        }
+        _ => {
+            ui.label("");
+        }
+    }
+    match gpu.temp_c {
+        Some(temp) => {
+            let share = (temp as f32 - 30.0) / 60.0;
+            ui.label(RichText::new(format!("{temp}°C")).color(level(share)));
+        }
+        None => {
+            ui.label("");
+        }
+    }
+    let names: Vec<&str> = on.iter().map(|job| job.label.as_str()).collect();
+    match names.is_empty() {
+        true => ui.label(""),
+        false => ui.label(RichText::new(format!("← {}", names.join(", "))).color(busy)),
+    };
+    ui.end_row();
+}
+
+fn card(ui: &mut Ui, width: f32, gpu: &GpuMetrics, points: Option<&VecDeque<f32>>, jobs: &[Item]) {
+    let on = running_on(gpu, jobs);
     let busy = ui.visuals().warn_fg_color;
     let stroke = match on.is_empty() {
         true => ui.visuals().widgets.noninteractive.bg_stroke,
