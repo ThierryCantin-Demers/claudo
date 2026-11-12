@@ -22,6 +22,9 @@ const CELL: egui::Vec2 = vec2(144.0, 38.0);
 const BAR_ROW: f32 = 22.0;
 const BARS: f32 = 640.0;
 const NAME: f32 = 150.0;
+/// Narrower than this, as a phone is, the overview is a card for each benchmark and the
+/// movers are listed one under the other.
+const NARROW: f32 = 720.0;
 /// Wider than this, the bars and the chart sit side by side.
 const SIDE_BY_SIDE: f32 = 1000.0;
 const MOVERS: usize = 6;
@@ -216,7 +219,12 @@ fn summary(ui: &mut Ui, seen: &[Seen]) {
         return;
     }
     ui.add_space(6.0);
-    ui.horizontal_top(|ui| {
+    let narrow = ui.available_width() < NARROW;
+    let layout = match narrow {
+        true => egui::Layout::top_down(egui::Align::Min),
+        false => egui::Layout::left_to_right(egui::Align::Min),
+    };
+    ui.with_layout(layout, |ui| {
         for (title, list, colour) in [
             ("Regressed most", &worse, RED),
             ("Improved most", &better, GREEN),
@@ -226,23 +234,37 @@ fn summary(ui: &mut Ui, seen: &[Seen]) {
             }
             ui.vertical(|ui| {
                 ui.label(RichText::new(title).strong().color(colour));
+                let what = |seen: &Seen| {
+                    let mut what = seen.quantity.name.clone();
+                    if let (Some(axis), Some(point)) = (seen.axis, seen.point) {
+                        what.push_str(&format!(" at {} {axis}", plain(point)));
+                    }
+                    what
+                };
+                if narrow {
+                    for (seen, percent) in list.iter().take(MOVERS) {
+                        ui.label(RichText::new(&seen.row.label).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.weak(what(seen));
+                            ui.label(number(seen.trend.now));
+                            ui.label(RichText::new(signed(*percent)).color(colour));
+                        });
+                    }
+                    return;
+                }
                 egui::Grid::new(("movers", title))
                     .spacing(vec2(12.0, 2.0))
                     .show(ui, |ui| {
                         for (seen, percent) in list.iter().take(MOVERS) {
                             ui.label(&seen.row.label);
-                            let mut what = seen.quantity.name.clone();
-                            if let (Some(axis), Some(point)) = (seen.axis, seen.point) {
-                                what.push_str(&format!(" at {} {axis}", plain(point)));
-                            }
-                            ui.weak(what).on_hover_text(seen.group);
+                            ui.weak(what(seen)).on_hover_text(seen.group);
                             ui.label(number(seen.trend.now));
                             ui.label(RichText::new(signed(*percent)).color(colour));
                             ui.end_row();
                         }
                     });
             });
-            ui.add_space(32.0);
+            ui.add_space(if narrow { 10.0 } else { 32.0 });
         }
     });
 }
@@ -289,6 +311,9 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
             ui.weak(format!("at {} {axis}", plain(point)));
         }
     });
+    if ui.available_width() < NARROW {
+        return cards(ui, group, &rows, &columns);
+    }
     egui::Grid::new(("overview", &group.name))
         .spacing(vec2(6.0, 4.0))
         .show(ui, |ui| {
@@ -327,13 +352,62 @@ fn matrix(ui: &mut Ui, group: &Group, point: Option<f64>) -> Option<String> {
                         longest: *longest,
                         best: trend.as_ref().is_some_and(|trend| Some(trend.now) == *best),
                     };
-                    if tile(ui, trend.as_ref(), quantity, shown).clicked() {
+                    if tile(ui, trend.as_ref(), quantity, shown, CELL).clicked() {
                         clicked = Some(quantity.name.clone());
                     }
                 }
                 ui.end_row();
             }
         });
+    clicked
+}
+
+/// The table as a card for each benchmark, under its family, its quantities two to a row,
+/// each named over its tile. Gives back the quantity clicked.
+fn cards(
+    ui: &mut Ui,
+    group: &Group,
+    rows: &[(&Row, Vec<Option<Trend>>)],
+    columns: &[(f64, Option<f64>)],
+) -> Option<String> {
+    let mut clicked = None;
+    let gap = ui.spacing().item_spacing.x;
+    let size = vec2(((ui.available_width() - gap) / 2.0).floor(), CELL.y);
+    let mut family = None;
+    for (row, trends) in rows {
+        let (this, variant) = split(&row.label);
+        if this != family {
+            family = this;
+            if let Some(name) = this {
+                ui.add_space(4.0);
+                ui.label(RichText::new(name).strong());
+            }
+        }
+        let colour = colour(group, &row.label);
+        ui.horizontal(|ui| {
+            swatch(ui, colour);
+            ui.label(variant);
+        });
+        ui.horizontal_wrapped(|ui| {
+            for ((quantity, trend), (longest, best)) in
+                group.quantities.iter().zip(trends).zip(columns)
+            {
+                ui.vertical(|ui| {
+                    ui.set_width(size.x);
+                    ui.weak(bare(quantity));
+                    let shown = Shown {
+                        colour,
+                        longest: *longest,
+                        best: trend.as_ref().is_some_and(|trend| Some(trend.now) == *best),
+                    };
+                    if tile(ui, trend.as_ref(), quantity, shown, size).clicked() {
+                        clicked = Some(quantity.name.clone());
+                    }
+                });
+            }
+        });
+        ui.add_space(6.0);
+    }
     clicked
 }
 
@@ -347,8 +421,14 @@ struct Shown {
 
 /// A value, how it moved since its night before on a tint of that move, and a bar against
 /// its column.
-fn tile(ui: &mut Ui, trend: Option<&Trend>, quantity: &Quantity, shown: Shown) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(CELL, Sense::click());
+fn tile(
+    ui: &mut Ui,
+    trend: Option<&Trend>,
+    quantity: &Quantity,
+    shown: Shown,
+    size: egui::Vec2,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
     let Some(trend) = trend else {
@@ -561,6 +641,11 @@ fn bars(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>, aga
         }
         let colour = colour(group, &row.label);
         let width = ui.available_width().min(BARS);
+        // On a phone the names and values give the bars what room they can.
+        let (name, value) = match width < NAME * 3.0 {
+            true => (width * 0.36, width * 0.3),
+            false => (NAME, 130.0),
+        };
         let (rect, response) = ui.allocate_exact_size(vec2(width, BAR_ROW), Sense::hover());
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals();
@@ -575,8 +660,8 @@ fn bars(ui: &mut Ui, group: &Group, quantity: &Quantity, point: Option<f64>, aga
             visuals.text_color(),
         );
         let track = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + NAME, rect.top() + 4.0),
-            egui::pos2(rect.right() - 130.0, rect.bottom() - 4.0),
+            egui::pos2(rect.left() + name, rect.top() + 4.0),
+            egui::pos2(rect.right() - value, rect.bottom() - 4.0),
         );
         let Some(latest) = latest else {
             painter.text(
