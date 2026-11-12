@@ -503,7 +503,8 @@ wrote it.
   machines alone, without dibs's actions or keys. `cargo xtask install-team [--name N]` runs it as the
   `claudo-team` user service; with `CLAUDO_TEAM_NAME` (`N.local`) the daemon keeps
   `avahi-publish -a -R` running for that name at its current address, so the link follows
-  whichever computer serves the page.
+  whichever computer serves the page. An Android browser reaches neither the name nor the address
+  until it is granted the Nearby devices permission.
 - **Benchmarks** (`core/src/benchmarks.rs`): with `CLAUDO_BENCHMARKS` (Parley projects, each
   `project` or `project/slug-prefix`, comma separated) and `CLAUDO_PARLEY_ROOM` (the room's
   address) set, the daemon, team page included, reads `parley benchmarks list <project> --json`
