@@ -13,6 +13,7 @@ use claudo_transport::{Transport, connect};
 
 mod desk;
 mod machines;
+mod meters;
 mod room;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
@@ -558,7 +559,7 @@ impl ClaudoApp {
 
                 ServerEvent::Room(event) => self.room.apply(event),
                 ServerEvent::Dibs(machines) => self.machines.heard(machines),
-                ServerEvent::DibsPoll(seconds) => self.machines.poll = Some(seconds),
+                ServerEvent::DibsWatch(watch) => self.machines.watch = Some(watch),
                 ServerEvent::DibsAnswer { title, body } => self.machines.answered(title, body),
 
                 ServerEvent::Answered { request_id, .. } => {

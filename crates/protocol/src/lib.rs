@@ -828,13 +828,32 @@ pub enum Command {
         /// The label of the job it is about, for its title.
         label: String,
     },
-    /// Look at the dibs machines every this many seconds, for every page.
-    DibsPoll(u64),
+    /// How the daemon watches the dibs machines, for every page.
+    DibsWatch(DibsWatch),
 }
 
 /// The seconds a page may choose between looks at the dibs machines. Each look reaches every
 /// machine over ssh; dibstop looks every 10 seconds by default.
 pub const DIBS_POLLS: [u64; 5] = [3, 5, 10, 30, 60];
+
+/// How the daemon watches the dibs machines, the same for every page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DibsWatch {
+    /// Seconds between looks, one of `DIBS_POLLS`.
+    pub poll: u64,
+    /// The machines whose CPU, memory and cards are not read; every other one's are.
+    #[serde(default)]
+    pub no_metrics: Vec<String>,
+}
+
+impl Default for DibsWatch {
+    fn default() -> Self {
+        Self {
+            poll: 10,
+            no_metrics: Vec::new(),
+        }
+    }
+}
 
 /// A dibs machine as the daemon last heard of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -864,8 +883,8 @@ pub enum ServerEvent {
     },
     /// Every dibs machine, each time a look at them says something new.
     Dibs(Vec<DibsMachine>),
-    /// How many seconds pass between looks at the dibs machines.
-    DibsPoll(u64),
+    /// How the daemon watches the dibs machines.
+    DibsWatch(DibsWatch),
     /// What a `Dibs` call printed, to the client that asked.
     DibsAnswer {
         title: String,

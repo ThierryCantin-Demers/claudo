@@ -561,9 +561,12 @@ wrote it.
   status, and why one could not answer, as `ServerEvent::Dibs`, which each tile draws with
   dibstop's own egui view (`dibstop-view`, from the dibs repo, egui pinned to the version
   dibs uses), given that machine alone. dibstop reads its keys from the whole page, so only
-  the tile last clicked is given them. The same menu sets how often the daemon looks
-  (`Command::DibsPoll`, one of `DIBS_POLLS`, kept in `$XDG_CONFIG_HOME/claudo/dibs-poll`
-  and told to every page as `ServerEvent::DibsPoll`). An action the view returns goes back as `Command::Dibs` with its
+  the tile last clicked is given them. Over the view, each tile draws its machine's CPU,
+  memory and cards (`meters.rs`), from the `metrics` that `dibs --status --metrics` adds,
+  read in dibs's runner from `/proc`, NVML and sysfs, so cheap enough beside a benchmark.
+  The same menu sets how often the daemon looks and which machines' metrics it asks for
+  (`Command::DibsWatch`, kept in `$XDG_CONFIG_HOME/claudo/dibs-watch.json` and told to every
+  page as `ServerEvent::DibsWatch`). An action the view returns goes back as `Command::Dibs` with its
   `Call` and job label, never a command line, and the backend makes the `dibs` call again
   from those (`Action::new(..).run()`), answering `DibsAnswer` to the client that asked.
 - **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`

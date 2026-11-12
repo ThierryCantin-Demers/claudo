@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use claudo_protocol::{DibsMachine, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
+use claudo_protocol::{DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clients::{ClientId, Clients};
@@ -24,8 +24,8 @@ pub struct Room {
     machines: Clients,
     /// The dibs machines, which only this computer's pages hear.
     dibs: Vec<DibsMachine>,
-    /// Seconds between looks at them.
-    dibs_poll: Option<u64>,
+    /// How they are watched.
+    dibs_watch: Option<DibsWatch>,
 }
 
 impl Room {
@@ -38,15 +38,15 @@ impl Room {
             self.clients
                 .to(client, ServerEvent::Dibs(self.dibs.clone()));
         }
-        if let Some(seconds) = self.dibs_poll {
-            self.clients.to(client, ServerEvent::DibsPoll(seconds));
+        if let Some(watch) = &self.dibs_watch {
+            self.clients.to(client, ServerEvent::DibsWatch(watch.clone()));
         }
     }
 
-    fn set_dibs_poll(&mut self, seconds: u64) {
-        if self.dibs_poll != Some(seconds) {
-            self.clients.send(ServerEvent::DibsPoll(seconds));
-            self.dibs_poll = Some(seconds);
+    fn set_dibs_watch(&mut self, watch: DibsWatch) {
+        if self.dibs_watch.as_ref() != Some(&watch) {
+            self.clients.send(ServerEvent::DibsWatch(watch.clone()));
+            self.dibs_watch = Some(watch);
         }
     }
 
@@ -245,9 +245,9 @@ impl Feed {
         self.room.lock().unwrap().set_dibs(machines);
     }
 
-    /// How often the dibs machines are looked at.
-    pub fn dibs_poll(&self, seconds: u64) {
-        self.room.lock().unwrap().set_dibs_poll(seconds);
+    /// How the dibs machines are watched.
+    pub fn dibs_watch(&self, watch: DibsWatch) {
+        self.room.lock().unwrap().set_dibs_watch(watch);
     }
 
     /// Everything this collector sees now, in place of what it saw before.

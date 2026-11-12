@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 
-use claudo_protocol::{Command, DibsMachine};
+use claudo_protocol::{Command, DibsMachine, DibsWatch};
 use dibstop_view::view::{Machine, View};
+
+use crate::meters::{self, History};
 
 #[derive(Default)]
 pub struct Machines {
@@ -14,12 +16,21 @@ pub struct Machines {
     active: Option<String>,
     /// The machine whose view asked for what the daemon answers next.
     asking: Option<String>,
-    /// Seconds between the daemon's looks, once it says.
-    pub poll: Option<u64>,
+    histories: HashMap<String, History>,
+    /// How the daemon watches them, once it says.
+    pub watch: Option<DibsWatch>,
 }
 
 impl Machines {
     pub fn heard(&mut self, machines: Vec<DibsMachine>) {
+        for machine in &machines {
+            if let Some(status) = &machine.status {
+                self.histories
+                    .entry(machine.name.clone())
+                    .or_default()
+                    .heard(status);
+            }
+        }
         self.machines = machines
             .into_iter()
             .map(|machine| Machine {
@@ -58,6 +69,10 @@ impl Machines {
         // dibstop reads its keys from the whole page, so the other machines' views see none.
         let held = (self.active.as_deref() != Some(name))
             .then(|| ui.ctx().input_mut(|input| std::mem::take(&mut input.events)));
+        if let Some(status) = &machine.status {
+            let history = self.histories.entry(name.to_string()).or_default();
+            meters::ui(ui, status, history);
+        }
         let view = self.views.entry(name.to_string()).or_default();
         let action = view.ui(ui, std::slice::from_ref(machine));
         if let Some(events) = held {

@@ -2,7 +2,7 @@
 //! and hides or shows again from the Machines menu. The layout is kept with the page's
 //! storage.
 
-use claudo_protocol::{Command, DIBS_POLLS};
+use claudo_protocol::{Command, DIBS_POLLS, DibsWatch};
 use egui_tiles::{
     Behavior, Container, Linear, LinearDir, SimplificationOptions, Tabs, Tile, TileId, Tiles,
     Tree, UiResponse,
@@ -165,22 +165,52 @@ struct Panes<'a> {
 
 impl Panes<'_> {
     fn menu(&mut self, tiles: &Tiles<Pane>, ui: &mut egui::Ui) {
-        ui.label("Shown");
-        for name in &self.names {
-            let Some(tile) = tiles.find_pane(&Pane::Machine(name.clone())) else {
-                continue;
-            };
-            let mut on = shown(tiles, tile);
-            if ui.checkbox(&mut on, name).changed() {
-                self.toggled.push((name.clone(), on));
+        let watch = self.machines.watch.clone();
+        egui::Grid::new("machines-menu").show(ui, |ui| {
+            ui.weak("");
+            ui.weak("shown");
+            ui.weak("metrics");
+            ui.end_row();
+            for name in &self.names {
+                let Some(tile) = tiles.find_pane(&Pane::Machine(name.clone())) else {
+                    continue;
+                };
+                ui.label(name);
+                let mut on = shown(tiles, tile);
+                if ui.checkbox(&mut on, "").changed() {
+                    self.toggled.push((name.clone(), on));
+                }
+                match &watch {
+                    Some(watch) => {
+                        let mut read = !watch.no_metrics.contains(name);
+                        if ui.checkbox(&mut read, "").changed() {
+                            let mut next = watch.clone();
+                            next.no_metrics.retain(|other| other != name);
+                            if !read {
+                                next.no_metrics.push(name.clone());
+                            }
+                            self.sent.push(Command::DibsWatch(next));
+                        }
+                    }
+                    None => {
+                        ui.label("");
+                    }
+                }
+                ui.end_row();
             }
-        }
+        });
+        let Some(watch) = watch else {
+            return;
+        };
         ui.separator();
         ui.label("Look every");
         for seconds in DIBS_POLLS {
-            let chosen = self.machines.poll == Some(seconds);
+            let chosen = watch.poll == seconds;
             if ui.radio(chosen, format!("{seconds} s")).clicked() && !chosen {
-                self.sent.push(Command::DibsPoll(seconds));
+                self.sent.push(Command::DibsWatch(DibsWatch {
+                    poll: seconds,
+                    ..watch.clone()
+                }));
             }
         }
     }

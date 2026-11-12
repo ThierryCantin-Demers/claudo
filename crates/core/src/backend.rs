@@ -557,7 +557,7 @@ impl Backend {
                 });
             }
 
-            Command::DibsPoll(seconds) => crate::dibs::set_poll(seconds),
+            Command::DibsWatch(watch) => crate::dibs::set_watch(watch),
 
             Command::Act {
                 node,

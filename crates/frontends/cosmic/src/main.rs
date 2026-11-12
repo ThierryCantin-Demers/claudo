@@ -2366,7 +2366,7 @@ mod app {
                 // The control room is the web page's.
                 ServerEvent::Room(_)
                 | ServerEvent::Dibs(_)
-                | ServerEvent::DibsPoll(_)
+                | ServerEvent::DibsWatch(_)
                 | ServerEvent::DibsAnswer { .. } => {}
                 ServerEvent::Hello { version } => {
                     if version != claudo_protocol::PROTOCOL_VERSION {

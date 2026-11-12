@@ -9,80 +9,98 @@ use std::process::{Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use claudo_protocol::{DIBS_POLLS, DibsMachine, Node, NodeKind, NodeState};
+use claudo_protocol::{DIBS_POLLS, DibsMachine, DibsWatch, Node, NodeKind, NodeState};
 use dibstop_view::dibs_format::Mode;
 use dibstop_view::dibs_format::status::Status;
 
 use crate::room::Feed;
 
-const POLL: u64 = 10;
-
-/// Seconds between looks, which a page may change while the collector waits.
-static EVERY: Mutex<Option<u64>> = Mutex::new(None);
+/// How the machines are watched, which a page may change while the collector waits.
+static WATCH: Mutex<Option<DibsWatch>> = Mutex::new(None);
 static CHANGED: Condvar = Condvar::new();
 
 /// Reads the machines and their jobs into `feed` for as long as the process runs. Without
 /// dibs, there are none.
 pub fn spawn(feed: Feed) {
     std::thread::spawn(move || {
-        let mut every = *EVERY.lock().unwrap().get_or_insert_with(saved);
+        let mut watch = WATCH.lock().unwrap().get_or_insert_with(saved).clone();
+        let mut names = Vec::new();
         loop {
-            feed.dibs_poll(every);
-            let machines = look().map(|text| machines(&text)).unwrap_or_default();
+            feed.dibs_watch(watch.clone());
+            let machines = look(&metrics(&watch, &names))
+                .map(|text| machines(&text))
+                .unwrap_or_default();
+            names = machines.iter().map(|machine| machine.name.clone()).collect();
             feed.replace(jobs(&machines));
             feed.dibs(machines);
-            let shown = EVERY.lock().unwrap();
-            let (shown, _) = CHANGED
-                .wait_timeout_while(shown, Duration::from_secs(every), |now| {
-                    *now == Some(every)
+            let now = WATCH.lock().unwrap();
+            let (now, _) = CHANGED
+                .wait_timeout_while(now, Duration::from_secs(watch.poll), |now| {
+                    now.as_ref() == Some(&watch)
                 })
                 .unwrap();
-            every = shown.unwrap_or(every);
+            watch = now.clone().unwrap_or(watch);
         }
     });
 }
 
-/// Looks again at once, then every `seconds`, the nearest of `DIBS_POLLS`.
-pub fn set_poll(seconds: u64) {
-    let seconds = DIBS_POLLS
+/// Watches as `watch` says from now on, looking again at once, every `poll` seconds rounded to
+/// the nearest of `DIBS_POLLS`.
+pub fn set_watch(mut watch: DibsWatch) {
+    watch.poll = DIBS_POLLS
         .into_iter()
-        .min_by_key(|choice| choice.abs_diff(seconds))
-        .unwrap_or(POLL);
-    *EVERY.lock().unwrap() = Some(seconds);
+        .min_by_key(|choice| choice.abs_diff(watch.poll))
+        .unwrap_or(DibsWatch::default().poll);
+    let text = serde_json::to_string(&watch).expect("plain data");
+    *WATCH.lock().unwrap() = Some(watch);
     CHANGED.notify_all();
-    let path = poll_path();
+    let path = watch_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Err(error) = std::fs::write(&path, seconds.to_string()) {
-        eprintln!("claudo: cannot keep the dibs poll: {error}");
+    if let Err(error) = std::fs::write(&path, text) {
+        eprintln!("claudo: cannot keep how dibs is watched: {error}");
     }
 }
 
-fn saved() -> u64 {
-    std::fs::read_to_string(poll_path())
+fn saved() -> DibsWatch {
+    std::fs::read_to_string(watch_path())
         .ok()
-        .and_then(|text| text.trim().parse().ok())
-        .filter(|seconds| DIBS_POLLS.contains(seconds))
-        .unwrap_or(POLL)
+        .and_then(|text| serde_json::from_str::<DibsWatch>(&text).ok())
+        .filter(|watch| DIBS_POLLS.contains(&watch.poll))
+        .unwrap_or_default()
 }
 
-fn poll_path() -> PathBuf {
+fn watch_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .unwrap_or_default()
-        .join("claudo/dibs-poll")
+        .join("claudo/dibs-watch.json")
+}
+
+/// The `--metrics` argument: every machine, or the ones last seen whose metrics are wanted.
+fn metrics(watch: &DibsWatch, names: &[String]) -> Option<String> {
+    if watch.no_metrics.is_empty() {
+        return Some("all".into());
+    }
+    let wanted: Vec<&str> = names
+        .iter()
+        .filter(|name| !watch.no_metrics.contains(name))
+        .map(String::as_str)
+        .collect();
+    (!wanted.is_empty()).then(|| wanted.join(","))
 }
 
 /// Both streams, in the order they were written: a machine's trouble goes to stderr, under
 /// its name on stdout.
-fn look() -> Option<String> {
-    let output = Command::new("sh")
-        .args(["-c", "exec dibs --status --json --all 2>&1"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+fn look(metrics: &Option<String>) -> Option<String> {
+    let mut command = Command::new("sh");
+    command.args(["-c", r#"exec dibs --status --json --all "$@" 2>&1"#, "dibs"]);
+    if let Some(metrics) = metrics {
+        command.args(["--metrics", metrics]);
+    }
+    let output = command.stdin(Stdio::null()).output().ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -281,6 +299,19 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn metrics_are_asked_of_every_machine_but_the_ones_turned_off() {
+        let names = ["alpha".to_string(), "beta".into(), "gamma".into()];
+        let watch = DibsWatch::default();
+        assert_eq!(metrics(&watch, &names).as_deref(), Some("all"));
+        let watch = DibsWatch {
+            no_metrics: vec!["beta".into()],
+            ..watch
+        };
+        assert_eq!(metrics(&watch, &names).as_deref(), Some("alpha,gamma"));
+        assert_eq!(metrics(&watch, &[]), None);
     }
 
     #[test]
