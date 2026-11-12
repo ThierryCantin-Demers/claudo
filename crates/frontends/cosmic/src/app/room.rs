@@ -75,6 +75,11 @@ pub struct Room {
 #[derive(Debug, Clone)]
 pub enum RoomMessage {
     Connected(Commands),
+    /// A pull request's link: opens it, or with Shift brings forward the agent that opened it.
+    PullRequest {
+        link: String,
+        agent: NodeId,
+    },
     Events(Vec<ServerEvent>),
     Select(String, u32),
     Ask(String, Call, String),
@@ -199,6 +204,8 @@ impl Room {
                 }
             }
             RoomMessage::Focus(id) => self.act(id, Act::Focus),
+            // The app opens the link itself unless Shift is held.
+            RoomMessage::PullRequest { agent, .. } => self.act(agent, Act::Focus),
             RoomMessage::Pick(id) => {
                 self.picked = (self.picked.as_ref() != Some(&id)).then_some(id);
             }
@@ -397,7 +404,7 @@ impl Room {
         for (node, pr) in self.agents.pull_requests() {
             summary.push(widget::text("·").class(dim()).into());
             let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
-            summary.push(link(repo, pr.link));
+            summary.push(pull_request(repo, pr.link, &node.id));
             if let Some((words, tint)) = pr.checks.map(checks) {
                 summary.push(
                     widget::text(words)
@@ -691,7 +698,11 @@ impl Room {
             );
         }
         for pr in open_prs(node) {
-            parts.push(link(format!("PR #{}", pr.number), pr.link));
+            parts.push(pull_request(
+                format!("PR #{}", pr.number),
+                pr.link,
+                &node.id,
+            ));
         }
         if matches!(node.kind, Some(NodeKind::Agent(_))) {
             parts.push(self.answer_box(node));
@@ -1057,10 +1068,16 @@ fn legend<'a>() -> Element<'a, Message> {
         .into()
 }
 
-fn link<'a>(label: String, url: &str) -> Element<'a, Message> {
-    widget::button::link(label)
-        .on_press(Message::Link(url.to_string()))
-        .into()
+fn pull_request<'a>(label: String, url: &str, agent: &str) -> Element<'a, Message> {
+    widget::tooltip(
+        widget::button::link(label).on_press(Message::Room(RoomMessage::PullRequest {
+            link: url.to_string(),
+            agent: agent.to_string(),
+        })),
+        widget::text("Shift-click to bring forward the agent that opened it").size(12.0),
+        widget::tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 /// The machine's name, its state, and the calls about the whole machine.

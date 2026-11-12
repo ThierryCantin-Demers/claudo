@@ -5077,6 +5077,12 @@ mod app {
                         self.cmd(Command::GetUsage);
                     }
                 }
+                Message::Room(room::RoomMessage::PullRequest { link, agent }) => {
+                    if !self.modifiers.shift() {
+                        return self.update(Message::Link(link));
+                    }
+                    self.room.update(room::RoomMessage::Focus(agent));
+                }
                 Message::Room(message) => {
                     self.room.update(message);
                 }

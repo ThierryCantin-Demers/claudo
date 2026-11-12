@@ -102,7 +102,7 @@ impl Room {
     }
 
     /// Every open pull request an agent here has, with the agent's name.
-    fn pull_requests(&self, ui: &mut egui::Ui) {
+    fn pull_requests(&mut self, ui: &mut egui::Ui) {
         let mut open: Vec<(&Node, Shown)> = self
             .agents
             .nodes
@@ -116,7 +116,7 @@ impl Room {
         for (node, pr) in open {
             ui.weak("·");
             let repo = pr.about.split(':').next().unwrap_or(pr.number).to_string();
-            ui.hyperlink_to(repo, pr.link).on_hover_text(&pr.about);
+            pull_request(ui, repo, &pr, &node.id, &mut self.sent);
             ci(ui, pr.checks);
             ui.weak(node.name.as_deref().unwrap_or("unnamed"));
         }
@@ -227,8 +227,8 @@ impl Room {
                 }
                 for pr in open_prs(&node) {
                     ui.horizontal(|ui| {
-                        ui.hyperlink_to(format!("PR #{}", pr.number), pr.link)
-                            .on_hover_text(&pr.about);
+                        let label = format!("PR #{}", pr.number);
+                        pull_request(ui, label, &pr, &node.id, &mut self.sent);
                         ci(ui, pr.checks);
                     });
                 }
@@ -373,7 +373,7 @@ impl Room {
         let visuals = ui.visuals().clone();
 
         let mut drawn: Vec<(&Node, Pos2, f32, &str)> = Vec::new();
-        let mut links: Vec<(Rect, &str)> = Vec::new();
+        let mut links: Vec<(Rect, &str, &str)> = Vec::new();
         for island in &map.islands {
             let key = island.repo.unwrap_or("");
             let corner = glide(&format!("island:{key}"), spot(island.top));
@@ -433,14 +433,12 @@ impl Room {
                         .into_iter()
                         .map(|(text, tint)| (text, rgb(tint)))
                         .collect();
-                    links.extend(caption(
-                        &painter,
-                        &visuals,
-                        placed.node,
-                        &started,
-                        here,
-                        scale,
-                    ));
+                    let agent = placed.node.id.as_str();
+                    links.extend(
+                        caption(&painter, &visuals, placed.node, &started, here, scale)
+                            .into_iter()
+                            .map(|(rect, link)| (rect, link, agent)),
+                    );
                 }
                 drawn.push((placed.node, here, radius, island.agent_of(&placed.node.id)));
             }
@@ -448,19 +446,26 @@ impl Room {
 
         let pointer = response.hover_pos();
         let link =
-            pointer.and_then(|pointer| links.iter().find(|(rect, _)| rect.contains(pointer)));
-        if let Some(&(rect, link)) = link {
+            pointer.and_then(|pointer| links.iter().find(|(rect, ..)| rect.contains(pointer)));
+        if let Some(&(rect, link, agent)) = link {
             painter.hline(
                 rect.x_range(),
                 rect.bottom() - 1.0,
                 Stroke::new(1.0, visuals.text_color()),
             );
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            if response.clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(link));
-            }
-            response.on_hover_text_at_pointer(link);
-            return None;
+            let shift = ui.input(|input| input.modifiers.shift);
+            let picked = response.clicked().then(|| match shift {
+                true => Some(Picked::Focus(agent.to_string())),
+                false => {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(link));
+                    None
+                }
+            });
+            response.on_hover_text_at_pointer(format!(
+                "{link}\nShift-click to bring forward the agent that opened it"
+            ));
+            return picked.flatten();
         }
         let hovered = pointer.and_then(|pointer| {
             drawn
@@ -490,6 +495,30 @@ impl Room {
             });
         });
         picked
+    }
+}
+
+/// A pull request's link: opens it, or with Shift brings forward the agent that opened it.
+fn pull_request(
+    ui: &mut egui::Ui,
+    label: String,
+    pr: &Shown,
+    agent: &str,
+    sent: &mut Vec<Command>,
+) {
+    let hint = format!(
+        "{}\nShift-click to bring forward the agent that opened it",
+        pr.about
+    );
+    if ui.link(label).on_hover_text(hint).clicked() {
+        match ui.input(|input| input.modifiers.shift) {
+            true => sent.push(Command::Act {
+                node: agent.to_string(),
+                action: Action::Focus,
+                request: 0,
+            }),
+            false => ui.ctx().open_url(egui::OpenUrl::new_tab(pr.link)),
+        }
     }
 }
 

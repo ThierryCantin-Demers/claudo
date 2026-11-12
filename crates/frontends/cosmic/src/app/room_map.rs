@@ -73,8 +73,8 @@ impl<'a> MapView<'a> {
             .min_by(|a, b| a.at.distance(pointer).total_cmp(&b.at.distance(pointer)))
     }
 
-    /// Where each agent's pull request numbers are written, and what each opens.
-    fn links(&self) -> Vec<(Rectangle, &'a str)> {
+    /// Where each agent's pull request numbers are written, what each opens, and the agent.
+    fn links(&self) -> Vec<(Rectangle, &'a str, &'a str)> {
         let scale = self.scale;
         self.drawn()
             .into_iter()
@@ -89,18 +89,20 @@ impl<'a> MapView<'a> {
                     .zip(lefts)
                     .filter_map(|(part, left)| {
                         let size = Size::new(wide(&part.text, size), size * 1.3);
-                        Some((Rectangle::new(Point::new(left, y), size), part.link?))
+                        let at = Rectangle::new(Point::new(left, y), size);
+                        Some((at, part.link?, drawn.node.id.as_str()))
                     })
                     .collect::<Vec<_>>()
             })
             .collect()
     }
 
-    fn link_under(&self, pointer: Point) -> Option<&'a str> {
+    /// The pull request link under `pointer`, and the agent that opened it.
+    fn link_under(&self, pointer: Point) -> Option<(&'a str, &'a str)> {
         self.links()
             .into_iter()
-            .find(|(rect, _)| rect.contains(pointer))
-            .map(|(_, link)| link)
+            .find(|(rect, ..)| rect.contains(pointer))
+            .map(|(_, link, agent)| (link, agent))
     }
 }
 
@@ -123,7 +125,7 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let link = pointer
                     .and_then(|pointer| self.link_under(pointer))
-                    .map(str::to_string);
+                    .map(|(link, _)| link.to_string());
                 let moved = link != state.link;
                 state.link = link;
                 let under = pointer.and_then(|pointer| self.under(pointer));
@@ -141,9 +143,12 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let pointer = pointer?;
-                if let Some(link) = self.link_under(pointer) {
-                    let open = Message::Link(link.to_string());
-                    return Some(canvas::Action::publish(open).and_capture());
+                if let Some((link, agent)) = self.link_under(pointer) {
+                    let message = match state.modifiers.shift() {
+                        true => Message::Room(RoomMessage::Focus(agent.to_string())),
+                        false => Message::Link(link.to_string()),
+                    };
+                    return Some(canvas::Action::publish(message).and_capture());
                 }
                 let drawn = self.under(pointer)?;
                 let message = match state.modifiers.shift() {
@@ -249,10 +254,10 @@ impl canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for MapView<'_> {
                 Stroke::default().with_color(palette.strong).with_width(1.5),
             );
         }
-        if let Some((rect, _)) = state.link.as_ref().and_then(|link| {
+        if let Some((rect, ..)) = state.link.as_ref().and_then(|link| {
             self.links()
                 .into_iter()
-                .find(|(_, other)| *other == link.as_str())
+                .find(|(_, other, _)| *other == link.as_str())
         }) {
             let under = rect.y + rect.height * 0.85;
             frame.stroke(
