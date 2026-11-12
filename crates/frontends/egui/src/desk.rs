@@ -107,14 +107,14 @@ impl Desk {
     }
 }
 
-/// The agents on the left, wider, and the machines on the right, the benchmarks a tab
+/// The agents on the left, wider, and the benchmarks on the right, the machines a tab
 /// beside them.
 fn laid_out() -> Tree<Pane> {
     let mut tiles = Tiles::default();
     let agents = tiles.insert_pane(Pane::Agents);
     let machines = tiles.insert_pane(Pane::Machines);
     let benchmarks = tiles.insert_pane(Pane::Benchmarks);
-    let right = tiles.insert_tab_tile(vec![machines, benchmarks]);
+    let right = tiles.insert_tab_tile(vec![benchmarks, machines]);
     let mut linear = Linear::new(LinearDir::Horizontal, vec![agents, right]);
     linear.shares.set_share(agents, 3.0);
     linear.shares.set_share(right, 2.0);

@@ -258,7 +258,7 @@ impl ClaudoApp {
             nudge: 0,
             machines: machines::Machines::new(storage),
             benchmarks: benchmarks::Benchmarks::default(),
-            team_benchmarks: false,
+            team_benchmarks: true,
         }
     }
 
@@ -801,14 +801,14 @@ impl ClaudoApp {
                 ui.horizontal(|ui| {
                     match self.benchmarks.any() {
                         true => {
-                            ui.selectable_value(&mut self.team_benchmarks, false, "Machines");
                             ui.selectable_value(&mut self.team_benchmarks, true, "Benchmarks");
+                            ui.selectable_value(&mut self.team_benchmarks, false, "Machines");
                         }
                         false => {
                             ui.strong("Shared machines");
                         }
                     }
-                    if !self.team_benchmarks {
+                    if !(self.team_benchmarks && self.benchmarks.any()) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Arranging them is this page's own; the daemon hears nothing of it.
                             let _ = self.machines.menu(ui);
