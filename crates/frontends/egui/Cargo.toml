@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 claudo-protocol.workspace = true
+claudo-room.workspace = true
 claudo-transport.workspace = true
 dibstop-view = { workspace = true, features = ["egui"] }
 eframe = { version = "=0.36.2", features = ["persistence"] }

@@ -4,6 +4,7 @@ members = [
     "crates/protocol",
     "crates/core",
     "crates/transport",
+    "crates/room",
     "crates/daemon",
     "crates/frontends/egui",
     "crates/frontends/cosmic",
@@ -34,6 +35,7 @@ opt-level = "s"
 claudo-protocol = { path = "crates/protocol" }
 claudo-core = { path = "crates/core" }
 claudo-transport = { path = "crates/transport" }
+claudo-room = { path = "crates/room" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dibstop-view = { git = "https://github.com/ThierryCantin-Demers/dibs", branch = "master" }

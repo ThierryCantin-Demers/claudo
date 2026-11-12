@@ -1,0 +1,11 @@
+[package]
+name = "claudo-room"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# What the control room shows, worked out once for every frontend that draws it: no toolkit.
+[dependencies]
+claudo-protocol.workspace = true
+dibstop-view.workspace = true
+serde.workspace = true

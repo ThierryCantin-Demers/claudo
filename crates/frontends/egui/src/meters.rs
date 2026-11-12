@@ -1,16 +1,15 @@
 //! What a machine's CPU, memory and cards are doing, with a trace of the last looks as btop
 //! draws them, and which job each card runs.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
-use dibstop_view::dibs_format::status::{Disk, DiskRole, GpuMetrics, Metrics, QuotaKind, Status};
+use claudo_room::machines::{
+    Cards, History, KEPT, Show, card_name, filled, gib, heat, held_by, level, memory, percent,
+    running_on,
+};
+use dibstop_view::dibs_format::status::{GpuMetrics, Status};
 use dibstop_view::item::Item;
-use serde::{Deserialize, Serialize};
-
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, Vec2, vec2};
-
-/// Looks kept for each trace: ten minutes at the default poll.
-const KEPT: usize = 60;
 
 const CPU_GRAPH: f32 = 40.0;
 const BAR: f32 = 16.0;
@@ -18,78 +17,6 @@ const BAR: f32 = 16.0;
 const CARD: f32 = 210.0;
 const CARD_GRAPH: f32 = 30.0;
 const ROW_BAR: f32 = 90.0;
-
-/// What a machine's cell shows of its metrics, the same for every machine.
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Show {
-    pub cpu: bool,
-    pub memory: bool,
-    pub disks: bool,
-    pub cards: Cards,
-    pub asleep: bool,
-}
-
-impl Default for Show {
-    fn default() -> Self {
-        Self {
-            cpu: true,
-            memory: true,
-            disks: true,
-            cards: Cards::Graphs,
-            asleep: true,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum Cards {
-    /// A panel each, with its use as a graph.
-    Graphs,
-    /// A line each, with its use as a bar.
-    Rows,
-    Hidden,
-}
-
-/// One machine's last looks, for the traces.
-#[derive(Default)]
-pub struct History {
-    cpu: VecDeque<f32>,
-    /// By the card's slot.
-    gpus: HashMap<String, VecDeque<f32>>,
-    /// When the last look was read, so the same look heard again adds nothing.
-    at: u64,
-}
-
-impl History {
-    pub fn heard(&mut self, status: &Status) {
-        let Some(metrics) = &status.metrics else {
-            return;
-        };
-        if status.t == self.at {
-            return;
-        }
-        self.at = status.t;
-        if let Some(busy) = metrics.cpu_busy_permille {
-            push(&mut self.cpu, busy as f32 / 1000.0);
-        }
-        for gpu in &metrics.gpus {
-            if let Some(util) = gpu.util_pct {
-                push(
-                    self.gpus.entry(gpu.pci.clone()).or_default(),
-                    util as f32 / 100.0,
-                );
-            }
-        }
-    }
-}
-
-fn push(trace: &mut VecDeque<f32>, value: f32) {
-    if trace.len() == KEPT {
-        trace.pop_front();
-    }
-    trace.push_back(value.clamp(0.0, 1.0));
-}
 
 /// The CPU as a graph of its last looks and the memory as a bar across the cell, then a panel
 /// per card awake, each with its use as a graph, its memory as a bar and the job on it, as
@@ -155,81 +82,17 @@ pub fn ui(ui: &mut Ui, show: Show, status: &Status, history: &History, jobs: &[I
         }
     }
     if !asleep.is_empty() && show.asleep && show.cards != Cards::Hidden {
-        let names: Vec<String> = asleep.iter().map(|gpu| name(gpu)).collect();
+        let names: Vec<String> = asleep.iter().map(|gpu| card_name(gpu)).collect();
         ui.weak(format!("asleep: {}", names.join(", ")))
             .on_hover_text("A card the driver has put to sleep, which reading would wake.");
     }
-}
-
-/// How full a filesystem is to this account, and what to write on its bar: its own free
-/// space, or a quota's room when that is less, since either stops a job the same way.
-fn filled(disk: &Disk) -> (f32, String) {
-    let role = match disk.role {
-        DiskRole::Scratch => "scratch",
-        DiskRole::Tmp => "tmp",
-        DiskRole::SystemTmp => "/tmp",
-    };
-    let disk_share = 1.0 - disk.free as f32 / disk.total.max(1) as f32;
-    let tightest = disk
-        .quotas
-        .iter()
-        .min_by_key(|quota| quota.limit.saturating_sub(quota.used));
-    match tightest {
-        Some(quota) if quota.limit.saturating_sub(quota.used) < disk.free => {
-            let share = quota.used as f32 / quota.limit.max(1) as f32;
-            let kind = match quota.kind {
-                QuotaKind::User => "user",
-                QuotaKind::Group => "group",
-                QuotaKind::Project => "project",
-            };
-            let over = format!(
-                "{role} {}   {} free of its {kind} quota of {}",
-                percent(share),
-                size(quota.limit.saturating_sub(quota.used)),
-                size(quota.limit)
-            );
-            (share.max(disk_share), over)
-        }
-        _ => {
-            let over = format!(
-                "{role} {}   {} free of {}",
-                percent(disk_share),
-                size(disk.free),
-                size(disk.total)
-            );
-            (disk_share, over)
-        }
-    }
-}
-
-fn size(bytes: u64) -> String {
-    const GIB: f64 = (1u64 << 30) as f64;
-    match bytes as f64 / GIB {
-        gib if gib >= 1024.0 => format!("{:.1} TiB", gib / 1024.0),
-        gib => format!("{gib:.0} GiB"),
-    }
-}
-
-fn memory(metrics: &Metrics) -> Option<(u64, u64)> {
-    Some((metrics.mem_used?, metrics.mem_total?))
-}
-
-/// The running jobs on `gpu`.
-fn running_on<'a>(gpu: &GpuMetrics, jobs: &'a [Item]) -> Vec<&'a Item> {
-    jobs.iter()
-        .filter(|job| job.holding)
-        .filter(|job| {
-            let device = job.device.as_ref().map(|device| device.as_str());
-            alias(gpu).is_some_and(|alias| device == Some(alias))
-        })
-        .collect()
 }
 
 /// One card as a line: its name, its use and memory as bars, its temperature and its job.
 fn row(ui: &mut Ui, gpu: &GpuMetrics, jobs: &[Item]) {
     let on = running_on(gpu, jobs);
     let busy = ui.visuals().warn_fg_color;
-    let named = RichText::new(name(gpu)).strong();
+    let named = RichText::new(card_name(gpu)).strong();
     ui.label(match on.is_empty() {
         true => named,
         false => named.color(busy),
@@ -247,8 +110,8 @@ fn row(ui: &mut Ui, gpu: &GpuMetrics, jobs: &[Item]) {
     }
     match gpu.temp_c {
         Some(temp) => {
-            let share = (temp as f32 - 30.0) / 60.0;
-            ui.label(RichText::new(format!("{temp}°C")).color(level(share)));
+            let share = heat(temp);
+            ui.label(RichText::new(format!("{temp}°C")).color(colour(share)));
         }
         None => {
             ui.label("");
@@ -291,7 +154,7 @@ fn panel(
     ui.set_width(inner);
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.horizontal(|ui| {
-        let named = RichText::new(name(gpu)).strong();
+        let named = RichText::new(card_name(gpu)).strong();
         ui.add(
             egui::Label::new(match on.is_empty() {
                 true => named,
@@ -306,8 +169,8 @@ fn panel(
         ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(temp) = gpu.temp_c {
-                let share = (temp as f32 - 30.0) / 60.0;
-                ui.label(RichText::new(format!("{temp}°C")).color(level(share)));
+                let share = heat(temp);
+                ui.label(RichText::new(format!("{temp}°C")).color(colour(share)));
             }
         });
     });
@@ -349,44 +212,6 @@ fn panel(
     }
 }
 
-/// What `--device` names it by, which a job's `device` is.
-fn alias(gpu: &GpuMetrics) -> Option<&str> {
-    gpu.alias.as_deref()
-}
-
-/// The card's alias, else its model without its maker's prefix, else its slot.
-fn name(gpu: &GpuMetrics) -> String {
-    if let Some(alias) = alias(gpu) {
-        return alias.trim_start_matches("gpu:").to_string();
-    }
-    match &gpu.name {
-        Some(name) => name
-            .trim_start_matches("NVIDIA ")
-            .trim_start_matches("GeForce ")
-            .to_string(),
-        None => {
-            let slot = gpu
-                .pci
-                .split_once(':')
-                .map_or(gpu.pci.as_str(), |(_, slot)| slot);
-            format!("{:?} {slot}", gpu.vendor).to_lowercase()
-        }
-    }
-}
-
-/// What a throttle reason means to someone measuring, and whether it spoils the numbers.
-/// An idle card, application clocks and the rest are how a card normally runs.
-fn held_by(reason: &str) -> Option<(&'static str, bool)> {
-    match reason {
-        "hw_thermal" => Some(("too hot (hw)", true)),
-        "sw_thermal" => Some(("too hot", true)),
-        "hw_slowdown" => Some(("hw slowdown", true)),
-        "hw_power_brake" => Some(("power brake", true)),
-        "sw_power_cap" => Some(("at power cap", false)),
-        _ => None,
-    }
-}
-
 /// The last looks as columns, each as tall and as hot as its value, with `over` written on
 /// top; `now` stands in until there are looks to draw.
 fn graph(ui: &mut Ui, size: Vec2, points: &VecDeque<f32>, now: Option<f32>, over: &str) {
@@ -406,7 +231,7 @@ fn graph(ui: &mut Ui, size: Vec2, points: &VecDeque<f32>, now: Option<f32>, over
             egui::pos2(right - column, rect.bottom() - height),
             egui::pos2(right, rect.bottom()),
         );
-        painter.rect_filled(bar, 0.0, level(*value));
+        painter.rect_filled(bar, 0.0, colour(*value));
     }
     caption(&painter, rect, over);
 }
@@ -418,7 +243,7 @@ fn bar(ui: &mut Ui, size: Vec2, share: f32, over: &str) -> egui::Response {
     painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
     let width = rect.width() * share.clamp(0.0, 1.0);
     let full = Rect::from_min_size(rect.min, vec2(width, rect.height()));
-    painter.rect_filled(full, 3.0, level(share).gamma_multiply(0.8));
+    painter.rect_filled(full, 3.0, colour(share).gamma_multiply(0.8));
     caption(&painter, rect, over);
     response
 }
@@ -434,23 +259,7 @@ fn caption(painter: &egui::Painter, rect: Rect, text: &str) {
     painter.text(at, Align2::LEFT_TOP, text, font, Color32::WHITE);
 }
 
-/// btop's ramp: green when low, yellow halfway, red when full.
-fn level(share: f32) -> Color32 {
-    let green = Color32::from_rgb(70, 190, 100);
-    let yellow = Color32::from_rgb(225, 195, 60);
-    let red = Color32::from_rgb(225, 75, 65);
-    let share = share.clamp(0.0, 1.0);
-    match share < 0.5 {
-        true => green.lerp_to_gamma(yellow, share * 2.0),
-        false => yellow.lerp_to_gamma(red, (share - 0.5) * 2.0),
-    }
-}
-
-fn percent(share: f32) -> String {
-    format!("{:.0}%", share * 100.0)
-}
-
-fn gib(used: u64, total: u64) -> String {
-    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
-    format!("{:.1}/{:.1} GiB", gib(used), gib(total))
+fn colour(share: f32) -> Color32 {
+    let [r, g, b] = level(share);
+    Color32::from_rgb(r, g, b)
 }

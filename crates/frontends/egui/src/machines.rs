@@ -10,9 +10,10 @@ use dibstop_view::dibs_format::{Label, Mode, Span};
 use dibstop_view::item::{Item, Progress as _};
 use dibstop_view::text::{Tone, agent_hue, cores, plain, state_words};
 use egui::{Color32, Key, RichText, Ui, vec2};
-use serde::{Deserialize, Serialize};
 
-use crate::meters::{self, Cards, History, Show};
+use claudo_room::machines::{Arrangement, Cards, History, Show};
+
+use crate::meters;
 
 const KEY: &str = "machines";
 
@@ -34,18 +35,6 @@ pub struct Machines {
     pub watch: Option<DibsWatch>,
     /// The poll the menu's slider is set to while it moves, before the daemon says it took it.
     poll: Option<u64>,
-}
-
-/// How the person arranged the machines, kept with the page's storage.
-#[derive(Default, Serialize, Deserialize)]
-struct Arrangement {
-    /// The machines in the order shown; one dibs adds later goes last.
-    order: Vec<String>,
-    hidden: Vec<String>,
-    /// None fits as many as the width takes.
-    columns: Option<usize>,
-    #[serde(default)]
-    show: Show,
 }
 
 /// What one machine's cell remembers between frames.
@@ -87,22 +76,11 @@ impl Machines {
         self.machines = machines;
     }
 
-    /// Every machine dibs lists, in the person's order.
-    fn ordered(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .machines
+    fn names(&self) -> Vec<String> {
+        self.machines
             .iter()
             .map(|machine| machine.name.clone())
-            .collect();
-        let at = |name: &String| {
-            let order = &self.arrangement.order;
-            order
-                .iter()
-                .position(|other| other == name)
-                .unwrap_or(order.len())
-        };
-        names.sort_by_key(at);
-        names
+            .collect()
     }
 
     /// The machines shown, in a grid of equal cells, and the dibs call the person asked for.
@@ -111,11 +89,7 @@ impl Machines {
             ui.weak("No dibs machines yet: the daemon looks every few seconds, unless dibs is off here.");
             return None;
         }
-        let shown: Vec<String> = self
-            .ordered()
-            .into_iter()
-            .filter(|name| !self.arrangement.hidden.contains(name))
-            .collect();
+        let shown = self.arrangement.shown(self.names());
         if shown.is_empty() {
             ui.weak("Every machine is hidden: show one from Arrange.");
             return None;
@@ -126,12 +100,7 @@ impl Machines {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let width = ui.available_width();
-                let fit = ((width + GAP) / (NARROWEST + GAP)).floor() as usize;
-                let columns = self
-                    .arrangement
-                    .columns
-                    .unwrap_or(fit)
-                    .clamp(1, shown.len());
+                let columns = self.arrangement.columns(shown.len(), width, NARROWEST, GAP);
                 let cell = (width - GAP * (columns - 1) as f32) / columns as f32;
                 for row in shown.chunks(columns) {
                     ui.horizontal_top(|ui| {
@@ -178,7 +147,7 @@ impl Machines {
     }
 
     fn arrange(&mut self, ui: &mut Ui, sent: &mut Vec<Command>) {
-        let ordered = self.ordered();
+        let ordered = self.arrangement.ordered(self.names());
         let watch = self.watch.clone();
         let mut moved = None;
         egui::Grid::new("arrange").show(ui, |ui| {
@@ -188,13 +157,9 @@ impl Machines {
             ui.end_row();
             for (i, name) in ordered.iter().enumerate() {
                 ui.label(name);
-                let hidden = &mut self.arrangement.hidden;
-                let mut on = !hidden.contains(name);
+                let mut on = !self.arrangement.hidden.contains(name);
                 if ui.checkbox(&mut on, "").changed() {
-                    hidden.retain(|other| other != name);
-                    if !on {
-                        hidden.push(name.clone());
-                    }
+                    self.arrangement.set_shown(name, on);
                 }
                 match &watch {
                     Some(watch) => {
@@ -231,9 +196,7 @@ impl Machines {
             }
         });
         if let Some((from, to)) = moved {
-            let mut order = ordered.clone();
-            order.swap(from, to);
-            self.arrangement.order = order;
+            self.arrangement.swap(ordered, from, to);
         }
         ui.separator();
         ui.horizontal(|ui| {
