@@ -555,11 +555,15 @@ wrote it.
   command it left running in the background has not ended in its own transcript (its turn
   ends without waiting for one). A notification can follow a preamble of the harness's own,
   so `cli::notified_end` looks for the block anywhere in the message.
-- **Machines** (beside the agents on the page's Room tab, as tiles the person drags into a
-  split or tabs, `egui_tiles`, laid out as eframe keeps it): the dibs collector also sends every
-  machine's status, and why one could not answer, as `ServerEvent::Dibs`, which the page draws
-  with dibstop's own egui view (`dibstop-view`, from the dibs repo, egui pinned to the
-  version dibs uses). An action the view returns goes back as `Command::Dibs` with its
+- **Machines** (each a tile beside the agents on the page's Room tab, which the person drags
+  into a split or tabs, `egui_tiles`, laid out as eframe keeps it, and hides or shows from
+  the Machines menu on the agents' tab bar): the dibs collector also sends every machine's
+  status, and why one could not answer, as `ServerEvent::Dibs`, which each tile draws with
+  dibstop's own egui view (`dibstop-view`, from the dibs repo, egui pinned to the version
+  dibs uses), given that machine alone. dibstop reads its keys from the whole page, so only
+  the tile last clicked is given them. The same menu sets how often the daemon looks
+  (`Command::DibsPoll`, one of `DIBS_POLLS`, kept in `$XDG_CONFIG_HOME/claudo/dibs-poll`
+  and told to every page as `ServerEvent::DibsPoll`). An action the view returns goes back as `Command::Dibs` with its
   `Call` and job label, never a command line, and the backend makes the `dibs` call again
   from those (`Action::new(..).run()`), answering `DibsAnswer` to the client that asked.
 - **Actions** (`Command::Act`, protocol 2): `Focus` and `Prompt` go to herdr's `agent.focus`

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
 /// cannot read. The backend sends it first, in `Hello`.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -828,7 +828,13 @@ pub enum Command {
         /// The label of the job it is about, for its title.
         label: String,
     },
+    /// Look at the dibs machines every this many seconds, for every page.
+    DibsPoll(u64),
 }
+
+/// The seconds a page may choose between looks at the dibs machines. Each look reaches every
+/// machine over ssh; dibstop looks every 10 seconds by default.
+pub const DIBS_POLLS: [u64; 5] = [3, 5, 10, 30, 60];
 
 /// A dibs machine as the daemon last heard of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -858,6 +864,8 @@ pub enum ServerEvent {
     },
     /// Every dibs machine, each time a look at them says something new.
     Dibs(Vec<DibsMachine>),
+    /// How many seconds pass between looks at the dibs machines.
+    DibsPoll(u64),
     /// What a `Dibs` call printed, to the client that asked.
     DibsAnswer {
         title: String,

@@ -558,6 +558,7 @@ impl ClaudoApp {
 
                 ServerEvent::Room(event) => self.room.apply(event),
                 ServerEvent::Dibs(machines) => self.machines.heard(machines),
+                ServerEvent::DibsPoll(seconds) => self.machines.poll = Some(seconds),
                 ServerEvent::DibsAnswer { title, body } => self.machines.answered(title, body),
 
                 ServerEvent::Answered { request_id, .. } => {

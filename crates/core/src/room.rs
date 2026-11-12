@@ -24,6 +24,8 @@ pub struct Room {
     machines: Clients,
     /// The dibs machines, which only this computer's pages hear.
     dibs: Vec<DibsMachine>,
+    /// Seconds between looks at them.
+    dibs_poll: Option<u64>,
 }
 
 impl Room {
@@ -35,6 +37,16 @@ impl Room {
         if !self.dibs.is_empty() {
             self.clients
                 .to(client, ServerEvent::Dibs(self.dibs.clone()));
+        }
+        if let Some(seconds) = self.dibs_poll {
+            self.clients.to(client, ServerEvent::DibsPoll(seconds));
+        }
+    }
+
+    fn set_dibs_poll(&mut self, seconds: u64) {
+        if self.dibs_poll != Some(seconds) {
+            self.clients.send(ServerEvent::DibsPoll(seconds));
+            self.dibs_poll = Some(seconds);
         }
     }
 
@@ -231,6 +243,11 @@ impl Feed {
     /// The dibs machines as the last look found them.
     pub fn dibs(&self, machines: Vec<DibsMachine>) {
         self.room.lock().unwrap().set_dibs(machines);
+    }
+
+    /// How often the dibs machines are looked at.
+    pub fn dibs_poll(&self, seconds: u64) {
+        self.room.lock().unwrap().set_dibs_poll(seconds);
     }
 
     /// Everything this collector sees now, in place of what it saw before.

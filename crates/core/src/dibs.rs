@@ -4,29 +4,75 @@
 //! hangs under the agent that asked, which the room finds by name. All of dibs's shapes stay
 //! in this file.
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use claudo_protocol::{DibsMachine, Node, NodeKind, NodeState};
+use claudo_protocol::{DIBS_POLLS, DibsMachine, Node, NodeKind, NodeState};
 use dibstop_view::dibs_format::Mode;
 use dibstop_view::dibs_format::status::Status;
 
 use crate::room::Feed;
 
-/// Each look reaches every machine over ssh; dibstop looks this often by default.
-const POLL: Duration = Duration::from_secs(10);
+const POLL: u64 = 10;
+
+/// Seconds between looks, which a page may change while the collector waits.
+static EVERY: Mutex<Option<u64>> = Mutex::new(None);
+static CHANGED: Condvar = Condvar::new();
 
 /// Reads the machines and their jobs into `feed` for as long as the process runs. Without
 /// dibs, there are none.
 pub fn spawn(feed: Feed) {
     std::thread::spawn(move || {
+        let mut every = *EVERY.lock().unwrap().get_or_insert_with(saved);
         loop {
+            feed.dibs_poll(every);
             let machines = look().map(|text| machines(&text)).unwrap_or_default();
             feed.replace(jobs(&machines));
             feed.dibs(machines);
-            std::thread::sleep(POLL);
+            let shown = EVERY.lock().unwrap();
+            let (shown, _) = CHANGED
+                .wait_timeout_while(shown, Duration::from_secs(every), |now| {
+                    *now == Some(every)
+                })
+                .unwrap();
+            every = shown.unwrap_or(every);
         }
     });
+}
+
+/// Looks again at once, then every `seconds`, the nearest of `DIBS_POLLS`.
+pub fn set_poll(seconds: u64) {
+    let seconds = DIBS_POLLS
+        .into_iter()
+        .min_by_key(|choice| choice.abs_diff(seconds))
+        .unwrap_or(POLL);
+    *EVERY.lock().unwrap() = Some(seconds);
+    CHANGED.notify_all();
+    let path = poll_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&path, seconds.to_string()) {
+        eprintln!("claudo: cannot keep the dibs poll: {error}");
+    }
+}
+
+fn saved() -> u64 {
+    std::fs::read_to_string(poll_path())
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .filter(|seconds| DIBS_POLLS.contains(seconds))
+        .unwrap_or(POLL)
+}
+
+fn poll_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_default()
+        .join("claudo/dibs-poll")
 }
 
 /// Both streams, in the order they were written: a machine's trouble goes to stderr, under
