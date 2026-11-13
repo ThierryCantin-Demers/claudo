@@ -154,7 +154,8 @@ pub fn filled(disk: &Disk) -> (f32, String) {
         DiskRole::Tmp => "tmp".to_string(),
         DiskRole::SystemTmp => "/tmp".to_string(),
         DiskRole::Linked if disk.paths.is_empty() => disk.mount.clone(),
-        DiskRole::Linked => disk.paths.join(", "),
+        DiskRole::Linked if disk.paths.len() <= 2 => disk.paths.join(", "),
+        DiskRole::Linked => format!("scratch on {}, {} folders", disk.mount, disk.paths.len()),
     };
     let disk_share = 1.0 - disk.free as f32 / disk.total.max(1) as f32;
     let tightest = disk
