@@ -52,8 +52,10 @@ impl Room {
                 .to(client, ServerEvent::Benchmarks(self.benchmarks.clone()));
         }
         if !self.quick_prompts.is_empty() {
-            self.clients
-                .to(client, ServerEvent::QuickPrompts(self.quick_prompts.clone()));
+            self.clients.to(
+                client,
+                ServerEvent::QuickPrompts(self.quick_prompts.clone()),
+            );
         }
     }
 

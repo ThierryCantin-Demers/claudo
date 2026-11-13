@@ -35,7 +35,9 @@ pub fn spawn(feed: Feed) {
     std::thread::spawn(move || {
         let mut seen: Option<SystemTime> = None;
         loop {
-            let changed = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            let changed = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
             if changed != seen {
                 seen = changed;
                 feed.quick_prompts(read(&path));

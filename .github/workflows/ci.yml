@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - "Cargo.lock"
+      - "**.rs"
+      - "**.yml"
+      - "**.toml"
+      - "**.md"
+  pull_request:
+    branches:
+      - master
+
+# A new push makes the checks of the one before it moot.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned, so a new release's lints cannot fail a push that changed nothing.
+  RUST: 1.100.0
+  # What eframe and libcosmic link or open: Wayland, X11, xkbcommon, fonts and GL.
+  SYSTEM_LIBS: >-
+    pkg-config libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxrandr-dev
+    libxi-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev libexpat1-dev libinput-dev
+    libudev-dev
+# Each job's rust-cache saves on failure too: a job that keeps failing would otherwise rebuild
+# every dependency on every run. It keeps dependencies only, never the workspace's own crates.
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No private name in the tree or in what was pushed
+        env:
+          PRIVATE_STRINGS: ${{ secrets.PRIVATE_STRINGS }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$PRIVATE_STRINGS" ]; then
+            echo "::warning::PRIVATE_STRINGS is not set, so nothing was scanned"
+            exit 0
+          fi
+          patterns=$(printf '%s\n' "$PRIVATE_STRINGS" | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' || true)
+          if [ -z "$patterns" ]; then
+            echo "::error::PRIVATE_STRINGS holds only comments and blank lines, so there is nothing to scan for"
+            exit 1
+          fi
+          # A new branch or a force push has no base to start from: only the head's message.
+          if from=$(git merge-base "$BASE" "$HEAD" 2>/dev/null); then
+            commits=$(git rev-list "$from..$HEAD")
+          else
+            commits=$HEAD
+          fi
+          # The patterns are secret, so the log names neither them nor a path that holds one.
+          bad=0
+          n=0
+          while IFS= read -r pat; do
+            n=$((n + 1))
+            if git ls-tree -r --name-only "$HEAD" | grep -q -i -e "$pat"; then
+              echo "a file's path holds private pattern $n"; bad=1
+            fi
+            for f in $(git grep -l -i -e "$pat" "$HEAD" -- . | sed "s|^$HEAD:||"); do
+              printf '%s\n' "$f" | grep -q -i -e "$pat" && continue
+              echo "private pattern $n is in $f"; bad=1
+            done
+            for c in $commits; do
+              if git log -1 --format=%B "$c" | grep -q -i -e "$pat"; then
+                echo "private pattern $n is in the message of $c"; bad=1
+              fi
+            done
+          done <<< "$patterns"
+          exit "$bad"
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: sudo apt-get update && sudo apt-get install -y $SYSTEM_LIBS
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # libcosmic sits behind each crate's `cosmic` feature, which the line above leaves off.
+      - run: cargo clippy -p claudo-cosmic -p claudo-applet --features claudo-cosmic/cosmic,claudo-applet/cosmic --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
+      - run: sudo apt-get update && sudo apt-get install -y $SYSTEM_LIBS
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo test --workspace
+      # COSMIC's view driven on a headless renderer, without a window.
+      - run: cargo test -p claudo-cosmic --features cosmic
+
+  # A frontend that reaches `core` pulls process and filesystem code into the page, which then
+  # stops building for the browser.
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST }}
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo clippy -p claudo-egui --target wasm32-unknown-unknown -- -D warnings

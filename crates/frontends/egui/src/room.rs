@@ -910,7 +910,11 @@ fn answer(
     });
     ui.horizontal_wrapped(|ui| {
         for prompt in quick_prompts {
-            if ui.button(&prompt.label).on_hover_text(&prompt.text).clicked() {
+            if ui
+                .button(&prompt.label)
+                .on_hover_text(&prompt.text)
+                .clicked()
+            {
                 action = Some(Action::Prompt(prompt.text.clone()));
             }
         }
