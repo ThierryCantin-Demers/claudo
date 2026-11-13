@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use claudo_protocol::{
-    Benchmark, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, RoomEvent, ServerEvent,
+    Benchmark, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState, QuickPrompt, RoomEvent,
+    ServerEvent,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -29,6 +30,7 @@ pub struct Room {
     /// How they are watched.
     dibs_watch: Option<DibsWatch>,
     benchmarks: Vec<Benchmark>,
+    quick_prompts: Vec<QuickPrompt>,
 }
 
 impl Room {
@@ -48,6 +50,18 @@ impl Room {
         if !self.benchmarks.is_empty() {
             self.clients
                 .to(client, ServerEvent::Benchmarks(self.benchmarks.clone()));
+        }
+        if !self.quick_prompts.is_empty() {
+            self.clients
+                .to(client, ServerEvent::QuickPrompts(self.quick_prompts.clone()));
+        }
+    }
+
+    fn set_quick_prompts(&mut self, prompts: Vec<QuickPrompt>) {
+        if prompts != self.quick_prompts {
+            self.clients
+                .send(ServerEvent::QuickPrompts(prompts.clone()));
+            self.quick_prompts = prompts;
         }
     }
 
@@ -264,6 +278,11 @@ impl Feed {
     /// The team's benchmarks as the last look found them.
     pub fn benchmarks(&self, benchmarks: Vec<Benchmark>) {
         self.room.lock().unwrap().set_benchmarks(benchmarks);
+    }
+
+    /// The messages the person sends agents often.
+    pub fn quick_prompts(&self, prompts: Vec<QuickPrompt>) {
+        self.room.lock().unwrap().set_quick_prompts(prompts);
     }
 
     /// How the dibs machines are watched.

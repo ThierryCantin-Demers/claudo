@@ -609,6 +609,11 @@ wrote it.
   snapshot (`herdr::act`). Only this machine's panes are reachable. A failure comes back as
   `RoomEvent::Failed` to the client that asked, not as an `Error`, which a chat would take
   for its own. herdr refuses a prompt to an agent `blocked` on an approval.
+- **Quick prompts** (`core/src/quick_prompts.rs`): the messages the person sends agents often,
+  from `$XDG_CONFIG_HOME/claudo/quick-prompts.json` (`label` and `text` each, written with a
+  few to start from when missing, read again when it changes), sent as
+  `ServerEvent::QuickPrompts` and offered as buttons under an agent's answer box. The team page
+  never starts it, so the person's prompts never reach coworkers.
 
 ## Workflow
 

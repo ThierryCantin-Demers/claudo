@@ -13,6 +13,7 @@ pub mod handover;
 pub mod herdr;
 pub mod hub;
 pub mod live;
+pub mod quick_prompts;
 pub mod room;
 pub mod runs;
 pub mod sessions;

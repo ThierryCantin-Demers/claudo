@@ -173,6 +173,7 @@ async fn serve() {
     }
     claudo_core::transcripts::spawn(hub.notes("transcripts"), hub.feed("subagents"));
     benchmarks(&hub);
+    claudo_core::quick_prompts::spawn(hub.feed("quick-prompts"));
     hub.serve(&machine_socket());
     let others = std::env::var("CLAUDO_MACHINES").unwrap_or_default();
     let others = others

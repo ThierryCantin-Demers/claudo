@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any breaking change, such as a new `Command` or `ServerEvent` an older build
 /// cannot read. The backend sends it first, in `Hello`.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 pub type ConversationId = String;
 pub type SessionId = String;
@@ -855,6 +855,14 @@ impl Default for DibsWatch {
     }
 }
 
+/// A message the person sends agents often, offered as a button beside the box that writes
+/// to one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickPrompt {
+    pub label: String,
+    pub text: String,
+}
+
 /// A benchmark a team records in Parley, with its latest measurements.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Benchmark {
@@ -935,6 +943,8 @@ pub enum ServerEvent {
     DibsWatch(DibsWatch),
     /// The team's benchmarks, each time a look at them says something new.
     Benchmarks(Vec<Benchmark>),
+    /// The messages the person sends agents often, each time they change.
+    QuickPrompts(Vec<QuickPrompt>),
     /// This page is for looking only, as a team daemon serves it: it shows the machines and
     /// sends nothing.
     LookOnly,

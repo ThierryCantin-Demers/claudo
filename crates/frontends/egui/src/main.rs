@@ -657,6 +657,7 @@ impl ClaudoApp {
                 ServerEvent::Dibs(machines) => self.machines.heard(machines),
                 ServerEvent::DibsWatch(watch) => self.machines.watch = Some(watch),
                 ServerEvent::Benchmarks(list) => self.benchmarks.heard(list),
+                ServerEvent::QuickPrompts(prompts) => self.room.quick_prompts = prompts,
                 ServerEvent::LookOnly => {
                     self.look_only = true;
                     self.machines.look_only = true;

@@ -2394,6 +2394,7 @@ mod app {
                 | ServerEvent::Dibs(_)
                 | ServerEvent::DibsWatch(_)
                 | ServerEvent::Benchmarks(_)
+                | ServerEvent::QuickPrompts(_)
                 | ServerEvent::LookOnly
                 | ServerEvent::DibsAnswer { .. } => {}
                 ServerEvent::Hello { version } => {

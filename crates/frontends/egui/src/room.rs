@@ -6,7 +6,7 @@ use std::f32::consts::PI;
 use std::time::Duration;
 
 use claudo_protocol::{
-    Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, RoomEvent,
+    Action, Checks, Command, Node, NodeId, NodeKind, NodeState, Provider, QuickPrompt, RoomEvent,
 };
 use claudo_room::agents::{
     AGENT, Agents, BADGE_ROW, BADGE_SIZE, CAPTION_REACH, CHILD, Island, LEGEND, PAD, STARTED_GAP,
@@ -24,6 +24,8 @@ pub struct Room {
     agents: Agents,
     /// Answers being typed to the agents waiting on the person.
     drafts: BTreeMap<NodeId, String>,
+    /// The messages the person sends agents often, as buttons beside the answer box.
+    pub quick_prompts: Vec<QuickPrompt>,
     /// The last action that failed, and why.
     failed: Option<(NodeId, String)>,
     sent: Vec<Command>,
@@ -279,8 +281,9 @@ impl Room {
                 if matches!(node.kind, Some(NodeKind::Agent(_))) {
                     ui.add_space(6.0);
                     let draft = self.drafts.entry(node.id.clone()).or_default();
+                    let width = ui.available_width() - 60.0;
                     if let Some(action) =
-                        answer(ui, "details", &node, draft, ui.available_width() - 60.0)
+                        answer(ui, "details", &node, draft, width, &self.quick_prompts)
                     {
                         self.sent.push(Command::Act {
                             node: node.id.clone(),
@@ -888,6 +891,7 @@ fn answer(
     node: &Node,
     draft: &mut String,
     width: f32,
+    quick_prompts: &[QuickPrompt],
 ) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
@@ -902,6 +906,13 @@ fn answer(
         if (entered || send) && !draft.trim().is_empty() {
             let text = std::mem::take(draft).trim().to_string();
             action = Some(Action::Prompt(text));
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        for prompt in quick_prompts {
+            if ui.button(&prompt.label).on_hover_text(&prompt.text).clicked() {
+                action = Some(Action::Prompt(prompt.text.clone()));
+            }
         }
     });
     if ui.link("Bring its terminal forward").clicked() {

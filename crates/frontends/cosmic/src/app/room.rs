@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use claudo_protocol::{
     Action as Act, DIBS_POLL, DibsMachine, DibsWatch, Node, NodeId, NodeKind, NodeState,
+    QuickPrompt,
 };
 use claudo_room::agents::{
     self as room_agents, Agents, LEGEND, Steady, ago, checks, legend_kinds, open_prs, reason,
@@ -96,6 +97,7 @@ pub struct Room {
     failed: Option<(NodeId, String)>,
     /// Answers being typed to agents.
     drafts: HashMap<NodeId, String>,
+    quick_prompts: Vec<QuickPrompt>,
     /// The node whose details are open beside the map.
     picked: Option<NodeId>,
     machines: Vec<DibsMachine>,
@@ -160,6 +162,8 @@ pub enum RoomMessage {
     Tick,
     Draft(NodeId, String),
     Answer(NodeId),
+    /// Send an agent the quick prompt at this index.
+    Quick(NodeId, usize),
     Focus(NodeId),
     Pick(NodeId),
     Unpick,
@@ -302,6 +306,11 @@ impl Room {
                     self.act(id, Act::Prompt(text.trim().to_string()));
                 }
             }
+            RoomMessage::Quick(id, index) => {
+                if let Some(prompt) = self.quick_prompts.get(index) {
+                    self.act(id, Act::Prompt(prompt.text.clone()));
+                }
+            }
             RoomMessage::Focus(id) => self.act(id, Act::Focus),
             RoomMessage::TogglePrs => self.prs_open = !self.prs_open,
             RoomMessage::StartSplit(_) => {}
@@ -370,6 +379,7 @@ impl Room {
                 self.machines = machines;
             }
             ServerEvent::DibsWatch(watch) => self.watch = Some(watch),
+            ServerEvent::QuickPrompts(prompts) => self.quick_prompts = prompts,
             ServerEvent::DibsAnswer { title, body } => {
                 self.busy = None;
                 self.shown = Some((title, body));
@@ -795,6 +805,23 @@ impl Room {
             ])
             .spacing(6)
             .align_y(Alignment::Center)
+            .into(),
+            widget::flex_row(
+                self.quick_prompts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, prompt)| {
+                        widget::tooltip(
+                            widget::button::standard(prompt.label.as_str())
+                                .on_press(Message::Room(RoomMessage::Quick(id.clone(), index))),
+                            widget::text(prompt.text.as_str()),
+                            widget::tooltip::Position::Bottom,
+                        )
+                        .into()
+                    })
+                    .collect(),
+            )
+            .spacing(6)
             .into(),
             widget::button::link("Bring its terminal forward")
                 .on_press(Message::Room(RoomMessage::Focus(id)))
