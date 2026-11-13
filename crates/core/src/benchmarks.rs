@@ -1,5 +1,5 @@
-//! The team's benchmarks, from `parley benchmarks list <project> --json`, for the pages to
-//! show beside the machines they ran on. All of Parley's shapes stay in this file.
+//! The team's benchmarks, from a command the person gives, for the pages to show beside the
+//! machines they ran on. All of its output's shapes stay in this file.
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -12,15 +12,15 @@ use crate::room::Feed;
 /// Measurements land nightly or by hand, so a look every few minutes misses nothing.
 const POLL: Duration = Duration::from_secs(300);
 
-/// Reads `projects`, each `project` or `project/slug-prefix`, from the Parley room at `room`
-/// into `feed` for as long as the process runs.
-pub fn spawn(feed: Feed, room: String, projects: Vec<String>) {
+/// Reads `projects`, each `project` or `project/slug-prefix`, into `feed` for as long as the
+/// process runs, from what `command`, a shell command with `{project}` in it, prints.
+pub fn spawn(feed: Feed, command: String, projects: Vec<String>) {
     std::thread::spawn(move || {
         loop {
             let mut found = Vec::new();
             for wanted in &projects {
                 let (project, prefix) = wanted.split_once('/').unwrap_or((wanted, ""));
-                match look(&room, project) {
+                match look(&command, project) {
                     Ok(text) => found.extend(
                         benchmarks(&text)
                             .into_iter()
@@ -35,23 +35,19 @@ pub fn spawn(feed: Feed, room: String, projects: Vec<String>) {
     });
 }
 
-fn look(room: &str, project: &str) -> Result<String, String> {
-    let output = Command::new("parley")
-        .args([
-            "benchmarks",
-            "list",
-            project,
-            "--json",
-            "--no-input",
-            "--room",
-            room,
-        ])
+fn look(command: &str, project: &str) -> Result<String, String> {
+    let output = Command::new("sh")
+        .args(["-c", &command.replace("{project}", project)])
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| format!("parley: {error}"))?;
+        .map_err(|error| format!("cannot run the benchmarks command: {error}"))?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
-        return Err(said.lines().next().unwrap_or("parley failed").to_string());
+        return Err(said
+            .lines()
+            .next()
+            .unwrap_or("the benchmarks command failed")
+            .to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

@@ -111,12 +111,12 @@ async fn serve_team() {
     axum::serve(listener, app).await.expect("serve");
 }
 
-/// The benchmarks of the Parley projects in `CLAUDO_BENCHMARKS` (`project` or
-/// `project/slug-prefix`, comma separated), from the room at `CLAUDO_PARLEY_ROOM`.
+/// The benchmarks of the projects in `CLAUDO_BENCHMARKS` (`project` or `project/slug-prefix`,
+/// comma separated), from what `CLAUDO_BENCHMARKS_COMMAND` prints for each.
 fn benchmarks(hub: &Hub) {
-    let (Ok(projects), Ok(room)) = (
+    let (Ok(projects), Ok(command)) = (
         std::env::var("CLAUDO_BENCHMARKS"),
-        std::env::var("CLAUDO_PARLEY_ROOM"),
+        std::env::var("CLAUDO_BENCHMARKS_COMMAND"),
     ) else {
         return;
     };
@@ -126,7 +126,7 @@ fn benchmarks(hub: &Hub) {
         .filter(|project| !project.is_empty())
         .map(str::to_string)
         .collect();
-    claudo_core::benchmarks::spawn(hub.feed("benchmarks"), room, projects);
+    claudo_core::benchmarks::spawn(hub.feed("benchmarks"), command, projects);
 }
 
 async fn team_socket(ws: WebSocketUpgrade, State(hub): State<Hub>) -> impl IntoResponse {

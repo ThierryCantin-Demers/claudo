@@ -863,7 +863,7 @@ pub struct QuickPrompt {
     pub text: String,
 }
 
-/// A benchmark a team records in Parley, with its latest measurements.
+/// A benchmark a team records, with its latest measurements.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Benchmark {
     pub slug: String,

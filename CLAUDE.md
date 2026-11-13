@@ -505,11 +505,12 @@ wrote it.
   `avahi-publish -a -R` running for that name at its current address, so the link follows
   whichever computer serves the page. An Android browser reaches neither the name nor the address
   until it is granted the Nearby devices permission.
-- **Benchmarks** (`core/src/benchmarks.rs`): with `CLAUDO_BENCHMARKS` (Parley projects, each
-  `project` or `project/slug-prefix`, comma separated) and `CLAUDO_PARLEY_ROOM` (the room's
-  address) set, the daemon, team page included, reads `parley benchmarks list <project> --json`
-  every 5 minutes and sends `ServerEvent::Benchmarks`. `install-daemon` keeps both from the
-  shell that runs it. The page (`egui/src/benchmarks.rs`, a tab beside the machines) shows a
+- **Benchmarks** (`core/src/benchmarks.rs`): with `CLAUDO_BENCHMARKS` (projects, each
+  `project` or `project/slug-prefix`, comma separated) and `CLAUDO_BENCHMARKS_COMMAND` (a shell
+  command with `{project}` in it, printing that project's benchmarks as JSON) set, the daemon,
+  team page included, runs the command for each project every 5 minutes and sends
+  `ServerEvent::Benchmarks`. `install-daemon` and `install-team` keep both from the shell that
+  runs them. The service behind the command is private: never name it in this repository. The page (`egui/src/benchmarks.rs`, a tab beside the machines) shows a
   table for the benchmarks that measure the same quantities (`claudo_room::benchmarks`): each
   newest value, a bar against its column's best and the change since the measurement before.
 - **The whole room for apps**: the daemon also serves on `$XDG_RUNTIME_DIR/claudo-room.sock`

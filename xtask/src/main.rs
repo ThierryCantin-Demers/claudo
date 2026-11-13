@@ -324,7 +324,7 @@ fn install_daemon(others: &[String], no_dibs: bool) -> Result<(), String> {
         environment.push("CLAUDO_DIBS=off".to_string());
     }
     // Which benchmarks the page shows, as the installing shell says.
-    for name in ["CLAUDO_BENCHMARKS", "CLAUDO_PARLEY_ROOM"] {
+    for name in ["CLAUDO_BENCHMARKS", "CLAUDO_BENCHMARKS_COMMAND"] {
         if let Ok(value) = env::var(name) {
             environment.push(format!("{name}={value}"));
         }
@@ -395,7 +395,7 @@ fn install_team(name: Option<&str>, machines: Option<String>) -> Result<(), Stri
     let unit = config_home()?.join(format!("systemd/user/{TEAM_UNIT}"));
     fs::create_dir_all(unit.parent().unwrap())
         .map_err(|e| format!("cannot create {}: {e}", unit.parent().unwrap().display()))?;
-    // dibs and parley are found on the installing shell's PATH, not systemd's.
+    // dibs and the benchmarks command are found on the installing shell's PATH, not systemd's.
     let mut environment = vec![
         format!("PATH={}", env::var("PATH").unwrap_or_default()),
         format!("CLAUDO_PORT={TEAM_PORT}"),
@@ -405,7 +405,11 @@ fn install_team(name: Option<&str>, machines: Option<String>) -> Result<(), Stri
     if let Some(machines) = machines {
         environment.push(format!("CLAUDO_TEAM_MACHINES={machines}"));
     }
-    for variable in ["CLAUDO_BENCHMARKS", "CLAUDO_PARLEY_ROOM", "SSH_AUTH_SOCK"] {
+    for variable in [
+        "CLAUDO_BENCHMARKS",
+        "CLAUDO_BENCHMARKS_COMMAND",
+        "SSH_AUTH_SOCK",
+    ] {
         if let Ok(value) = env::var(variable) {
             environment.push(format!("{variable}={value}"));
         }
@@ -436,8 +440,10 @@ fn install_team(name: Option<&str>, machines: Option<String>) -> Result<(), Stri
     systemctl(&["restart", TEAM_UNIT])?;
     println!("installed {}", bin.display());
     println!("service {}", unit.display());
-    if env::var("CLAUDO_BENCHMARKS").is_err() || env::var("CLAUDO_PARLEY_ROOM").is_err() {
-        println!("no benchmarks: set CLAUDO_BENCHMARKS and CLAUDO_PARLEY_ROOM and install again");
+    if env::var("CLAUDO_BENCHMARKS").is_err() || env::var("CLAUDO_BENCHMARKS_COMMAND").is_err() {
+        println!(
+            "no benchmarks: set CLAUDO_BENCHMARKS and CLAUDO_BENCHMARKS_COMMAND and install again"
+        );
     }
     match &name {
         Some(name) => println!("the team page: http://{name}:{TEAM_PORT}/"),
