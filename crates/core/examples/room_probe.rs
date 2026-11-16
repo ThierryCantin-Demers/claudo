@@ -18,12 +18,14 @@ fn main() {
         .unwrap_or(30);
     let room = Arc::new(Mutex::new(Room::default()));
     claudo_core::herdr::spawn(Feed::new(room.clone(), "herdr"));
-    claudo_core::runs::spawn(Feed::new(room.clone(), "runs"));
+    let open = claudo_core::github::Open::watch();
+    claudo_core::runs::spawn(Feed::new(room.clone(), "runs"), open.clone());
     claudo_core::board::spawn(Feed::notes(room.clone(), "board"));
     claudo_core::dibs::spawn(Feed::new(room.clone(), "dibs"));
     claudo_core::transcripts::spawn(
         Feed::notes(room.clone(), "transcripts"),
         Feed::new(room.clone(), "subagents"),
+        open,
     );
     let (events, mut heard) = unbounded_channel();
     room.lock().unwrap().connect(1, events);

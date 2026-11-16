@@ -6,12 +6,12 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use claudo_protocol::{Node, NodeKind, NodeState, Provider, PullRequest};
 use serde_json::Value;
 
+use crate::github::Open;
 use crate::room::Feed;
 
 /// How often the transcripts are looked at. One is read again only once it changed.
@@ -24,9 +24,6 @@ const RECENT: Duration = Duration::from_secs(12 * 60 * 60);
 /// or a long reply can push far from the end.
 const TAIL: u64 = 1 << 20;
 
-/// How often GitHub is asked which pull requests are still open.
-const GITHUB_POLL: Duration = Duration::from_secs(3 * 60);
-
 /// A subagent whose transcript has not changed for this long, with no end read, died with
 /// the agent that ran it. One waiting on a command in the background, which writes nothing
 /// meanwhile, is given until `RECENT`.
@@ -34,25 +31,14 @@ const SUBAGENT_STALE: Duration = Duration::from_secs(60 * 60);
 
 /// Reads the transcripts into `feed`, a collector of notes, and the subagents running now
 /// into `subagents`, for as long as the process runs.
-pub fn spawn(feed: Feed, subagents: Feed) {
+pub fn spawn(feed: Feed, subagents: Feed, open: Open) {
     let Some(projects) = crate::sessions::claude_projects_dir() else {
         return;
     };
-    let open: Arc<Mutex<HashMap<String, PullRequest>>> = Arc::default();
-    let asked = open.clone();
-    std::thread::spawn(move || {
-        loop {
-            // A failed look keeps what the last one said.
-            if let Some(now_open) = crate::github::open_pull_requests() {
-                *asked.lock().unwrap() = now_open;
-            }
-            std::thread::sleep(GITHUB_POLL);
-        }
-    });
     std::thread::spawn(move || {
         let mut transcripts = Transcripts::default();
         loop {
-            let open = open.lock().unwrap().clone();
+            let open = open.now();
             let (notes, running) = transcripts.scan(&projects, SystemTime::now(), &open);
             feed.replace(notes);
             subagents.replace(running);

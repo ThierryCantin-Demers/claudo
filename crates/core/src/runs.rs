@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use claudo_protocol::{Node, NodeKind, NodeState, Provider};
+use claudo_protocol::{Node, NodeKind, NodeState, Provider, PullRequest};
 use serde_json::Value;
 
+use crate::github::Open;
 use crate::room::Feed;
 
 /// How often the folders are looked at. A `meta.json` is read again only once it changed.
@@ -27,14 +28,14 @@ const KEPT: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// Reads the runs in `$CLAUDO_AGENT_RUNS`, or else `agent-runs` in the XDG state directory,
 /// into `feed` for as long as the process runs.
-pub fn spawn(feed: Feed) {
+pub fn spawn(feed: Feed, open: Open) {
     let Some(root) = root() else {
         return;
     };
     std::thread::spawn(move || {
         let mut runs = Runs::default();
         loop {
-            feed.replace(runs.scan(&root, SystemTime::now()));
+            feed.replace(runs.scan(&root, SystemTime::now(), &open.now()));
             std::thread::sleep(POLL);
         }
     });
@@ -59,7 +60,12 @@ struct Runs {
 }
 
 impl Runs {
-    fn scan(&mut self, root: &Path, now: SystemTime) -> Vec<Node> {
+    fn scan(
+        &mut self,
+        root: &Path,
+        now: SystemTime,
+        open: &HashMap<String, PullRequest>,
+    ) -> Vec<Node> {
         let Ok(folders) = std::fs::read_dir(root) else {
             self.read.clear();
             return Vec::new();
@@ -100,7 +106,7 @@ impl Runs {
                 };
                 if shown {
                     let name = folder.file_name();
-                    nodes.extend(run(&name.to_string_lossy(), meta, digest));
+                    nodes.extend(run(&name.to_string_lossy(), meta, digest, open));
                 }
             }
             read.insert(path, (written, meta));
@@ -157,8 +163,14 @@ fn status(meta: &Value) -> &str {
         .unwrap_or_default()
 }
 
-/// The run, then each Codex sub-agent it fanned out to under it.
-fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
+/// The run, with those of the pull requests it opened still in `open`, then each Codex
+/// sub-agent it fanned out to under it.
+fn run(
+    folder: &str,
+    meta: &Value,
+    digest: Option<String>,
+    open: &HashMap<String, PullRequest>,
+) -> Vec<Node> {
     let text = |pointer: &str| {
         meta.pointer(pointer)
             .and_then(Value::as_str)
@@ -225,7 +237,9 @@ fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
         context: None,
         answered: None,
         provider: provider.clone(),
-        prs: Vec::new(),
+        prs: opened(meta)
+            .filter_map(|link| open.get(link).cloned())
+            .collect(),
         digest,
     }];
     let subagents = meta.get("subagents").and_then(Value::as_array);
@@ -253,6 +267,15 @@ fn run(folder: &str, meta: &Value, digest: Option<String>) -> Vec<Node> {
         });
     }
     nodes
+}
+
+/// The pull requests a `pin-bump` run opened, one per repository it carried the change to.
+fn opened(meta: &Value) -> impl Iterator<Item = &str> {
+    let stages = meta.get("stages").and_then(Value::as_array);
+    stages
+        .into_iter()
+        .flatten()
+        .filter_map(|stage| stage.get("url")?.as_str())
 }
 
 /// A digest without the sections that hold nothing, which an older `codex-review` wrote as
@@ -327,14 +350,14 @@ mod tests {
     fn a_review_sits_under_its_agent_with_its_reviewers_under_it() {
         let root = folder("tree");
         write(&root, "r1", review("running"));
-        let nodes = Runs::default().scan(&root, SystemTime::now());
+        let nodes = Runs::default().scan(&root, SystemTime::now(), &HashMap::new());
         let ids: Vec<_> = nodes.iter().map(|node| node.id.as_str()).collect();
         assert_eq!(ids, ["run:r1", "run:r1/0", "run:r1/1"]);
         let run = &nodes[0];
         assert_eq!(run.parent.as_deref(), Some("session:s1"));
         let mut started = review("running");
         started["parent"]["subagent"] = json!("a1");
-        let from_subagent = super::run("r2", &started, None);
+        let from_subagent = super::run("r2", &started, None, &HashMap::new());
         assert_eq!(
             from_subagent[0].parent.as_deref(),
             Some("subagent:a1|session:s1"),
@@ -369,7 +392,7 @@ mod tests {
                 .map(|node| node.id)
                 .collect()
         };
-        let mut now = shown(runs.scan(&root, SystemTime::now()));
+        let mut now = shown(runs.scan(&root, SystemTime::now(), &HashMap::new()));
         now.sort();
         assert_eq!(
             now,
@@ -377,14 +400,14 @@ mod tests {
             "one that ended well is gone"
         );
         let later = SystemTime::now() + LINGER + Duration::from_secs(60);
-        let nodes = runs.scan(&root, later);
+        let nodes = runs.scan(&root, later, &HashMap::new());
         assert_eq!(
             nodes[0].doing.as_deref(),
             Some("round 2 of 3, waiting on its agent")
         );
         assert_eq!(shown(nodes), ["run:waiting"]);
         assert!(
-            runs.scan(&root, later + STALE).is_empty(),
+            runs.scan(&root, later + STALE, &HashMap::new()).is_empty(),
             "a run that died quietly"
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -397,7 +420,7 @@ mod tests {
         write(&root, "unread", review("done"));
         std::fs::write(root.join("read/digest.md"), "# Review of alpha, main\n").unwrap();
         let mut runs = Runs::default();
-        let nodes = runs.scan(&root, SystemTime::now());
+        let nodes = runs.scan(&root, SystemTime::now(), &HashMap::new());
         let ids: Vec<_> = nodes.iter().map(|node| node.id.as_str()).collect();
         assert_eq!(ids, ["run:read", "run:read/0", "run:read/1"]);
         assert_eq!(nodes[0].state, Some(NodeState::Done));
@@ -406,7 +429,10 @@ mod tests {
             nodes[0].digest.as_deref(),
             Some("# Review of alpha, main\n")
         );
-        assert!(runs.scan(&root, SystemTime::now() + KEPT).is_empty());
+        assert!(
+            runs.scan(&root, SystemTime::now() + KEPT, &HashMap::new())
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -430,7 +456,7 @@ mod tests {
         deep["budget"] = json!({"used": 12, "allowed": 40});
         write(&root, "deep", deep);
         let doing: BTreeMap<_, _> = Runs::default()
-            .scan(&root, SystemTime::now())
+            .scan(&root, SystemTime::now(), &HashMap::new())
             .into_iter()
             .filter_map(|node| Some((node.id, node.doing?)))
             .collect();
@@ -448,10 +474,18 @@ mod tests {
     #[test]
     fn a_folder_without_runs_shows_none() {
         let root = folder("missing");
-        assert!(Runs::default().scan(&root, SystemTime::now()).is_empty());
+        assert!(
+            Runs::default()
+                .scan(&root, SystemTime::now(), &HashMap::new())
+                .is_empty()
+        );
         std::fs::create_dir_all(root.join("half")).unwrap();
         std::fs::write(root.join("half/meta.json"), "{\"kind\":").unwrap();
-        assert!(Runs::default().scan(&root, SystemTime::now()).is_empty());
+        assert!(
+            Runs::default()
+                .scan(&root, SystemTime::now(), &HashMap::new())
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -465,7 +499,7 @@ mod tests {
         std::fs::File::create(root.join("killed/.lock")).unwrap();
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
         let runs: Vec<_> = Runs::default()
-            .scan(&root, SystemTime::now())
+            .scan(&root, SystemTime::now(), &HashMap::new())
             .into_iter()
             .filter(|node| node.parent.as_deref() == Some("session:s1"))
             .map(|node| node.id)
@@ -473,5 +507,34 @@ mod tests {
         assert_eq!(runs, ["run:live"]);
         drop(lock);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_bump_shows_the_pull_requests_it_opened_that_are_still_open() {
+        let meta = json!({
+            "kind": "bump",
+            "provider": "pin-bump",
+            "parent": {"session": "s1"},
+            "status": "waiting-parent",
+            "stages": [
+                {"repo": "middle", "status": "merged", "url": "https://github.com/acme/middle/pull/3"},
+                {"repo": "top", "status": "open", "url": "https://github.com/acme/top/pull/8"},
+                {"repo": "app", "status": "pending"},
+            ],
+        });
+        let pr = |repo: &str, number: u64| PullRequest {
+            url: format!("https://github.com/{repo}/pull/{number}"),
+            number,
+            title: "Bump the pins".to_string(),
+            repo: repo.to_string(),
+            draft: false,
+            checks: Some(claudo_protocol::Checks::Running),
+        };
+        let open: HashMap<_, _> = [pr("acme/top", 8), pr("acme/other", 2)]
+            .into_iter()
+            .map(|pr| (pr.url.clone(), pr))
+            .collect();
+        let nodes = super::run("b1", &meta, None, &open);
+        assert_eq!(nodes[0].prs, [pr("acme/top", 8)]);
     }
 }

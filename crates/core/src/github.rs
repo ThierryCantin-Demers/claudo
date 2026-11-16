@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use claudo_protocol::{Checks, PullRequest};
@@ -20,8 +20,37 @@ const OPEN: &str = "query($endCursor: String) { search(query: \
 /// How long GitHub is given to answer.
 const LIMIT: Duration = Duration::from_secs(60);
 
+/// How often GitHub is asked which pull requests are still open.
+const POLL: Duration = Duration::from_secs(3 * 60);
+
+/// The person's open pull requests by link, as GitHub last said, shared by the collectors.
+#[derive(Clone, Default)]
+pub struct Open(Arc<Mutex<HashMap<String, PullRequest>>>);
+
+impl Open {
+    /// Asks GitHub every `POLL` for as long as the process runs.
+    pub fn watch() -> Self {
+        let open = Open::default();
+        let asked = open.clone();
+        std::thread::spawn(move || {
+            loop {
+                // A failed look keeps what the last one said.
+                if let Some(now_open) = open_pull_requests() {
+                    *asked.0.lock().unwrap() = now_open;
+                }
+                std::thread::sleep(POLL);
+            }
+        });
+        open
+    }
+
+    pub fn now(&self) -> HashMap<String, PullRequest> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 /// Every open pull request the person authored, by its link. None when `gh` cannot say.
-pub fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
+fn open_pull_requests() -> Option<HashMap<String, PullRequest>> {
     let mut child = Command::new("gh")
         .args(["api", "graphql", "--paginate", "--slurp", "-f"])
         .arg(format!("query={OPEN}"))

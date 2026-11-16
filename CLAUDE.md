@@ -546,6 +546,8 @@ wrote it.
   (`round_depth`, `budget`). `codex-review` holds an flock on the run's `.lock` while it runs, so one
   marked running whose lock `/proc/locks` does not list was killed and is dropped; a run
   that keeps no lock is dropped once untouched for 12 hours.
+  A `pin-bump` run (kind `bump`) opens its pull requests itself, so they show on its node
+  (`prs`, from each of its `stages`' `url`) while open, from the same search as the transcripts'.
   A run a Claude subagent started names it (`parent.subagent`, from the
   `CLAUDE_SUBAGENT_ID` a PreToolUse hook gives a subagent's shell), so it hangs under
   `subagent:<id>|session:<id>`: a parent may list places, the most precise first, and the
